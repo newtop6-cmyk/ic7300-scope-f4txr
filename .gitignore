@@ -1,1 +1,5 @@
 __pycache__/
+# sauvegardes avant modification et journaux
+*.avant-*
+*.origine
+*.log

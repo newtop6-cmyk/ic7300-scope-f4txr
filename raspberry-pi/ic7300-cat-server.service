@@ -1,0 +1,10 @@
+[Unit]
+Description=Serveur CAT IC-7300 (port CI-V sur le réseau, port 7300)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/ic7300-scope/cat_server.py --serial /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_IC-7300_03011996-if00-port0 --allow 127.0.0.0/8,192.168.1.0/24,100.64.0.0/10
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

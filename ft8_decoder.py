@@ -42,7 +42,9 @@ class Ft8Decoder:
     def __init__(self, rate):
         self.rate = rate
         self.auto_pitch = True
-        self.available = shutil.which("jt9") is not None
+        # jt9 : dans le PATH, sinon celui copié dans ~/.local/bin (extrait du paquet WSJT-X)
+        self.jt9 = shutil.which("jt9") or shutil.which(os.path.expanduser("~/.local/bin/jt9"))
+        self.available = self.jt9 is not None
         self.synchronized = clock_synchronized()
         self._dir = tempfile.mkdtemp(prefix="ic7300-ft8-")
         self._buffer = np.zeros(0, np.float32)
@@ -145,7 +147,7 @@ class Ft8Decoder:
                 w.setframerate(JT9_RATE)
                 w.writeframes(pcm.tobytes())
             result = subprocess.run(
-                ["jt9", "-8", "-d", str(DEPTH), "-p", str(SLOT),
+                [self.jt9, "-8", "-d", str(DEPTH), "-p", str(SLOT),
                  "-a", self._dir, "-t", self._dir, path],
                 capture_output=True, text=True, timeout=SLOT * 2, cwd=self._dir)
             os.remove(path)
