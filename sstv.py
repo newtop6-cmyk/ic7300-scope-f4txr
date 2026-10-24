@@ -67,7 +67,16 @@ def _pd(name, vis, width, height, scan):
                  ("U", scan), ("Y1", scan)], "pd", rows_per_period=2)
 
 
+def _wraase(name, vis, scan):
+    """Wraase SC2 : synchro, palier, puis R, G, B pleine ligne (sans séparateur)."""
+    return Mode(name, vis, 320, 256,
+                [("sync", 5.5225), ("porch", 0.5), ("R", scan), ("G", scan),
+                 ("B", scan)], "rgb")
+
+
 MODES = [
+    _wraase("Wraase SC2-180", 55, 235.0),
+    _wraase("Wraase SC2-120", 63, 156.5),
     _martin("Martin M1", 44, 146.432),
     _martin("Martin M2", 40, 73.216),
     _scottie("Scottie S1", 60, 138.24),
@@ -217,6 +226,8 @@ class SstvDecoder:
         self._prev = None
         self._lock = threading.Lock()
         self.finished = []          # (mode, image) terminées, à enregistrer
+        self.tune_offset = 0.0      # Hz ajoutés (correspondant mal calé : tops ≠ 1200 Hz)
+        self.patient = False        # image sans en-tête : tolère plus de tops manqués
         self.reset()
 
     def reset(self):
@@ -258,7 +269,8 @@ class SstvDecoder:
         else:
             z = np.concatenate([[z[0]], z])
         self._prev = z[-1]
-        freq = CENTER_HZ + np.angle(z[1:] * np.conj(z[:-1])) * WORK_RATE / (2 * np.pi)
+        freq = (CENTER_HZ + self.tune_offset
+                + np.angle(z[1:] * np.conj(z[:-1])) * WORK_RATE / (2 * np.pi))
         with self._lock:
             self._freq = np.concatenate([self._freq, freq.astype(np.float32)])
             if self.mode is None:
@@ -315,7 +327,38 @@ class SstvDecoder:
             return
         self._searched = self._base + max(last, first) * MS
 
+    def start_without_vis(self, mode):
+        """Image prise en cours de route (en-tête VIS manqué) : on se cale sur
+        le premier top de synchro des dernières secondes et on décode la suite
+        avec ce mode (trouvé par la surveillance au rythme des tops)."""
+        with self._lock:
+            if self.mode is not None:
+                return False
+            blocks = len(self._freq) // MS
+            if blocks < 200:
+                return False
+            ms = np.median(self._freq[:blocks * MS].reshape(blocks, MS), axis=1)
+            low = ms < 1300
+            i = 0
+            while i < blocks:
+                if low[i]:
+                    j = i
+                    while j < blocks and low[j]:
+                        j += 1
+                    if 3 <= j - i <= 25:
+                        start = (i - mode.sync_offset) * MS
+                        if start < 0:
+                            start += mode.period * MS
+                        self._begin(mode, self._base + start)
+                        self.patient = True
+                        return True
+                    i = j
+                else:
+                    i += 1
+            return False
+
     def _begin(self, mode, start):
+        self.patient = False
         self.mode = mode
         self.image = np.zeros((mode.height, mode.width, 3), np.uint8)
         self.line = 0
@@ -339,7 +382,7 @@ class SstvDecoder:
             begin = self._start + self._offset + self.line * period
             self._decode_period(begin)
             self.line += 1
-            if self._missed > 12 and self.line > 20:
+            if self._missed > (40 if self.patient else 12) and self.line > 20:
                 break                   # plus de synchro : fin du signal
         self._finish()
 

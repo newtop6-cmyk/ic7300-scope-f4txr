@@ -130,11 +130,24 @@ class QsoHunter(QtCore.QObject):
             self.finished.emit(False)
             return
         self.low, self.high, self.side = PHONE[band]
+        saved = getattr(self, "saved", None)
+        self.saved = None
         self.band = band
         self.visited = set()
         self.active = True
         if w.mode_combo.currentText() != self.side:
             w.set_mode_by_hunter(self.side)
+        if saved and saved["band"] == band and not self.scan_only:
+            # nouvel appui après un QSO français : on passe au suivant, sans
+            # réécouter les stations déjà faites
+            self.visited = saved["visited"]
+            self.queue = saved["queue"]
+            self._say("Recherche : QSO français suivant…")
+            if self.queue:
+                self._next_candidate()
+            else:
+                self._start_sweep()
+            return
         self._start_sweep()
 
     def stop(self, found=False):
@@ -228,7 +241,8 @@ class QsoHunter(QtCore.QObject):
                 carrier = self.map_low + lo * BIN_HZ - 300
             # les stations sont presque toujours sur un kHz rond
             carrier = int(round(carrier / 1000) * 1000)
-            if self.low - 3000 <= carrier <= self.high + 3000 and carrier not in self.visited:
+            if self.low - 3000 <= carrier <= self.high + 3000 \
+                    and all(abs(carrier - v) > 2000 for v in self.visited):   # déjà écouté
                 found.append((float(smooth[i] - floor), carrier))
         return [c for _, c in sorted(found, reverse=True)]
 
@@ -348,7 +362,16 @@ class QsoHunter(QtCore.QObject):
         if lang == "fr" and prob >= FR_PROB:
             text = res.get("text", "")
             self._say(f"QSO en français trouvé sur {where} !  « {text[:80]} »")
-            # on reste dessus 20 s ; le bouton RESTER ICI arrête la recherche
+            if not self.scan_only:
+                # on s'arrête dessus ; un nouvel appui ira au QSO français suivant
+                self.saved = {"band": self.band,
+                              "visited": set(self.visited) | {self.target},
+                              "queue": list(self.queue)}
+                self.state = "found"
+                self.found.emit(self.target, text)
+                self.stop(True)
+                return
+            # scan : on reste dessus 20 s ; le bouton RESTER ICI arrête le scan
             self.state = "hold"
             self.hold_left = HOLD_S
             self.found.emit(self.target, text)

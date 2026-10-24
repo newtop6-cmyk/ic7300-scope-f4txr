@@ -21,6 +21,7 @@ HOP_S = 0.1                     # une analyse toutes les 0,1 s
 LOW, HIGH = 300, 1600           # harmoniques cherchées dans cette bande (Hz audio)
 F0S = np.arange(80, 300, 2)     # hauteurs de voix essayées
 D_MAX = 300                     # décalage cherché : ± 300 Hz
+D_WIDE = 1200                   # après appui sur CALAGE AUTO BLU : ± 1200 Hz
 D_STEP = 2
 SMOOTH_HZ = 121                 # voisinage pour faire ressortir les pics
 VOICED = 0.5                    # score mini d'une tranche voisée
@@ -36,6 +37,15 @@ HOLD_S = 1.0                    # attente après un changement de fréquence (so
 FORGET = 0.97                   # oubli progressif (autre correspondant…)
 MIRROR = 1400                   # Hz audio : centre du retournement du spectre
 FLIP_MARGIN = 0.7               # changer de bande latérale demande un pic plus net
+STABLE_S = 3.0                  # mesure stable pendant 3 s de voix : on corrige
+STABLE_N = 12                   # … sur au moins 12 analyses voisées
+STABLE_HZ = 12                  # … sans bouger de plus de 12 Hz
+STABLE_RATIO = 0.8              # … avec un pic quand même dominant
+ROUND_PREF = 0.6                # un pic sur un kHz rond à ≥ 60 % du meilleur l'emporte
+ROUND_WIN = 25                  # Hz : tolérance de ce pic autour du kHz rond
+KHZ_FRAMES = 5                  # rattrapage : tranches voisées avant de choisir le kHz rond
+KHZ_WIN = 60                    # Hz : tolérance autour de chaque kHz rond essayé
+KHZ_MARGIN = 0.8                # 2e kHz rond < 80 % du 1er, sinon on attend
 
 
 class Track:
@@ -72,17 +82,19 @@ class Track:
         self.frames += 1
         return True
 
-    def peak(self, ds, margin):
-        """(d, net, rapport) : meilleur d, s'il ressort nettement des autres,
-        et 2e pic / 1er pic (plus c'est petit, plus c'est net)."""
-        acc = self.acc - np.median(self.acc)
+    def peak(self, ds, margin, limit=D_MAX):
+        """(d, net, rapport) : meilleur d (dans ± limit), s'il ressort nettement
+        des autres, et 2e pic / 1er pic (plus c'est petit, plus c'est net)."""
+        inside = np.abs(ds) <= limit
+        acc = self.acc - np.median(self.acc[inside])
+        acc = np.where(inside, acc, -np.inf)
         i = int(np.argmax(acc))
-        far = np.abs(ds - ds[i]) > 30
+        far = (np.abs(ds - ds[i]) > 30) & inside
         ratio = float(acc[far].max() / acc[i]) if acc[i] > 0 else 1.0
         # un pic collé au bord de la plage n'est pas fiable
-        clear = ratio <= margin and abs(ds[i]) <= ds[-1] - 40
+        clear = ratio <= margin and abs(ds[i]) <= limit - 40
         d = float(ds[i])
-        if 0 < i < len(ds) - 1:                            # affiner entre deux points
+        if 0 < i < len(ds) - 1 and inside[i - 1] and inside[i + 1]:   # affiner
             a, b, c = acc[i - 1:i + 2]
             if a - 2 * b + c < 0:
                 d += D_STEP * 0.5 * (a - c) / (a - 2 * b + c)
@@ -95,12 +107,15 @@ class SsbTuner:
         self.hop = int(rate * HOP_S)
         self.window = np.hanning(FRAME).astype(np.float32)
         self.freqs = np.arange(PAD // 2 + 1) * rate / PAD
-        self.top = HIGH + D_MAX + SMOOTH_HZ
+        self.top = HIGH + D_WIDE + SMOOTH_HZ
         self.grid = np.arange(max(self.top, 2 * MIRROR) + 1)   # 1 Hz
-        self.mirror_idx = 2 * MIRROR - np.arange(self.top + 1)  # spectre retourné
+        self.mirror_idx = np.clip(2 * MIRROR - np.arange(self.top + 1), 0, None)  # spectre retourné
         self.mirror = False             # chercher aussi l'autre bande latérale
         self.kernel = np.ones(SMOOTH_HZ) / SMOOTH_HZ
-        self.ds = np.arange(-D_MAX, D_MAX + 1, D_STEP)
+        self.ds = np.arange(-D_WIDE, D_WIDE + 1, D_STEP)
+        self.d_limit = D_MAX            # plage utilisée : D_MAX, ou D_WIDE (rattrapage)
+        self.candidates = None          # rattrapage : écarts d des kHz ronds proches
+        self.round_ds = []              # écarts d des kHz ronds dans la plage (toujours)
         # positions (Hz) des harmoniques pour chaque F0 et chaque d
         ks = np.arange(1, HIGH // F0S[0] + 1)
         base = F0S[:, None] * ks[None, :]                  # (F0, k)
@@ -134,6 +149,8 @@ class SsbTuner:
                 new.history = prev.history[-HISTORY:]
         self.hold = int(self.rate * HOLD_S)
         self.status = "attente de voix"
+        self.clock = 0.0                # secondes de son analysées depuis le reset
+        self.recent = []                # (instant, d) des dernières analyses voisées
 
     @property
     def frames(self):
@@ -154,6 +171,7 @@ class SsbTuner:
             return None
         frame = self.buf[-FRAME:]
         self.buf = self.buf[-FRAME:]
+        self.clock += HOP_S
         return self._analyse(frame)
 
     def _analyse(self, frame):
@@ -171,11 +189,11 @@ class SsbTuner:
             self.status = "écoute du bruit de fond…"
             return None
         if voiced and self.normal.frames >= 5:
-            self.estimate = self.normal.peak(self.ds, 1.0)[0]
+            self.estimate = self.normal.peak(self.ds, 1.0, self.d_limit)[0]
         # l'autre bande latérale, si elle seule donne une voix cohérente
         if self.mirror and self.flipped.frames >= MIN_FRAMES:
-            dm, clear_m, ratio_m = self.flipped.peak(self.ds, FLIP_MARGIN)
-            _, clear_n, ratio_n = self.normal.peak(self.ds, MARGIN)
+            dm, clear_m, ratio_m = self.flipped.peak(self.ds, FLIP_MARGIN, self.d_limit)
+            _, clear_n, ratio_n = self.normal.peak(self.ds, MARGIN, self.d_limit)
             if clear_m and (not clear_n or ratio_m < ratio_n):
                 self.status = "correspondant sur l'autre bande latérale"
                 return ("flip", 2 * MIRROR - dm)
@@ -184,17 +202,31 @@ class SsbTuner:
                 self.status = "voix trop faible dans le bruit"
             return None
         frames = self.normal.frames
+        choice = self._pick_khz()
+        if choice is not None:
+            return ("shift", choice)
         if frames < QUICK_FRAMES:
             self.status = f"écoute de la voix… {int(frames)}/{QUICK_FRAMES}"
             return None
         margin = MARGIN if frames >= MIN_FRAMES else QUICK_MARGIN
-        d, clear, ratio = self.normal.peak(self.ds, margin)
+        d, clear, ratio = self.normal.peak(self.ds, margin, self.d_limit)
         if clear and self.flipped.frames >= 3:
             # l'écoute à l'envers doit être nettement moins nette
-            clear = ratio < 0.8 * self.flipped.peak(self.ds, 1.0)[2]
+            clear = ratio < 0.8 * self.flipped.peak(self.ds, 1.0, self.d_limit)[2]
+        # autre façon d'être sûr : la même mesure, à quelques Hz près, pendant
+        # plusieurs secondes de voix (pic pas très net mais qui ne bouge pas)
+        self.recent = [(t, v) for t, v in self.recent if t > self.clock - STABLE_S]
+        self.recent.append((self.clock, d))
+        if not clear and ratio <= STABLE_RATIO and len(self.recent) >= STABLE_N:
+            values = [v for _, v in self.recent]
+            span = self.clock - self.recent[0][0]
+            flipped_ratio = self.flipped.peak(self.ds, 1.0, self.d_limit)[2]
+            clear = (max(values) - min(values) <= STABLE_HZ
+                     and span >= 0.8 * STABLE_S and ratio < flipped_ratio)
         if not clear:
             self.status = "voix peu nette, calage en attente"
             return None
+        d = self._prefer_round(d)
         self.estimate = d
         if abs(d) < MIN_SHIFT:
             self.locked = True
@@ -204,6 +236,54 @@ class SsbTuner:
         self.status = f"correction {d:+.0f} Hz"
         return ("shift", d)
 
+    def _prefer_round(self, d):
+        """Une voix très régulière (hauteur F0 qui bouge peu) donne aussi des
+        pics à d ± F0 : en cas de doute, le kHz rond l'emporte, car les stations
+        BLU y sont presque toujours."""
+        inside = np.abs(self.ds) <= self.d_limit
+        acc = self.normal.acc - np.median(self.normal.acc[inside])
+        best = float(acc[int(np.argmin(np.abs(self.ds - d)))])
+        if best <= 0:
+            return d
+        choice, value = d, 0.0
+        for dr in self.round_ds:
+            if abs(dr) > self.d_limit:
+                continue
+            near = np.abs(self.ds - dr) <= ROUND_WIN
+            v = float(acc[near].max()) if near.any() else 0.0
+            if v >= ROUND_PREF * best and v > value:
+                choice, value = float(dr), v
+        return choice
+
+    def _pick_khz(self):
+        """Rattrapage : parmi les kHz ronds proches (écarts d dans candidates),
+        celui où la voix colle le mieux. Bien plus sûr sur un signal faible que
+        de chercher d librement : on ne compare que 2 ou 3 possibilités."""
+        if not self.candidates or self.normal.frames < KHZ_FRAMES:
+            return None
+        acc = self.normal.acc - np.median(self.normal.acc[np.abs(self.ds) <= self.d_limit])
+        scores = []
+        for d in self.candidates:
+            near = np.abs(self.ds - d) <= KHZ_WIN
+            if near.any():
+                scores.append((float(acc[near].max()), d))
+        if len(scores) < 2:
+            return None
+        scores.sort(reverse=True)
+        (best, d), (second, _) = scores[0], scores[1]
+        if best <= 0 or second > KHZ_MARGIN * best:
+            self.status = "rattrapage : kHz rond encore incertain"
+            return None
+        self.status = f"rattrapage : kHz rond à {d:+.0f} Hz"
+        return d
+
     def _comb(self, peaks):
-        hits = (peaks[self.pos] - peaks[self.mid]) * self.valid[:, :, None]
-        return hits.sum(axis=1) / self.count[:, None]      # (F0, d)
+        # seulement les d de la plage utilisée (± d_limit) : calcul léger
+        lo = int(np.searchsorted(self.ds, -self.d_limit))
+        hi = int(np.searchsorted(self.ds, self.d_limit, side="right"))
+        hits = (peaks[self.pos[:, :, lo:hi]] - peaks[self.mid[:, :, lo:hi]]) \
+            * self.valid[:, :, None]
+        part = hits.sum(axis=1) / self.count[:, None]      # (F0, d de la plage)
+        out = np.repeat(part.mean(axis=1, keepdims=True), len(self.ds), axis=1)
+        out[:, lo:hi] = part                               # hors plage : neutre
+        return out

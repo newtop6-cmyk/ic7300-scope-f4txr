@@ -23,6 +23,21 @@ def pictures_dir():
 SSTV_DIR = os.path.join(pictures_dir(), "SSTV")
 
 
+def denoise(rgb):
+    """Version plus lisible d'une image reçue dans le bruit : noir et blanc
+    (la couleur est surtout du bruit), rayures lissées, médiane 5 × 5,
+    contraste étiré."""
+    g = rgb.astype(np.float32).mean(axis=2)
+    g[1:-1] = (g[:-2] + 2 * g[1:-1] + g[2:]) / 4
+    pad = np.pad(g, 2, mode="edge")
+    h, w = g.shape
+    stack = [pad[dy:dy + h, dx:dx + w] for dy in range(5) for dx in range(5)]
+    g = np.median(np.stack(stack), axis=0)
+    lo, hi = np.percentile(g, 2), np.percentile(g, 98)
+    g = np.clip((g - lo) * 255 / max(hi - lo, 1), 0, 255).astype(np.uint8)
+    return np.repeat(g[:, :, None], 3, axis=2)
+
+
 def to_qimage(rgb):
     h, w, _ = rgb.shape
     rgb = np.ascontiguousarray(rgb)
@@ -166,6 +181,10 @@ class SstvWindow(QtWidgets.QWidget):
         stamp = datetime.datetime.now().strftime("%Y-%m-%d_%Hh%Mm%S")
         path = os.path.join(SSTV_DIR, f"{stamp}_{name.replace(' ', '')}.png")
         to_qimage(rgb).save(path)
+        try:                            # 2e version, débruitée, plus lisible
+            to_qimage(denoise(rgb)).save(path[:-4] + "_lisible.png")
+        except Exception:
+            pass
         return path
 
     def save_current(self):

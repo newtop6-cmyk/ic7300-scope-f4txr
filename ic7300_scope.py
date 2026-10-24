@@ -27,15 +27,30 @@ from psk31_decoder import Psk31Decoder
 from rtty_decoder import RttyDecoder
 from ft8_decoder import Ft8Decoder
 from sstv_window import SstvWindow
-from ssb_tuner import SsbTuner
+import sstv as sstv_modes
+from sstv_watch import SstvWatch
+from ssb_tuner import SsbTuner, D_MAX, D_WIDE
 import console
 from wifi_bar import WifiBar
+from traffic_bar import TrafficBar
 from mode_detect import analyse as analyse_mode, analyse_station
-from ssb_meter import PlainLed, SsbLed, SsbMeter
+from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
 from pot_knob import PotKnob, ScaleKnob
 from vox_pc import VoxMonitor
-from vintage_meter import VintageSMeter
+from voice_scope import VoiceScope
+from power_knob import MODE as KNOB_MODE, NamePlate, PowerKnob, VintageKnob, ScaleBakelite
+from band_keys import BandKey
+from title_plate import TitlePlate
+from rust_style import AmberLed, MilitaryLever, RustPlate
+from function_selector import FunctionSelector
+from vintage_toggle import ToggleSwitch
+from push_plate import PushPlate
+from drum_display import DrumClock, DrumDisplay
+from function_screen import FunctionScreen, PendingView, SstvLiveView
+from tx_galva import RedButton, TxGalva
+from vintage_switch import BlueLed, LeverSwitch, SilverPlate
+from vintage_meter import VintageSMeter, VintagePowerMeter
 from whistle import Whistle
 from qso_hunter import QsoHunter, find_signals
 from panel_frame import PanelFrame
@@ -59,6 +74,7 @@ CAT_TCP_PORT = 7300
 PULSE_TCP_PORT = 4713
 REMOTE_RX = "ic7300_distant_rx"
 REMOTE_TX = "ic7300_distant_tx"
+REMOTE_RX_PIPE = "ic7300_distant_rx_pipe"   # contient REMOTE_RX : déchargé avec lui
 REMOTE_FORMAT = ["format=s16le", "rate=16000", "channels=1"]
 
 
@@ -158,6 +174,11 @@ ID_POINTS = [(0, 0.0), (97, 10.0), (146, 15.0), (241, 25.0)]      # A
 ALC_ZONE = 120                  # au-delà, l'ALC sort de sa zone sur la radio
 MIN_FREQ = 30_000               # couverture de réception de l'IC-7300
 MAX_FREQ = 74_800_000
+# fréquences d'appel SSTV par bande (surveillées sur le scope de la radio)
+SSTV_CALLING = {"80m": (3_730_000, "LSB"), "40m": (7_165_000, "LSB"),
+                "20m": (14_230_000, "USB"), "17m": (18_160_000, "USB"),
+                "15m": (21_340_000, "USB"), "12m": (24_975_000, "USB"),
+                "10m": (28_680_000, "USB"), "6m": (50_510_000, "USB")}
 SPANS = [2500, 5000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000]
 # zone écoutée autour de la fréquence affichée, en kHz (approximative)
 PASSBANDS = {"LSB": (-3.0, -0.1), "USB": (0.1, 3.0), "CW": (-0.25, 0.25),
@@ -213,6 +234,8 @@ PUSH_3D_MODE = PUSH_3D          # bande / mode choisis : vert aussi
 
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
 FINE_MAX = 300                  # Hz : l'affinage par la voix reste à ± 300 Hz du kHz rond
+PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO BLU
+PULL_SECONDS = 45               # durée du rattrapage
 
 
 # bouton MARCHE / ARRÊT de la radio, même relief que les autres
@@ -328,10 +351,18 @@ def remote_audio(host):
     server = f"server=tcp:{host}:{PULSE_TCP_PORT}"
     commands = [
         # son allégé pour la 4G : mono 16 kHz (≈ 32 Ko/s au lieu de ≈ 190)
-        ["module-tunnel-source", server, f"source={DEFAULT_SOURCE}",
-         f"source_name={REMOTE_RX}", *REMOTE_FORMAT],
-        ["module-tunnel-sink", server, f"sink={RADIO_SINK}", f"sink_name={REMOTE_TX}",
-         *REMOTE_FORMAT],
+        # réception : sortie locale alimentée par rx_relay.py (SSH, retard borné),
+        # vue comme une entrée « ic7300_distant_rx » ; l'ancien tunnel PipeWire
+        # se figeait et accumulait des secondes de retard
+        ["module-null-sink", f"sink_name={REMOTE_RX_PIPE}", *REMOTE_FORMAT,
+         "sink_properties=device.description=IC-7300_reception"],
+        ["module-remap-source", f"master={REMOTE_RX_PIPE}.monitor",
+         f"source_name={REMOTE_RX}", "channels=1",
+         "source_properties=device.description=IC-7300_radio"],
+        # émission : sortie locale « muette », son envoyé au Pi par SSH (plus bas) ;
+        # le tunnel PipeWire de ce PC hachait le son (trous de 100 ms)
+        ["module-null-sink", f"sink_name={REMOTE_TX}", *REMOTE_FORMAT,
+         "sink_properties=device.description=IC-7300_emission"],
         ["module-loopback", f"source={REMOTE_RX}", "latency_msec=60",
          "source_dont_move=true", f"sink_input_properties=node.name={LOOPBACK_STREAM}"],
     ]
@@ -347,23 +378,106 @@ def remote_audio(host):
             error = out.stderr.strip() if out else "pas de réponse"
             raise RuntimeError(f"{command[0]} : {error or 'échec'}")
         modules.append(out.stdout.strip())
+    # son d'émission vers le Pi : flux continu par SSH (silence hors émission),
+    # lu par pw-play sur la carte son de la radio
+    global _TX_KEEPALIVE
+    _TX_KEEPALIVE = subprocess.Popen(
+        ["bash", "-c",
+         f"parec --device={REMOTE_TX}.monitor --raw --format=s16le --rate=16000 "
+         f"--channels=1 --latency-msec=20 --client-name='IC-7300 emission' | "
+         f"ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 "
+         f"marco@{host} 'exec pw-play --raw --target {RADIO_SINK} --rate 16000 "
+         f"--channels 1 --format s16 --latency 100ms -'"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    global _RX_RELAY
+    _RX_RELAY = subprocess.Popen(
+        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "rx_relay.py"), host, DEFAULT_SOURCE, REMOTE_RX_PIPE],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
     return modules
 
 
+_TX_KEEPALIVE = None
+_RX_RELAY = None
+
+
 def remote_audio_present():
-    """Vrai si l'entrée son de la radio distante existe encore ici."""
+    """Vrai si l'entrée ET la sortie son de la radio distante existent encore ici."""
     try:
-        out = subprocess.run(["pactl", "list", "short", "sources"],
-                             capture_output=True, text=True, timeout=5).stdout
+        sources = subprocess.run(["pactl", "list", "short", "sources"],
+                                 capture_output=True, text=True, timeout=5).stdout
+        sinks = subprocess.run(["pactl", "list", "short", "sinks"],
+                               capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         return True                 # pactl muet : ne rien casser
-    return any(line.split("\t")[1:2] == [REMOTE_RX] for line in out.splitlines())
+    rx = any(line.split("\t")[1:2] == [REMOTE_RX] for line in sources.splitlines())
+    tx = any(line.split("\t")[1:2] == [REMOTE_TX] for line in sinks.splitlines())
+    sending = _TX_KEEPALIVE is not None and _TX_KEEPALIVE.poll() is None
+    receiving = _RX_RELAY is not None and _RX_RELAY.poll() is None
+    return rx and tx and sending and receiving
+
+
+RX_MAX_DELAY_MS = 600       # au-delà, la liaison de réception est recréée
+
+
+def remote_rx_delay_ms():
+    """Retard annoncé par la liaison de réception (ms), ou None."""
+    try:
+        out = subprocess.run(["pactl", "list", "sources"], capture_output=True,
+                             text=True, timeout=3, env=PACTL_ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    block = out.split(f"Name: {REMOTE_RX}")
+    if len(block) < 2:
+        return None
+    for line in block[1].splitlines()[:40]:
+        line = line.strip()
+        if line.startswith("Latency:"):
+            try:
+                return int(line.split()[1]) / 1000
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def reload_remote_rx(host):
+    """Recrée seulement la réception (tunnel + écoute) : vide le retard accumulé."""
+    out = subprocess.run(["pactl", "list", "modules", "short"],
+                         capture_output=True, text=True).stdout
+    for line in reversed(out.splitlines()):
+        if REMOTE_RX in line:
+            subprocess.run(["pactl", "unload-module", line.split()[0]], capture_output=True)
+    server = f"server=tcp:{host}:{PULSE_TCP_PORT}"
+    for command in (
+            ["module-tunnel-source", server, f"source={DEFAULT_SOURCE}",
+             f"source_name={REMOTE_RX}", *REMOTE_FORMAT],
+            ["module-loopback", f"source={REMOTE_RX}", "latency_msec=60",
+             "source_dont_move=true", f"sink_input_properties=node.name={LOOPBACK_STREAM}"]):
+        subprocess.run(["pactl", "load-module", *command], capture_output=True, timeout=10)
 
 
 def watch_remote_audio(host, reader, stop):
     """Recrée le son de la radio distante quand il a disparu (coupure réseau,
-    4G...) : PulseAudio supprime alors le tunnel et bascule parec sur le micro."""
-    while not stop.wait(5):
+    4G...) : PulseAudio supprime alors le tunnel et bascule parec sur le micro.
+    Surveille aussi le retard de la réception : le tunnel se fige parfois
+    (après une émission) et accumule plusieurs secondes de retard."""
+    tick = 0
+    late = 0
+    while not stop.wait(1):
+        tick += 1
+        delay = remote_rx_delay_ms()
+        delay = None                    # relais SSH : retard borné par rx_relay.py
+        late = late + 1 if delay is not None and delay > RX_MAX_DELAY_MS else 0
+        if late >= 2:
+            late = 0
+            reload_remote_rx(host)
+            proc = reader.proc
+            if proc:
+                proc.terminate()        # parec repart sur la nouvelle entrée
+            continue
+        if tick % 5:
+            continue
         if remote_audio_present():
             continue
         try:
@@ -379,6 +493,14 @@ def watch_remote_audio(host, reader, stop):
 
 def unload_remote_audio(modules):
     """Décharge les modules donnés, ou tous ceux de --remote (None)."""
+    global _TX_KEEPALIVE, _RX_RELAY
+    for proc in (_TX_KEEPALIVE, _RX_RELAY):
+        if proc:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)     # avec ses ssh/pacat/parec
+            except OSError:
+                pass
+    _TX_KEEPALIVE = _RX_RELAY = None
     if modules is None:
         out = subprocess.run(["pactl", "list", "modules", "short"],
                              capture_output=True, text=True).stdout
@@ -447,6 +569,8 @@ class AudioReader(QtCore.QThread):
     decoder_state = QtCore.pyqtSignal(str, float, bool, bool)  # infos, note, signal, actif
     ssb_state = QtCore.pyqtSignal(object, str, bool)   # écart estimé, état, calé
     ssb_correct = QtCore.pyqtSignal(str, float)        # "shift"/"flip", Hz
+    sstv_seen = QtCore.pyqtSignal(object)              # (mode, Hz des tops) ou None
+    cw_env = QtCore.pyqtSignal(object)                 # réception CW : enveloppe (5 ms)
 
     def __init__(self, source):
         super().__init__()
@@ -457,6 +581,8 @@ class AudioReader(QtCore.QThread):
                          "rtty": RttyDecoder(RATE), "ft8": Ft8Decoder(RATE)}
         self.decoder = None             # décodeur choisi, ou None
         self.sstv = None                # décodeur SSTV quand sa fenêtre est ouverte
+        self.sstv_watch = SstvWatch(RATE)  # surveillance SSTV permanente (légère)
+        self.cw_env_pitch = None        # note CW suivie pour l'oscilloscope (Hz) ou None
         self.ssb_tuner = SsbTuner(RATE)
         self.ssb = None                 # = ssb_tuner quand le calage BLU est actif
         self._record_lock = threading.Lock()
@@ -510,6 +636,14 @@ class AudioReader(QtCore.QThread):
             sstv = self.sstv
             if sstv:
                 sstv.feed(x)
+            if self.sstv_watch.feed(x):
+                self.sstv_seen.emit(self.sstv_watch.result)
+            pitch = self.cw_env_pitch
+            if pitch:                   # enveloppe de la note CW, une valeur / 5 ms
+                n = len(x) // 240
+                seg = x[:n * 240].reshape(n, 240)
+                osc = np.exp(-2j * np.pi * pitch * np.arange(240) / RATE)
+                self.cw_env.emit(np.abs(seg @ osc) / 240)
             ssb = self.ssb
             if ssb:
                 frames = ssb.frames
@@ -576,6 +710,8 @@ class CivReader(QtCore.QThread):
     cw_pitch = QtCore.pyqtSignal(int)           # note CW réglée dans la radio (Hz)
     vox = QtCore.pyqtSignal(bool)               # VOX de la radio en marche
     vox_gain = QtCore.pyqtSignal(int)           # gain VOX, 0 à 255
+    comp_on = QtCore.pyqtSignal(bool)           # compresseur de modulation en marche
+    comp_level = QtCore.pyqtSignal(int)         # niveau du compresseur, 0 à 255
     status = QtCore.pyqtSignal(str)
     alive = QtCore.pyqtSignal(bool)             # la radio répond (allumée)
 
@@ -587,6 +723,7 @@ class CivReader(QtCore.QThread):
         self._pending_freq = None
         self._pending_mode = None
         self._pending_vox_gain = None
+        self._pending_comp_level = None
         self._vox_used = False          # VOX allumé par Scope : coupé à la fermeture
         self._pending_af = None
         self._commands = queue.Queue()
@@ -652,6 +789,13 @@ class CivReader(QtCore.QThread):
     def set_vox_gain(self, level):
         self._pending_vox_gain = level
 
+    def set_comp(self, on):
+        """Compresseur de modulation (SSB) de la radio : marche / arrêt."""
+        self._commands.put((0x16, 0x44, 0x01 if on else 0x00))
+
+    def set_comp_level(self, level):
+        self._pending_comp_level = level
+
     def set_af_gain(self, level):
         self._pending_af = level
 
@@ -665,6 +809,7 @@ class CivReader(QtCore.QThread):
     def tune(self):
         """Lance l'accord de la boîte d'accord interne (la radio émet)."""
         self._commands.put((0x1C, 0x01, 0x02))
+        self._tune_watch_until = time.monotonic() + 3.5   # suivi serré dès l'appui
 
     def set_atu(self, on):
         self._commands.put((0x1C, 0x01, 0x01 if on else 0x00))
@@ -797,10 +942,10 @@ class CivReader(QtCore.QThread):
             ptt, self._pending_ptt = self._pending_ptt, None
             if ptt is True and not self._ptt:
                 self._key(ser)
-                changed = True
+                n = 1                       # pas de relecture des réglages : mesures tout de suite
             elif ptt is False:
                 self._release(ser)
-                changed = True
+                n = 1                       # S-mètre tout de suite au retour en réception
             hz, self._pending_freq = self._pending_freq, None
             if hz is not None:
                 self._command(ser, 0x05, *to_bcd_le(hz))
@@ -832,6 +977,10 @@ class CivReader(QtCore.QThread):
             if level is not None:
                 self._command(ser, 0x1A, 0x05, 0x00, 0x65, level // 100,
                               (level // 10 % 10) << 4 | level % 10)
+            level, self._pending_comp_level = self._pending_comp_level, None
+            if level is not None:
+                self._command(ser, 0x14, 0x0E, level // 100,
+                              (level // 10 % 10) << 4 | level % 10)
             level, self._pending_vox_gain = self._pending_vox_gain, None
             if level is not None:
                 self._command(ser, 0x14, 0x16, level // 100,
@@ -843,28 +992,41 @@ class CivReader(QtCore.QThread):
             if changed:
                 n = 0
             if self._ptt or self._tx:       # en émission : puissance, ROS, ALC
-                queries = [(0x1C, 0x00), (0x15, 0x11), (0x15, 0x12), (0x15, 0x13),
-                           (0x15, 0x14), (0x15, 0x16)]
-                if n % 10 == 0:
+                # Po et ALC à chaque tour, le reste à tour de rôle : barres plus vives
+                others = [(0x1C, 0x00), (0x15, 0x12), (0x15, 0x14), (0x15, 0x16)]
+                queries = [(0x15, 0x11)]            # Po à chaque tour
+                # ALC et COMP en alternance (galva), le reste de temps en temps
+                queries.append((0x15, 0x13) if n % 2 == 0 else (0x15, 0x14))
+                if n % 4 == 1:
+                    queries.append((0x15, 0x12))    # ROS souvent : barre sous le S-mètre
+                if n % 8 == 3:
+                    queries.append(others[n // 8 % 4])
+                if n % 30 == 0:
                     queries += [(0x03,), (0x04,), (0x1A, 0x06)]
             elif n % 10 == 0:
                 queries = [(0x03,), (0x04,), (0x1A, 0x06), (0x25, 0x01), (0x26, 0x01),
                            (0x14, 0x01), (0x14, 0x0A), (0x1C, 0x00),
                            (0x1C, 0x01), (0x1A, 0x05, 0x00, 0x65), (0x15, 0x02),
-                           (0x14, 0x09), (0x16, 0x46), (0x14, 0x16)]
-            elif self._tuner == 0x02:       # accord en cours : on suit de près
+                           (0x14, 0x09), (0x16, 0x46), (0x14, 0x16),
+                           (0x16, 0x44), (0x14, 0x0E)]
+            elif self._tuner == 0x02 or time.monotonic() < getattr(
+                    self, "_tune_watch_until", 0):  # accord en cours : on suit de près
                 queries = [(0x1C, 0x00), (0x1C, 0x01), (0x15, 0x11), (0x15, 0x12)]
             elif self._mode_code in (0x03, 0x07):   # CW : suivre la manipulation
                 queries = [(0x15, 0x02), (0x15, 0x11)]
             else:
                 queries = [(0x15, 0x02)]
+                if n % 3 == 0:              # la radio émet-elle d'elle-même ? (TUNE, PTT, VOX)
+                    queries.append((0x1C, 0x00))
             n += 1
             for query in queries:
                 if not self._running:
                     break               # fermeture : on remet la radio sans attendre
+                if self._pending_ptt is not None:
+                    break               # passage émission/réception : tout de suite
                 self._transact(ser, query, (query[0],))
             self._check_alive(ser)
-            time.sleep(0.05)
+            time.sleep(0.005 if (self._ptt or self._tx) else 0.05)
 
     def _scope_setup(self, ser):
         """Scope de la radio centré sur la fréquence, données envoyées en CI-V."""
@@ -978,6 +1140,10 @@ class CivReader(QtCore.QThread):
             self.comp.emit(bcd_be(data[1:]))
         elif cmd == 0x15 and len(data) == 3 and data[0] == 0x16:
             self.drain.emit(bcd_be(data[1:]))
+        elif cmd == 0x16 and len(data) == 2 and data[0] == 0x44:
+            self.comp_on.emit(bool(data[1]))
+        elif cmd == 0x14 and len(data) == 3 and data[0] == 0x0E:
+            self.comp_level.emit(bcd_be(data[1:]))
         elif cmd == 0x16 and len(data) == 2 and data[0] == 0x46:
             self.vox.emit(bool(data[1]))
         elif cmd == 0x14 and len(data) == 3 and data[0] == 0x16:
@@ -1336,7 +1502,7 @@ class TuningKnob(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setFixedSize(150, 150)
+        self.setFixedSize(285, 285)            # très gros bouton vintage (×1,5)
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self.setToolTip("Glisser en tournant ou molette : changer la fréquence")
         self.angle = 0.0
@@ -1358,9 +1524,52 @@ class TuningKnob(QtWidgets.QWidget):
             self.tuned.emit(steps)
         self.update()
 
+    # Un clic simple ne change rien. Double-clic : le VFO s'accroche à la
+    # souris (anneau lumineux) et tourne en suivant ses déplacements, sans
+    # tenir le bouton ; nouveau double-clic, clic droit ou Échap : décroché.
     def mousePressEvent(self, event):
-        self._last = self._angle_at(event.pos())
-        self.setCursor(QtCore.Qt.ClosedHandCursor)
+        if not KNOB_MODE["precision"]:          # mode direct : clic + glisser
+            if event.button() == QtCore.Qt.LeftButton:
+                self._direct = True
+                self._last = self._angle_at(event.pos())
+            event.accept()
+            return
+        if self._last is not None and event.button() == QtCore.Qt.RightButton:
+            self._release()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if not KNOB_MODE["precision"]:
+            event.accept()
+            return
+        if self._last is not None:
+            self._release()
+        else:
+            self._last = self._angle_at(event.pos())
+            self.setMouseTracking(True)
+            self.grabMouse(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
+            self.grabKeyboard()
+            self.update()
+        event.accept()
+
+    def _release(self):
+        if self._last is None:
+            return
+        self._last = None
+        self.setMouseTracking(False)
+        self.releaseMouse()
+        self.releaseKeyboard()
+        self.update()
+
+    def keyPressEvent(self, event):
+        if self._last is not None and event.key() == QtCore.Qt.Key_Escape:
+            self._release()
+        else:
+            super().keyPressEvent(event)
+
+    def hideEvent(self, event):
+        self._release()
+        super().hideEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._last is None:
@@ -1371,8 +1580,11 @@ class TuningKnob(QtWidgets.QWidget):
         self._rotate(delta)
 
     def mouseReleaseEvent(self, event):
-        self._last = None
-        self.setCursor(QtCore.Qt.OpenHandCursor)
+        if getattr(self, "_direct", False):     # mode direct : on lâche, c'est fini
+            self._direct = False
+            self._last = None
+            self.update()
+        event.accept()
 
     def wheelEvent(self, event):
         self._wheel += event.angleDelta().y()
@@ -1383,43 +1595,200 @@ class TuningKnob(QtWidgets.QWidget):
         event.accept()
 
     def paintEvent(self, event):
+        """Gros bouton façon Collins : jupe noire graduée 0…100 qui tourne,
+        index fixe en haut, bouton en aluminium brossé à bord moleté,
+        creux pour le doigt, ombre portée."""
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         c = QtCore.QPointF(self.rect().center())
-        r = min(self.width(), self.height()) / 2 - 2
-        # graduations
-        p.setPen(QtGui.QPen(QtGui.QColor("#455a64"), 2))
-        for i in range(self.DETENTS):
-            a = math.radians(i * 360 / self.DETENTS)
-            p.drawLine(c + QtCore.QPointF(math.cos(a), math.sin(a)) * (r - 1),
-                       c + QtCore.QPointF(math.cos(a), math.sin(a)) * (r - 8))
-        # corps du bouton
-        body = r - 12
-        grad = QtGui.QRadialGradient(c - QtCore.QPointF(body / 3, body / 3), body * 1.6)
-        grad.setColorAt(0, QtGui.QColor("#5f6b75"))
-        grad.setColorAt(1, QtGui.QColor("#15191d"))
-        p.setPen(QtGui.QPen(QtGui.QColor("#0b0f13"), 2))
-        p.setBrush(grad)
+        R = min(self.width(), self.height()) / 2 - 2
+        skirt_r = R - 12
+        # ombre portée de la jupe
+        p.setPen(QtCore.Qt.NoPen)
+        for k, alpha in enumerate((70, 45, 25)):
+            p.setBrush(QtGui.QColor(0, 0, 0, alpha))
+            p.drawEllipse(c + QtCore.QPointF(3 + k, 5 + k), skirt_r + 1 + k, skirt_r + 1 + k)
+        # index fixe : triangle crème en haut, sur la façade
+        tip = c + QtCore.QPointF(0, -skirt_r + 1)
+        tri = QtGui.QPolygonF([tip, tip + QtCore.QPointF(-7, -10), tip + QtCore.QPointF(7, -10)])
+        p.setBrush(QtGui.QColor("#f2ead2"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
+        p.drawPolygon(tri)
+        # jupe noire brillante (bord biseauté)
+        g = QtGui.QRadialGradient(c - QtCore.QPointF(skirt_r * 0.3, skirt_r * 0.35), skirt_r * 1.5)
+        g.setColorAt(0, QtGui.QColor("#3a3a3a"))
+        g.setColorAt(0.6, QtGui.QColor("#121212"))
+        g.setColorAt(1, QtGui.QColor("#020202"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 1.5))
+        p.setBrush(g)
+        p.drawEllipse(c, skirt_r, skirt_r)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 45), 1.2))
+        p.drawArc(QtCore.QRectF(c.x() - skirt_r + 2, c.y() - skirt_r + 2,
+                                2 * skirt_r - 4, 2 * skirt_r - 4), 40 * 16, 120 * 16)
+        # graduations blanches 0…100 sur la jupe (tournent avec le bouton)
+        cream = QtGui.QColor("#f1ecdc")
+        p.setFont(QtGui.QFont("DejaVu Sans", 7, QtGui.QFont.Bold))
+        for i in range(100):
+            a = math.radians(i * 3.6 - 90 + self.angle)
+            u = QtCore.QPointF(math.cos(a), math.sin(a))
+            big, mid = i % 10 == 0, i % 5 == 0
+            p.setPen(QtGui.QPen(cream, 1.6 if big else 1.0 if mid else 0.7))
+            p.drawLine(c + u * (skirt_r - 3), c + u * (skirt_r - (11 if big else 8 if mid else 5)))
+            if big:
+                pt = c + u * (skirt_r - 19)
+                p.setPen(cream)
+                p.drawText(QtCore.QRectF(pt.x() - 10, pt.y() - 6, 20, 12),
+                           QtCore.Qt.AlignCenter, str(i))
+        body = skirt_r - 30
+        # ombre du bouton sur la jupe
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(0, 0, 0, 120))
+        p.drawEllipse(c + QtCore.QPointF(2, 4), body + 2, body + 2)
+        # bord moleté en aluminium (stries qui tournent)
+        g = QtGui.QConicalGradient(c, 135)
+        for stop, col in ((0, "#fdfdfd"), (0.12, "#8c9095"), (0.3, "#e9ebed"),
+                          (0.5, "#62676c"), (0.7, "#dadde0"), (0.86, "#7f8489"), (1, "#fdfdfd")):
+            g.setColorAt(stop, QtGui.QColor(col))
+        p.setPen(QtGui.QPen(QtGui.QColor("#2a2c2e"), 1.2))
+        p.setBrush(g)
         p.drawEllipse(c, body, body)
-        # trou pour le doigt
+        for i in range(90):
+            a = math.radians(i * 4 + self.angle)
+            u = QtCore.QPointF(math.cos(a), math.sin(a))
+            p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 70), 1))
+            p.drawLine(c + u * (body - 9), c + u * (body - 0.5))
+        # face en aluminium brossé : reflets en cône (lumière fixe) + tournage
+        face = body - 10
+        g = QtGui.QConicalGradient(c, 45)
+        for stop, col in ((0, "#f6f7f8"), (0.12, "#c4c8cc"), (0.25, "#9da2a7"),
+                          (0.38, "#d8dbde"), (0.5, "#f2f3f4"), (0.62, "#bfc3c7"),
+                          (0.75, "#979ca1"), (0.88, "#d4d7da"), (1, "#f6f7f8")):
+            g.setColorAt(stop, QtGui.QColor(col))
+        p.setPen(QtGui.QPen(QtGui.QColor("#55595d"), 1))
+        p.setBrush(g)
+        p.drawEllipse(c, face, face)
+        p.setBrush(QtCore.Qt.NoBrush)
+        for k in range(3, int(face), 2):
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 16 if k % 4 == 1 else 9), 0.8))
+            p.drawEllipse(c, k, k)
+        # léger bombé : halo clair en haut à gauche
+        g = QtGui.QRadialGradient(c - QtCore.QPointF(face * 0.4, face * 0.45), face * 1.1)
+        g.setColorAt(0, QtGui.QColor(255, 255, 255, 70))
+        g.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(g)
+        p.drawEllipse(c, face, face)
+        # creux pour le doigt (concave : sombre en haut à gauche, clair en bas)
         a = math.radians(self.angle - 90)
-        dimple = c + QtCore.QPointF(math.cos(a), math.sin(a)) * body * 0.62
-        p.setPen(QtGui.QPen(QtGui.QColor("#0b0f13"), 1))
-        p.setBrush(QtGui.QColor("#22292f"))
-        p.drawEllipse(dimple, body * 0.17, body * 0.17)
-        # repère
-        p.setPen(QtGui.QPen(QtGui.QColor("#4fc3f7"), 3,
-                            cap=QtCore.Qt.RoundCap))
-        p.drawLine(c + QtCore.QPointF(math.cos(a), math.sin(a)) * body * 0.86,
-                   c + QtCore.QPointF(math.cos(a), math.sin(a)) * body * 0.97)
+        u = QtCore.QPointF(math.cos(a), math.sin(a))
+        dimple = c + u * face * 0.6
+        dr = face * 0.2
+        dg = QtGui.QLinearGradient(dimple - QtCore.QPointF(dr, dr), dimple + QtCore.QPointF(dr, dr))
+        dg.setColorAt(0, QtGui.QColor("#6a6e72"))
+        dg.setColorAt(0.5, QtGui.QColor("#b8bcc0"))
+        dg.setColorAt(1, QtGui.QColor("#f4f5f6"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#4a4e52"), 1))
+        p.setBrush(dg)
+        p.drawEllipse(dimple, dr, dr)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 120), 1))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawArc(QtCore.QRectF(dimple.x() - dr, dimple.y() - dr, 2 * dr, 2 * dr),
+                  200 * 16, 140 * 16)
+        self._paint_badge(p, c, face * 0.36)
+        if self._last is not None and not getattr(self, "_direct", False):   # accroché
+            for k, a in ((0, 230), (3, 120), (6, 50)):
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 190, 60, a), 3))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawEllipse(c, skirt_r + 2 - k, skirt_r + 2 - k)
+        p.end()
+
+    @staticmethod
+    def _gold_text(p, rect, text, font, spacing=0.0):
+        """Lettres dorées en relief : ombre sombre, puis dégradé or."""
+        font.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, spacing)
+        path = QtGui.QPainterPath()
+        fm = QtGui.QFontMetricsF(font)
+        x = rect.center().x() - fm.horizontalAdvance(text) / 2
+        y = rect.center().y() + (fm.ascent() - fm.descent()) / 2
+        path.addText(x, y, font, text)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(0, 0, 0, 200))
+        p.drawPath(path.translated(0.8, 1.0))
+        g = QtGui.QLinearGradient(0, rect.top(), 0, rect.bottom())
+        g.setColorAt(0, QtGui.QColor("#fff2b8"))
+        g.setColorAt(0.45, QtGui.QColor("#e0b54a"))
+        g.setColorAt(0.55, QtGui.QColor("#a8781c"))
+        g.setColorAt(1, QtGui.QColor("#f0d277"))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor(90, 60, 10, 160), 0.4))
+        p.drawPath(path)
+
+    def _paint_badge(self, p, c, r):
+        """Médaillon fixe F4TXR : bague chromée, émail noir, filet et lettres or."""
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(0, 0, 0, 110))                   # ombre
+        p.drawEllipse(c + QtCore.QPointF(1.5, 2.5), r + 1, r + 1)
+        g = QtGui.QConicalGradient(c, 135)                       # bague chromée
+        for stop, col in ((0, "#ffffff"), (0.25, "#70757b"), (0.5, "#e9ebed"),
+                          (0.75, "#575c62"), (1, "#ffffff")):
+            g.setColorAt(stop, QtGui.QColor(col))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor("#1c1e20"), 1))
+        p.drawEllipse(c, r, r)
+        er = r - 4                                               # émail noir
+        g = QtGui.QRadialGradient(c - QtCore.QPointF(er * 0.3, er * 0.35), er * 1.4)
+        g.setColorAt(0, QtGui.QColor("#2c2a30"))
+        g.setColorAt(0.6, QtGui.QColor("#0e0d10"))
+        g.setColorAt(1, QtGui.QColor("#030303"))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 0.8))
+        p.drawEllipse(c, er, er)
+        p.setBrush(QtCore.Qt.NoBrush)                            # filet doré
+        p.setPen(QtGui.QPen(QtGui.QColor("#c9a043"), 1.1))
+        p.drawEllipse(c, er - 3, er - 3)
+        p.setPen(QtGui.QPen(QtGui.QColor(201, 160, 67, 110), 0.6))
+        p.drawEllipse(c, er - 5, er - 5)
+        # petites étoiles dorées de part et d'autre
+        for side in (-1, 1):
+            sc = c + QtCore.QPointF(side * er * 0.62, -er * 0.02)
+            star = QtGui.QPolygonF([sc + QtCore.QPointF(
+                math.cos(math.radians(90 + k * 36)) * (2.6 if k % 2 == 0 else 1.1),
+                -math.sin(math.radians(90 + k * 36)) * (2.6 if k % 2 == 0 else 1.1))
+                for k in range(10)])
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor("#e0b54a"))
+            p.drawPolygon(star)
+        # textes
+        f = QtGui.QFont("URW Gothic", 5, QtGui.QFont.Bold)
+        self._gold_text(p, QtCore.QRectF(c.x() - er, c.y() - er * 0.72, 2 * er, er * 0.42),
+                        "RADIO", f, 1.6)
+        f = QtGui.QFont("URW Gothic", 11, QtGui.QFont.Black)
+        self._gold_text(p, QtCore.QRectF(c.x() - er, c.y() - er * 0.3, 2 * er, er * 0.6),
+                        "F4TXR", f, 0.6)
+        f = QtGui.QFont("URW Gothic", 6, QtGui.QFont.Bold)
+        self._gold_text(p, QtCore.QRectF(c.x() - er, c.y() + er * 0.32, 2 * er, er * 0.42),
+                        "73", f, 1.0)
+        # verre bombé : reflet
+        hl = QtCore.QRectF(c.x() - er * 0.75, c.y() - er * 0.85, er * 1.2, er * 0.7)
+        g = QtGui.QLinearGradient(hl.topLeft(), hl.bottomLeft())
+        g.setColorAt(0, QtGui.QColor(255, 255, 255, 70))
+        g.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(g)
+        p.drawEllipse(hl)
 
 
 class BarGraph(QtWidgets.QWidget):
     """Bargraph à segments avec mémoire de crête."""
 
-    def __init__(self, minimum, maximum, ticks, red_from, segments=48, hold=1.0):
+    def __init__(self, minimum, maximum, ticks, red_from, segments=48, hold=1.0,
+                 curve=1.0, fall=None):
         super().__init__()
         self.hold = hold
+        self.curve = curve              # < 1 : échelle dilatée (petites valeurs plus visibles)
+        self.fall = fall                # vitesse de descente (unités/s) ; None = immédiate
+        self.last_set = 0.0
         self.minimum = minimum
         self.maximum = maximum
         self.ticks = ticks
@@ -1428,14 +1797,17 @@ class BarGraph(QtWidgets.QWidget):
         self.value = minimum
         self.peak = minimum
         self.peak_time = 0.0
-        self.setMinimumHeight(44)
+        self.setMinimumHeight(32)       # plus bas : place gagnée pour le waterfall
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
                            QtWidgets.QSizePolicy.Fixed)
 
     def setValue(self, value):
         value = min(max(value, self.minimum), self.maximum)
-        self.value = value
         now = time.monotonic()
+        if self.fall and value < self.value:    # monte d'un coup, redescend doucement
+            value = max(value, self.value - self.fall * (now - self.last_set))
+        self.last_set = now
+        self.value = value
         if value >= self.peak:
             self.peak = value
             self.peak_time = now
@@ -1445,7 +1817,8 @@ class BarGraph(QtWidgets.QWidget):
         self.update()
 
     def _fraction(self, value):
-        return (value - self.minimum) / (self.maximum - self.minimum)
+        f = (value - self.minimum) / (self.maximum - self.minimum)
+        return max(0.0, f) ** self.curve
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -1459,7 +1832,7 @@ class BarGraph(QtWidgets.QWidget):
         green, red = QtGui.QColor("#3ddc84"), QtGui.QColor("#ff5252")
         for i in range(self.segments):
             centre = (i + 0.5) / self.segments
-            seg_value = self.minimum + centre * (self.maximum - self.minimum)
+            seg_value = self.minimum + centre ** (1 / self.curve) * (self.maximum - self.minimum)
             color = red if seg_value >= self.red_from else green
             if centre > lit_fraction:
                 color = color.darker(500)
@@ -1483,6 +1856,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, args):
         super().__init__()
         self.setWindowTitle("IC-7300 Scope")
+        # sans la barre blanche du bureau : bandeau vintage « MADE IN F4TXR »
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint)
+        self.title_plate = TitlePlate(self)
+        self.setMenuWidget(self.title_plate)
         self.audio = AudioReader(args.source)   # démarré une fois l'écran prêt
         self.audio_rate = RATE
         self.sstv_window = None
@@ -1516,7 +1893,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Fréquence, mode et état
         top = QtWidgets.QHBoxLayout()
-        self.freq_label = FrequencyDisplay()
+        self.freq_label = DrumDisplay()         # compteur à tambours mécaniques
         self.freq_label.tuned.connect(self.on_tuned)
         self.step_combo = QtWidgets.QComboBox()
         for label, hz in STEPS:
@@ -1537,7 +1914,10 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.freq_label)
         top.addWidget(QtWidgets.QLabel("MHz"))
         top.addSpacing(8)
-        self.clocks = ClockPair()
+        self.clocks = DrumClock()               # horloges à tambours, assorties
+        self.backlight_on_air = False
+        self.backlight_timer = QtCore.QTimer(self)    # émission : lumière = voix
+        self.backlight_timer.timeout.connect(self._backlight_voice)
         top.addWidget(self.clocks)
         top.addSpacing(10)
         top.addWidget(self.step_combo)
@@ -1547,9 +1927,16 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(QtWidgets.QLabel("Aller à"))
         top.addWidget(self.freq_entry)
         top.addSpacing(20)
-        top.addWidget(QtWidgets.QLabel("Wi-Fi"))
+        # Wi-Fi et, juste dessous, le trafic réseau (sortie / entrée)
+        net_grid = QtWidgets.QGridLayout()
+        net_grid.setSpacing(2)
+        net_grid.addWidget(QtWidgets.QLabel("Wi-Fi"), 0, 0)
         self.wifi_bar = WifiBar()
-        top.addWidget(self.wifi_bar)
+        net_grid.addWidget(self.wifi_bar, 0, 1)
+        net_grid.addWidget(QtWidgets.QLabel("Trafic"), 1, 0)
+        self.traffic_bar = TrafficBar()
+        net_grid.addWidget(self.traffic_bar, 1, 1)
+        top.addLayout(net_grid)
         top.addStretch()
         top.addWidget(self.cursor_label)
         left = QtWidgets.QVBoxLayout()
@@ -1561,10 +1948,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Barre « RX fin » (grande, en tête des barres) : signal mesuré sur le
         # spectre dans la bande passante, au-dessus du bruit
         # même échelle que l'aiguille : S1…S9 puis +20/+40/+60 (valeurs brutes Icom)
-        rx_ticks = [(i * S9 / 9, f"S{i}") for i in (1, 3, 5, 7, 9)] + \
-                   [(S9 + db * (S9_PLUS_60 - S9) / 60, f"+{db}") for db in (20, 40, 60)]
+        rx_ticks = [(i * S9 / 9, f"S{i}") for i in (3, 6, 9)] + \
+                   [(S9 + db * (S9_PLUS_60 - S9) / 60, f"+{db}") for db in (20, 40)]
         self.rx_fine = BarGraph(0, S9_PLUS_60, rx_ticks, red_from=S9,
-                                segments=120, hold=2.0)
+                                segments=60, hold=2.0)          # 60 cases : lisible sous le S-mètre
         self.rx_fine.setToolTip("Réception fine, calée sur l'aiguille du S-mètre "
                                 "(1 case ≈ 1 dB). Sous S1, le spectre montre aussi "
                                 "les signaux trop faibles pour l'aiguille. "
@@ -1582,7 +1969,9 @@ class MainWindow(QtWidgets.QMainWindow):
         s_col = QtWidgets.QVBoxLayout()
         s_col.setSpacing(2)
         s_col.addWidget(self.s_meter)
-        self.preamp_knob = ScaleKnob(5.0)
+        self.preamp_knob = ScaleBakelite(          # bakélite, comme NIVEAU / ALC
+            5.0, 88, "",
+            lambda v: f"{round((v / 5 if v <= 5 else 1 + (v - 5) * 0.4) * 100)} %")
         self.preamp_knob.setToolTip("Préampli BF : gain du son reçu sur le PC. "
                                     "5 = normal, 0 = silence, 10 = ×3 (+10 dB). "
                                     "Molette 0,1 · Maj+molette 1 · double-clic = 5")
@@ -1591,29 +1980,114 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preamp_label.setStyleSheet("font: bold 10pt; color: #e0e0e0;")
         self.preamp_display = PercentDisplay()
         self.preamp_display.setToolTip("Gain du préampli BF : 100 % = son normal")
-        knob_col = QtWidgets.QVBoxLayout()
-        knob_col.setSpacing(0)
-        knob_col.addWidget(self.preamp_knob, 0, QtCore.Qt.AlignHCenter)
-        knob_col.addWidget(self.preamp_display, 0, QtCore.Qt.AlignHCenter)
-        pre_row = QtWidgets.QHBoxLayout()
-        pre_row.addLayout(knob_col)
-        pre_row.addWidget(self.preamp_label)
-        pre_row.addStretch()
-        s_col.addLayout(pre_row)
+        # préampli placé sous le waterfall, au-dessus des bandes (voir plus bas)
+        self.preamp_box = QtWidgets.QWidget()
+        # à gauche des rangées bandes + modes : chaque bouton au-dessus de son
+        # afficheur, libellé à côté (aucune hauteur en plus pour le waterfall)
+        pre_row = QtWidgets.QHBoxLayout(self.preamp_box)
+        pre_row.setContentsMargins(4, 0, 4, 0)
+        pre_row.setSpacing(4)
+
+        def knob_column(knob, display):
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(0)
+            col.addWidget(knob, 0, QtCore.Qt.AlignHCenter)
+            display.hide()                  # la valeur est gravée sous le bouton
+            return col
+        self.preamp_label.setStyleSheet("font: bold 9pt; color: #e0e0e0;")
+        self.preamp_display.hide()              # bouton placé dans la rangée du haut
+        self.preamp_label.hide()                # nom gravé sur le bouton
+        pre_row.addSpacing(6)
+        # volume d'écoute sur le PC en bouton rond (suit le curseur « Volume PC »),
+        # la radio n'est pas touchée ; 0 à 10 = 0 à 150 %
+        self.af_knob = ScaleBakelite(
+            0.0, 88, "",
+            lambda v: f"{self.pc_volume.value() if hasattr(self, 'pc_volume') else round(v * 15)} %")
+        self.af_knob.setToolTip("Volume d'écoute sur le PC seulement (pas la radio). "
+                                "Molette 1,5 % · Maj+molette 15 % · double-clic = 75 %")
+        self.af_knob.valueChanged.connect(self.on_af_knob)
+        self.af_display = PercentDisplay()
+        self.af_display.setText("0")
+        self.af_display.setToolTip("Volume d'écoute sur le PC")
+        af_label = QtWidgets.QLabel("VOLUME BF\nPC")
+        af_label.setStyleSheet("font: bold 10pt; color: #e0e0e0;")
+        af_label.setStyleSheet("font: bold 9pt; color: #e0e0e0;")
+        self.af_display.hide()                  # bouton placé dans la rangée du haut
+        # libellé + commutateur casque / HP PC (ajouté plus bas) l'un sous l'autre
+        self.af_label_box = QtWidgets.QVBoxLayout()
+        self.af_label_box.setSpacing(4)
+        self.af_label_box.addStretch()
+        af_label.hide()                         # nom gravé sur le bouton
+        pre_row.addLayout(self.af_label_box)
+        # sous le S-mètre, juste au-dessus du waterfall : NIVEAU micro et ALC
+        self.level_knob = VintageKnob(
+            88, 100, "%", None, "",
+            "Niveau du son envoyé à la radio : glisser, ou molette (1 %, Maj = 10 %)")
+        self.alc_knob = VintageKnob(
+            88, 100, "%", None, "",
+            "Gain de l'entrée USB de la radio (USB MOD LEVEL) : glisser, ou molette")
+        self.alc_knob.setEnabled(False)         # activé quand la radio répond
+        self.clean_knob = VintageKnob(
+            88, 400, "%", None, "",
+            "Volume du son épuré quand RNNOISE est actif (au-delà de 100 % : amplifié)")
+        self.clean_knob.setEnabled(False)       # actif avec RNNOISE
+        self.view_toggle = ToggleSwitch(
+            "RF", "AUDIO", tooltip="Affichage du spectre et du waterfall : RF = scope "
+            "de la radio (clic pour s'y caler), AUDIO = le son reçu")
+        self.af_radio_knob = VintageKnob(
+            88, 100, "%", None, "",
+            "Volume du haut-parleur de la radio (AF) — le son vers le PC n'en dépend pas")
+        self.af_radio_knob.setEnabled(False)    # activé quand la radio répond
+        self.mute_toggle = ToggleSwitch(
+            "SON", "MUET", tooltip="Levier en bas : son de la radio coupé sur le PC")
+        self.precision_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="PRÉCISION : levier en bas (ON) = double-clic pour "
+            "accrocher un bouton à la souris, double-clic pour le décrocher ; "
+            "en haut (OFF) = clic et glisser directement")
+        self.precision_toggle.setDown(True, emit=False)   # ON au démarrage
+        self.precision_toggle.pos_f = 1.0
+        self.precision_toggle.toggled.connect(self._precision_toggled)
+        self.output_toggle = ToggleSwitch(
+            "HP PC", "CASQUE", tooltip="Sortie du son du PC : levier en haut = "
+            "haut-parleurs du PC, en bas = casque")
+        self.volume_knob = VintageKnob(
+            88, 150, "%", None, "",
+            "Volume du son de la radio sur le PC (0 à 150 %) : glisser, ou molette")
+        # rangée PRÉ-BF, VOL PC, NIV, ALC : au-dessus du waterfall (voir plus bas),
+        # alignée à gauche ; la place à droite est gardée pour d'autres boutons
+        self.knob_bar = QtWidgets.QHBoxLayout()
+        self.knob_bar.setSpacing(8)
+        self.knob_bar.setContentsMargins(6, 0, 6, 0)
+        # chaque bouton avec, juste au-dessus, sa plaque d'aluminium gravée
+        for knob, name in ((self.preamp_knob, "PRÉAMPLI BF"), (self.af_knob, "VOLUME PC"),
+                           (self.level_knob, "NIVEAU TX"), (self.alc_knob, "ALC"),
+                           (self.volume_knob, "VOLUME"), (self.clean_knob, "FILTRE RX"),
+                           (self.af_radio_knob, "AF RADIO"), (self.view_toggle, "AFFICHAGE"), (self.mute_toggle, "MUET"),
+                           (self.precision_toggle, "PRÉCISION"),
+                           (self.output_toggle, "ÉCOUTE")):
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(1)
+            col.addWidget(NamePlate(name, 88), 0, QtCore.Qt.AlignHCenter)
+            col.addWidget(knob, 0, QtCore.Qt.AlignHCenter)
+            self.knob_bar.addLayout(col)
+        self.knob_bar.addStretch()              # futurs boutons : knob_bar.insertWidget(4, …)
         s_col.addStretch()
         meters.addLayout(s_col)
+        self.s_col = s_col                      # le texte décodé s'y place (sous le S-mètre)
         meters.addSpacing(12)
         # Bargraphs d'émission
         tx_bars = QtWidgets.QGridLayout()
         swr_ticks = [(raw, f"{swr:g}") for raw, swr in SWR_POINTS[:-1]] + [(255, "∞")]
-        self.swr_meter = BarGraph(0, 255, swr_ticks, red_from=80, segments=24)
+        self.swr_meter = BarGraph(0, 255, swr_ticks, red_from=80, segments=60)
         comp_ticks = [(v, f"{v}") for v in (0, 10, 20, 30)]
         self.comp_meter = BarGraph(0, 30, comp_ticks, red_from=20, segments=24)
-        alc_ticks = [(v, f"{v}") for v in (0, 50, 100, 150)]
-        self.alc_meter = BarGraph(0, 150, alc_ticks, red_from=100, segments=24)
+        alc_ticks = [(v, f"{v}") for v in (0, 10, 25, 50, 100, 150)]
+        self.alc_meter = BarGraph(0, 150, alc_ticks, red_from=100, segments=24,
+                                  curve=0.5, fall=200)
         self.alc_meter.setToolTip("ALC en % de sa zone : rester sous 100")
-        po_ticks = [(v, f"{v}") for v in (0, 25, 50, 75, 100)]
-        self.po_meter = BarGraph(0, 110, po_ticks, red_from=90, segments=24, hold=4.0)
+        po_ticks = [(v, f"{v}") for v in (0, 5, 25, 50, 100)]
+        self.po_meter = BarGraph(0, 110, po_ticks, red_from=90, segments=24, hold=4.0,
+                                 curve=0.5, fall=80)
         self.po_meter.setToolTip("Puissance de sortie en watts (repère jaune = crête des 4 dernières secondes)")
         self.po_value = QtWidgets.QLabel("")
         self.po_peak_w = 0.0
@@ -1625,19 +2099,101 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_value = QtWidgets.QLabel("")
         self.alc_value = QtWidgets.QLabel("")
         self.id_value = QtWidgets.QLabel("")
-        for i, (name, meter, value) in enumerate(
-                (("RX fin", self.rx_fine, self.rx_fine_value),
-                 ("Po W", self.po_meter, self.po_value),
-                 ("ROS", self.swr_meter, self.swr_value),
-                 ("COMP dB", self.comp_meter, self.comp_value),
-                 ("ALC %", self.alc_meter, self.alc_value),
-                 ("Id", self.id_meter, self.id_value))):
+        # RX fin en haut ; dessous, pour le moment, le galva d'émission remplace
+        # les barres Po / ROS / COMP / ALC / Id (gardées en mémoire, non affichées)
+        for name, meter, value in (("Po W", self.po_meter, self.po_value),
+                                   ("ROS", self.swr_meter, self.swr_value),
+                                   ("COMP dB", self.comp_meter, self.comp_value),
+                                   ("ALC %", self.alc_meter, self.alc_value),
+                                   ("Id", self.id_meter, self.id_value)):
             value.setMinimumWidth(60)
             value.setStyleSheet("font: bold 12pt monospace;")
-            tx_bars.addWidget(QtWidgets.QLabel(name), i, 0)
-            tx_bars.addWidget(meter, i, 1)
-            tx_bars.addWidget(value, i, 2)
-        meters.addLayout(tx_bars, stretch=1)
+        # barre RX fin juste sous le S-mètre, à sa largeur
+        rx_box = QtWidgets.QWidget()
+        rx_box.setFixedWidth(self.s_meter.width())
+        rx_row = QtWidgets.QHBoxLayout(rx_box)
+        rx_row.setContentsMargins(0, 0, 0, 0)
+        rx_row.setSpacing(4)
+        self.rx_fine_value.setMinimumWidth(48)
+        self.rx_fine_value.setStyleSheet("font: bold 10pt monospace;")
+        rx_row.addWidget(self.rx_fine, stretch=1)
+        rx_row.addWidget(self.rx_fine_value)
+        s_col.insertWidget(1, rx_box)
+        # même barre pour le ROS, juste dessous (bouge en émission)
+        swr_box = QtWidgets.QWidget()
+        swr_box.setFixedWidth(self.s_meter.width())
+        swr_row = QtWidgets.QHBoxLayout(swr_box)
+        swr_row.setContentsMargins(0, 0, 0, 0)
+        swr_row.setSpacing(4)
+        self.swr_value.setMinimumWidth(48)
+        self.swr_value.setStyleSheet("font: bold 10pt monospace;")
+        swr_row.addWidget(self.swr_meter, stretch=1)
+        swr_row.addWidget(self.swr_value)
+        # petite LED rouge d'alarme : clignote très vite si le ROS dépasse 2
+        self.swr_led = QtWidgets.QLabel()
+        self.swr_led.setFixedSize(12, 12)
+        self.swr_led.setToolTip("Alarme ROS : clignote en rouge si le ROS dépasse 2")
+        swr_row.addWidget(self.swr_led)
+        swr_box.setFixedWidth(self.s_meter.width() + 16)
+        s_col.insertWidget(2, swr_box)
+        self.swr_alarm = False
+        self.swr_blink = False
+        self.swr_timer = QtCore.QTimer(self)
+        self.swr_timer.timeout.connect(self._swr_led_tick)
+        self.swr_timer.start(50)            # 10 clignotements par seconde
+        self._swr_led_paint(False)
+        # deux galvas ronds côte à côte + gros bouton rouge d'émission
+        self.tx_galva = TxGalva()
+        self.red_button = RedButton("", size=67)            # sans inscription
+        self.red_button.setToolTip("Émission : appui = la radio émet, nouvel appui = "
+                                   "réception (comme le bouton ÉMETTRE)")
+        # à droite du S-mètre : les deux galvas côte à côte, le bouton dessous
+        tx_panel = QtWidgets.QVBoxLayout()
+        tx_panel.setSpacing(4)
+        self.tx_galva_row = QtWidgets.QHBoxLayout()    # Po W | COMP | CALE (ajouté plus bas)
+        self.tx_galva_row.setSpacing(6)
+        self.tx_galva_row.addWidget(self.tx_galva)
+        tx_panel.addLayout(self.tx_galva_row)
+        # oscilloscope vintage : forme d'onde de la voix au micro
+        self.voice_scope = VoiceScope()
+        tx_panel.addSpacing(46)                 # descendu : juste au-dessus des potentiomètres
+        tx_panel.addWidget(self.voice_scope, 0, QtCore.Qt.AlignHCenter)
+        tx_panel.addStretch()
+        meters.insertSpacing(1, 10)             # [S-mètre, espace, galvas, …]
+        meters.insertLayout(2, tx_panel)
+        # VFO au centre, en bas de l'en-tête (juste au-dessus du waterfall)
+        meters.addStretch(1)                    # VFO entre les galvas et POWER
+        self.vfo_slot = QtWidgets.QVBoxLayout()
+        meters.addLayout(self.vfo_slot)
+        meters.addStretch(1)
+        # à droite : galva POWER, jumeau du S-mètre
+        self.power_meter = VintagePowerMeter()
+        power_col = QtWidgets.QVBoxLayout()
+        power_col.addWidget(self.power_meter)
+        # sous le galva POWER : bouton argent de réglage de la puissance (W)
+        self.power_knob = PowerKnob(154)        # plaque POWER au-dessus : même hauteur
+        self.power_knob.setEnabled(False)       # activé quand la radio répond
+        power_col.addSpacing(6)
+        # à droite du bouton de puissance : sélecteur rotatif FONCTION (OFF, ZOOM, …)
+        self.function_selector = FunctionSelector(("OFF", "ZOOM", "SSTV", "", ""))
+        self.function_selector.changed.connect(self.on_function)
+        self.function_screen = FunctionScreen()   # fonction enclenchée = plein écran
+        self.function_screen.back.connect(lambda: self.function_selector.set_index(0))
+        self.sstv_view = None
+        self.zoom_saved_span = None
+        knob_and_sel = QtWidgets.QHBoxLayout()
+        knob_and_sel.setSpacing(0)
+        knob_and_sel.addStretch()
+        power_knob_col = QtWidgets.QVBoxLayout()
+        power_knob_col.setSpacing(1)
+        power_knob_col.addWidget(NamePlate("POWER", 110), 0, QtCore.Qt.AlignHCenter)
+        power_knob_col.addWidget(self.power_knob, 0, QtCore.Qt.AlignHCenter)
+        knob_and_sel.addLayout(power_knob_col)
+        knob_and_sel.addWidget(self.function_selector, 0, QtCore.Qt.AlignVCenter)
+        knob_and_sel.addStretch()
+        power_col.addLayout(knob_and_sel)
+        power_col.addStretch()
+        meters.addLayout(power_col)
         left.addLayout(meters)
         left.addStretch()
 
@@ -1648,13 +2204,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vfo_label.setAlignment(QtCore.Qt.AlignCenter)
         self.vfo_label.setStyleSheet("font: bold 14pt; color: #4fc3f7;")
         self.knob = TuningKnob()
-        self.knob.tuned.connect(self.on_tuned)
+        self.knob.tuned.connect(self.on_knob_tuned)     # pas choisi par l'interrupteur
+        # interrupteur à levier : pas du bouton VFO 50 kHz (gauche) / 100 kHz (droite)
+        self.vfo_step_switch = LeverSwitch("50 kHz", "100 kHz")
+        self.vfo_step_switch.setToolTip("Pas du bouton VFO : 50 kHz ou 100 kHz")
+        self.led_100k = BlueLed()       # au-dessus : 100 kHz (fixe)
+        self.led_50k = BlueLed()        # dessous : 50 kHz (clignote)
+        self.led_100k.setToolTip("Pas de 100 kHz choisi")
+        self.led_50k.setToolTip("Pas de 50 kHz choisi")
+        self.vfo_step_switch.toggled.connect(self._vfo_step_leds)
+        # plaque argentée à droite du VFO : 4 interrupteurs de pas fin, un seul actif
+        self.fine_plate = RustPlate()           # tôle rouillée militaire
+        plate_grid = QtWidgets.QGridLayout(self.fine_plate)
+        plate_grid.setContentsMargins(14, 12, 10, 12)
+        plate_grid.setVerticalSpacing(3)           # inscription juste au-dessus du levier
+        plate_grid.setHorizontalSpacing(4)
+        self.fine_switches = []             # (pas en Hz, interrupteur, LED)
+        for row, (hz, text) in enumerate(((1, "1 Hz"), (10, "10 Hz"),
+                                          (100, "100 Hz"), (1000, "1 kHz"))):
+            name = QtWidgets.QLabel(text)           # inscription en relief, au-dessus
+            name.setAlignment(QtCore.Qt.AlignCenter)
+            name.setStyleSheet("font: 900 10pt 'DejaVu Sans Condensed'; color: #1a1206; "
+                               "letter-spacing: 1px; background: transparent;")
+            relief = QtWidgets.QGraphicsDropShadowEffect(name)
+            relief.setOffset(1, 1)                  # pochoir noir, liseré clair
+            relief.setBlurRadius(0)
+            relief.setColor(QtGui.QColor(255, 240, 215, 200))
+            name.setGraphicsEffect(relief)
+            sw = MilitaryLever("", "", width=84, height=34)   # levier acier gauche ↔ droite
+            sw.setToolTip(f"Pas du bouton VFO : {text} (levier à droite = enclenché)")
+            led = AmberLed(size=20, period_ms=70)       # voyant ambre, flash très rapide
+            plate_grid.addWidget(name, 2 * row, 0, QtCore.Qt.AlignHCenter)   # pile au-dessus du levier
+            plate_grid.addWidget(sw, 2 * row + 1, 0)
+            plate_grid.addWidget(led, 2 * row + 1, 1)
+            sw.toggled.connect(lambda on, h=hz: self._fine_step_toggled(h, on))
+            self.fine_switches.append((hz, sw, led))
+        self._vfo_step_leds(False)
         self.other_label = QtWidgets.QLabel("")
         self.other_label.setAlignment(QtCore.Qt.AlignCenter)
         self.other_label.setStyleSheet("font: 11pt monospace; color: #90a4ae;")
         self.other_label.setToolTip("L'autre VFO")
-        vfo.addWidget(self.vfo_label, 0, 0, 1, 4)
+        self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
         vfo.addWidget(self.knob, 1, 0, 1, 4, QtCore.Qt.AlignCenter)
+        vfo.addWidget(self.fine_plate, 1, 4, QtCore.Qt.AlignVCenter)   # à droite du VFO
+        step_row = QtWidgets.QHBoxLayout()
+        step_row.setSpacing(4)
+        step_row.addStretch()
+        step_row.addWidget(self.led_50k)            # côté gauche = 50 kHz
+        step_row.addWidget(self.vfo_step_switch)
+        step_row.addWidget(self.led_100k)           # côté droit = 100 kHz
+        step_row.addStretch()
+        # interrupteur 50/100 kHz retiré à la demande (objets gardés, non affichés)
+        for widget in (self.vfo_step_switch, self.led_50k, self.led_100k):
+            widget.hide()
         buttons = [("A", "Passer sur le VFO A", 0x00),
                    ("B", "Passer sur le VFO B", 0x01),
                    ("A/B", "Basculer entre VFO A et B", 0xB0),
@@ -1687,35 +2289,29 @@ class MainWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError):
             self.band_memory = {}
         bands = QtWidgets.QGridLayout()
-        bands.setSpacing(4)
+        bands.setSpacing(0)                     # baguette de laiton continue
         self.band_buttons = {}
         for i, (name, low, high, _, _) in enumerate(BANDS):
-            button = QtWidgets.QPushButton(name)
-            button.setCheckable(True)
-            button.setMinimumWidth(52)
-            button.setStyleSheet(PUSH_3D_MODE)
+            button = BandKey(name)      # touche ivoire + voyant ambre dessous
             button.setToolTip(f"{low / 1e6:g} – {high / 1e6:g} MHz")
             button.clicked.connect(lambda _, n=name: self.on_band(n))
             bands.addWidget(button, 0, i)
             self.band_buttons[name] = button
 
         # Boutons de mode, même style que les bandes
-        mode_line = QtWidgets.QGridLayout()     # ligne sous le waterfall
-        mode_line.setSpacing(4)
+        mode_line = QtWidgets.QGridLayout()     # touches vintage, au-dessus du waterfall
+        mode_line.setSpacing(0)                 # baguette de laiton continue
         modes = QtWidgets.QGridLayout()         # calage BLU, en haut à droite
         modes.setSpacing(4)
         self.mode_buttons = {}
         for i, name in enumerate(MODE_NAMES):
-            button = QtWidgets.QPushButton(name)
-            button.setCheckable(True)
-            button.setMinimumWidth(58)
-            button.setStyleSheet(PUSH_3D_MODE)
+            button = BandKey(name)      # même touche ivoire + voyant que les bandes
             button.clicked.connect(lambda _, n=name: self.on_mode_button(n))
             mode_line.addWidget(button, 0, i)
             self.mode_buttons[name] = button
         # Calage automatique BLU et son vu-mètre
         rows = 0
-        self.ssb_meter = SsbMeter()
+        self.ssb_meter = SsbMeterSmall()     # placé à côté du galva COMP
         self.ssb_auto = QtWidgets.QPushButton("CALAGE AUTO BLU")
         self.ssb_auto.setCheckable(True)
         self.ssb_auto.setChecked(True)
@@ -1725,6 +2321,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ssb_auto.toggled.connect(lambda _: self._update_ssb())
         self.ssb_auto.toggled.connect(
             lambda on: on and hasattr(self, "detect_timer") and self.detect_timer.start(0))
+        # appui sur CALAGE AUTO BLU : rattrapage du correspondant le plus proche
+        self.ssb_pull_until = 0.0
+        self.ssb_auto.toggled.connect(self._start_pull)
         # bouton poussoir : choix automatique de LSB/USB (voyant vert) ou
         # choix libre des modes à la main (voyant rouge)
         self.sideband_button = QtWidgets.QPushButton("AUTO LSB/USB")
@@ -1741,11 +2340,12 @@ class MainWindow(QtWidgets.QMainWindow):
         push.addStretch()
         meter_row = QtWidgets.QHBoxLayout()
         meter_row.addLayout(push)
-        meter_row.addWidget(self.ssb_meter)
+        self.ssb_led = SsbLed(self.ssb_meter)   # voyant du calage, à l'ancienne place du galva
+        self.tx_galva_row.addWidget(self.ssb_meter)
+        self.tx_galva_row.addStretch()               # les galvas restent serrés à gauche
         modes.addLayout(meter_row, rows, 0, 1, 2)
         ssb_row = QtWidgets.QHBoxLayout()
         ssb_row.addStretch()
-        ssb_row.addWidget(SsbLed(self.ssb_meter))
         # sifflement d'hétérodyne pendant la recherche, comme jadis
         self.whistle = Whistle()
         self.radio_cw_pitch = 600.0     # relu dans la radio (CI-V 0x14 0x09)
@@ -1754,16 +2354,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # bouton poussoir marche/arrêt du sifflement (la recherche continue)
         self.whistle_check = QtWidgets.QPushButton()
         self.whistle_check.setCheckable(True)
-        self.whistle_check.setChecked(True)
+        self.whistle_check.setChecked(False)    # muet au départ : seulement sur appui
         self.whistle_check.setStyleSheet(PUSH_3D)
         self.whistle_check.setToolTip("Son aigu de recherche : marche / arrêt. "
                                       "Ne change rien à la recherche elle-même.")
         self.whistle_check.toggled.connect(self.on_whistle_toggled)
-        self._whistle_text(True)
+        self._whistle_text(False)
         self.whistle_timer = QtCore.QTimer(self)
         self.whistle_timer.timeout.connect(self._update_whistle)
         self.whistle_timer.start(30)
-        self.whistle.start()
         # recherche automatique d'un QSO en français, signal fort
         self.hunt_button = QtWidgets.QPushButton("CHERCHER QSO FR")
         self.hunt_button.setCheckable(True)
@@ -1782,8 +2381,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hunt_button.toggled.connect(self._hunt_blinking)
         self.hunt_button.setToolTip(
             "Parcourt la portion phonie de la bande, écoute les signaux forts "
-            "(S7 et plus) et s'arrête sur le premier QSO en français. "
-            "Recliquer pour arrêter ; tourner le bouton l'arrête aussi.")
+            "et s'arrête sur le premier QSO en français. Nouvel appui : QSO "
+            "français suivant. Recliquer pendant la recherche pour l'arrêter.")
         self.hunt_button.toggled.connect(self.on_hunt_toggled)
         # QSO français trouvé : bouton rouge clignotant pour y rester
         self.stay_button = QtWidgets.QPushButton("RESTER ICI")
@@ -1805,13 +2404,30 @@ class MainWindow(QtWidgets.QMainWindow):
         modes.addLayout(ssb_row, rows + 1, 0, 1, 2)
         # œil magique vert, en phase avec l'aiguille du calage
         self.magic_eye = MagicEye(self.ssb_meter)
-        modes.addWidget(self.magic_eye, rows + 2, 0, 1, 2, QtCore.Qt.AlignHCenter)
+        # en haut à droite : seulement le voyant vert rond (œil magique) ;
+        # les petites LED (AUTO LSB/USB, calage) sont gardées mais non affichées
+        self.ssb_led.hide()
+        self.sideband_led.hide()
+        # en haut à droite : le gros bouton vert RX / rouge TX (œil magique masqué)
+        self.magic_eye.hide()
+        modes.addWidget(self.red_button, rows, 0, 1, 2, QtCore.Qt.AlignHCenter)
+        # sous le gros bouton vert, à droite de FONCTION : poussoir TUNE vintage
+        self.tune_plate = PushPlate(
+            "TUNE", tooltip="Accorde l'antenne avec la boîte d'accord interne. "
+            "La radio émet une porteuse (voyant ambre pendant l'accord).")
+        self.tune_plate.clicked.connect(self.on_tune)
+        tune_col = QtWidgets.QVBoxLayout()          # descendu : dans l'axe de FONCTION
+        tune_col.setContentsMargins(0, 0, 0, 0)
+        tune_col.addSpacing(115)
+        tune_col.addWidget(self.tune_plate, 0, QtCore.Qt.AlignHCenter)
+        modes.addLayout(tune_col, rows + 2, 0, 1, 2, QtCore.Qt.AlignHCenter)
         modes.setRowStretch(rows + 4, 1)
 
         header = QtWidgets.QHBoxLayout()
         header.addLayout(left, stretch=1)
         header.addSpacing(10)
-        header.addLayout(vfo)
+        self.vfo_slot.addStretch()
+        self.vfo_slot.addLayout(vfo)            # (voir plus haut : au centre)
         header.addSpacing(6)
         header.addLayout(modes)
         layout.addLayout(header)
@@ -1867,16 +2483,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.drag = None                # (x de départ, kHz par pixel, fréquence)
         self.dragged = False
         graphics.viewport().installEventFilter(self)
-        graphics.setMinimumHeight(180)       # spectre + waterfall toujours visibles
+        graphics.setMinimumHeight(50)        # spectre + waterfall toujours visibles (gros VFO)
+        # touches de bande vintage : sous le waterfall ; au-dessus, la rangée de boutons
+        band_top = QtWidgets.QHBoxLayout()          # HP PC à gauche des bandes
+        band_top.setSpacing(4)
+        band_top.addWidget(self.preamp_box)
+        keys = QtWidgets.QVBoxLayout()              # bandes et modes : un seul cadre
+        keys.setSpacing(0)
+        keys.addLayout(bands)
+        keys.addLayout(mode_line)
+        band_top.addWidget(PanelFrame(keys), stretch=1)
+        layout.addLayout(self.knob_bar)
         layout.addWidget(graphics, stretch=1)
+        self.graphics = graphics                # prêté à l'écran plein cadre (ZOOM)
+        self.main_layout = layout
+        self.graphics_index = layout.indexOf(graphics)
+        layout.addLayout(band_top)
         # tout ce qui est sous le waterfall : un seul bloc, masquable d'un coup
         self.below = QtWidgets.QWidget()
         below = QtWidgets.QVBoxLayout(self.below)
         below.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.below)
+        # préampli BF entre le waterfall et les bandes
         # boutons de bandes et de modes, en ligne sous le waterfall
-        below.addWidget(PanelFrame(bands))
-        below.addWidget(PanelFrame(mode_line))
+        band_mode = QtWidgets.QVBoxLayout()
+        band_mode.setSpacing(0)
+        # (HP PC, bandes et modes sont maintenant au-dessus du waterfall)
         # tous les autres boutons, même format, dans une 3e rangée encadrée
         tools = QtWidgets.QGridLayout()
         tools.setSpacing(4)
@@ -1884,7 +2516,7 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setStyleSheet(PUSH_3D)
         self.atu_button.setStyleSheet(PUSH_3D_MODE)
         for col, button in enumerate(self.vfo_buttons + [
-                self.tune_button, self.atu_button, self.sideband_button, self.ssb_auto,
+                self.atu_button, self.sideband_button, self.ssb_auto,
                 self.hunt_button, self.whistle_check, self.onoff_button,
                 self.stay_button]):
             button.setMinimumWidth(58)
@@ -2016,12 +2648,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vox_knob.setToolTip("Sensibilité du VOX : plus haut = déclenche plus "
                                  "facilement. Molette = réglage fin (1 cran), "
                                  "Maj + molette = 10 crans, ou glisser haut/bas")
-        self.vox_knob.setValue(130)
+        self.vox_knob.setValue(128)
         self.vox_monitor = None
         self.vox_tx = False             # émission lancée par le VOX
         self.vox_last_voice = 0.0
         self.vox_knob.valueChanged.connect(self.on_vox_knob)
-        self.vox_label = QtWidgets.QLabel(f"{130 * 100 / 255:.0f} %")
+        self.vox_label = QtWidgets.QLabel(f"{128 * 100 / 255:.0f} %")
         self.vox_label.setMinimumWidth(44)
         self.vox_label.setStyleSheet("font: bold 11pt monospace;")
         vox_box = QtWidgets.QWidget()
@@ -2032,6 +2664,34 @@ class MainWindow(QtWidgets.QMainWindow):
         vox_row.addWidget(self.vox_knob)
         vox_row.addWidget(self.vox_label)
         extras.addWidget(vox_box, 0, 7)
+        # compresseur de modulation de la radio (BLU) : marche/arrêt + niveau 0–10
+        self.comp_button = QtWidgets.QPushButton("COMP OFF")
+        self.comp_button.setCheckable(True)
+        self.comp_button.setMinimumWidth(58)
+        self.comp_button.setStyleSheet(PUSH_3D)
+        self.comp_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.comp_button.setToolTip("Compresseur de modulation de l'IC-7300 (BLU) : "
+                                    "marche / arrêt. Surveiller la barre COMP dB : "
+                                    "10 à 15 dB en pointe, c'est bien.")
+        self.comp_button.toggled.connect(self.on_comp_toggled)
+        self.comp_knob = PotKnob(0, 255)
+        self.comp_knob.setToolTip("Niveau du compresseur (0 à 10 comme sur la radio). "
+                                  "Molette = fin, Maj + molette = 10 crans, ou glisser")
+        self.comp_knob.valueChanged.connect(self.on_comp_knob)
+        self.comp_label = QtWidgets.QLabel("–")
+        self.comp_label.setMinimumWidth(30)
+        self.comp_label.setStyleSheet("font: bold 11pt monospace;")
+        comp_box = QtWidgets.QWidget()
+        comp_row = QtWidgets.QHBoxLayout(comp_box)
+        comp_row.setContentsMargins(0, 0, 0, 0)
+        comp_row.setSpacing(4)
+        # le bouton COMP va dans la rangée d'outils, avec les autres boutons
+        tools.addWidget(self.comp_button, 0, 12)
+        comp_title = QtWidgets.QLabel("Niveau COMP")
+        comp_row.addWidget(comp_title)
+        comp_row.addWidget(self.comp_knob)
+        comp_row.addWidget(self.comp_label)
+        # placé dans la ligne des réglages d'émission (voir tx_row)
         self.heard_stations = []            # (fréquence, LSB/USB), dans l'ordre d'écoute
         self.heard_index = -1               # station où l'on est dans cette liste
         self.heard_origin = -1              # station où le scan s'est arrêté (repère 0)
@@ -2084,7 +2744,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.floor_spin.valueChanged.connect(self.on_floor_changed)
         self.range_spin = QtWidgets.QDoubleSpinBox()
         self.range_spin.setRange(10, 160)
-        controls.addWidget(self.view_combo)
+        # menu RF / Audio remplacé par l'interrupteur AFFICHAGE (rangée du haut)
+        self.view_combo.hide()
+        self.view_toggle.toggled.connect(
+            lambda down: self.view_combo.setCurrentIndex(1 if down else 0))
+        self.view_combo.currentIndexChanged.connect(
+            lambda i: self.view_toggle.setDown(i == 1, emit=False))
         controls.addWidget(QtWidgets.QLabel("Largeur"))
         controls.addWidget(self.span_combo)
         controls.addWidget(self.fmax_spin)
@@ -2111,13 +2776,41 @@ class MainWindow(QtWidgets.QMainWindow):
                                   "Ne change pas le son envoyé au PC.")
         self.af_label = QtWidgets.QLabel()
         self.af_label.setMinimumWidth(50)
-        controls.addWidget(QtWidgets.QLabel("Volume PC"))
-        controls.addWidget(self.pc_volume)
-        controls.addWidget(self.pc_volume_label)
-        controls.addWidget(self.mute_check)
+        # curseur Volume PC remplacé par le bouton VOLUME (à côté d'ALC) ;
+        # le curseur reste caché : il fait le lien avec le son
+        self.pc_volume.hide()
+        self.pc_volume_label.hide()
+        self.volume_knob.valueChanged.connect(self.pc_volume.setValue)
+        # case Muet remplacée par l'interrupteur MUET (à côté d'AFFICHAGE)
+        self.mute_check.hide()
+        self.mute_toggle.toggled.connect(self.mute_check.setChecked)
+        self.mute_check.toggled.connect(lambda on: self.mute_toggle.setDown(on, emit=False))
+        # commutateur de sortie : casque (USB) ou haut-parleurs du PC
+        self.output_button = QtWidgets.QPushButton()
+        self.output_button.setStyleSheet(PUSH_3D)
+        self.output_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.output_button.setToolTip("Bascule tout le son du PC entre le casque "
+                                      "et les haut-parleurs du PC")
+        self.output_button.clicked.connect(self.on_output_switch)
+        # LED rouge allumée quand le son part dans le casque
+        self.headset_led = QtWidgets.QLabel()
+        self.headset_led.setFixedSize(14, 14)
+        self.headset_led.setToolTip("Rouge = son dans le casque")
+        out_row = QtWidgets.QHBoxLayout()
+        out_row.setSpacing(6)
+        out_row.addWidget(self.headset_led)
+        out_row.addWidget(self.output_button)
+        # bouton CASQUE remplacé par l'interrupteur ÉCOUTE (à côté de MUET)
+        self.headset_led.hide()
+        self.output_button.hide()
+        self.preamp_box.hide()                  # plus rien à gauche des touches
+        self.output_toggle.toggled.connect(self._output_toggled)
+        self.af_label_box.addLayout(out_row)               # sous « VOLUME BF PC »
+        self._output_text()
+        self.output_timer = QtCore.QTimer(self)            # casque branché/débranché
+        self.output_timer.timeout.connect(self._output_text)
+        self.output_timer.start(2000)
         # volume du son épuré par RNNoise (au-delà de 100 % : amplifié)
-        controls.addSpacing(12)
-        controls.addWidget(QtWidgets.QLabel("Épuré"))
         self.clean_volume = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.clean_volume.setRange(50, 400)
         self.clean_volume.setValue(RNN_CLEAN_VOLUME)
@@ -2128,12 +2821,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clean_volume_label = QtWidgets.QLabel(f"{RNN_CLEAN_VOLUME} %")
         self.clean_volume_label.setMinimumWidth(50)
         self.clean_volume.valueChanged.connect(self.on_clean_volume)
-        controls.addWidget(self.clean_volume)
-        controls.addWidget(self.clean_volume_label)
-        controls.addSpacing(20)
-        controls.addWidget(QtWidgets.QLabel("AF radio"))
-        controls.addWidget(self.af_slider)
-        controls.addWidget(self.af_label)
+        # curseur Épuré remplacé par le bouton ÉPURÉ (rangée au-dessus du waterfall)
+        self.clean_volume.hide()
+        self.clean_volume_label.hide()
+        self.clean_knob.setValue(self.clean_volume.value())
+        self.clean_knob.valueChanged.connect(
+            lambda v: self.clean_volume.setValue(max(50, v)))   # 50 % au minimum
+        # curseur AF radio remplacé par le bouton AF RADIO (à droite d'ÉPURÉ)
+        self.af_slider.hide()
+        self.af_label.hide()
+        self.af_radio_knob.valueChanged.connect(
+            lambda pct: self.af_slider.setValue(round(pct * 255 / 100)))
 
         self.loopback = None
         self.pc_volume.valueChanged.connect(self.on_pc_volume)
@@ -2200,11 +2898,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.decoder_text = QtWidgets.QPlainTextEdit()
         self.decoder_text.setReadOnly(True)
         self.decoder_text.setMaximumBlockCount(500)
-        self.decoder_text.setFixedHeight(70)
-        self.decoder_text.setStyleSheet("font: bold 14pt monospace; color: #3ddc84;")
+        self.decoder_text.setFixedSize(300, 104)
+        self.decoder_text.setStyleSheet("font: bold 12pt monospace; color: #3ddc84; "
+                                        "background: #05080a; border: 2px solid #3e3024; "
+                                        "border-radius: 6px;")
         self.decoder_text.setVisible(False)
         below.addLayout(decoder_row)
-        below.addWidget(self.decoder_text)
+        # texte décodé : dans la place libre sous le S-mètre (la fenêtre ne grandit pas)
+        self.s_col.insertWidget(self.s_col.count() - 1, self.decoder_text)
 
         # Émission : micro du PC ou fichier, envoyés à la radio par l'USB
         self.radio_sink = args.sink
@@ -2220,6 +2921,14 @@ class MainWindow(QtWidgets.QMainWindow):
         for name, description in list_microphones(args.source):
             self.tx_source.addItem(f"Micro : {description}", name)
         self.tx_source.addItem("Fichier audio", "file")
+        # micro par défaut du système en premier choix (le casque quand il est branché)
+        default_mic = subprocess.run(["pactl", "get-default-source"], capture_output=True,
+                                     text=True, env=PACTL_ENV).stdout.strip()
+        if self.tx_source.findData(default_mic) >= 0:
+            self.tx_source.setCurrentIndex(self.tx_source.findData(default_mic))
+        self.voice_scope.set_source(self.tx_source.currentData())
+        self.tx_source.currentIndexChanged.connect(
+            lambda _: self.voice_scope.set_source(self.tx_source.currentData()))
         self.tx_source.setToolTip("Ce qui part à l'émission")
         self.tx_file = None
         self.tx_file_button = QtWidgets.QPushButton("Choisir…")
@@ -2253,21 +2962,26 @@ class MainWindow(QtWidgets.QMainWindow):
                                    f"{TX_TIMEOUT // 60} min (ou la durée du "
                                    f"fichier s'il est plus long).")
         self.ptt_button.toggled.connect(self.on_ptt)
-        tx_row.addWidget(QtWidgets.QLabel("Puissance"))
-        tx_row.addWidget(self.power_slider)
-        tx_row.addWidget(self.power_label)
+        self.red_button.toggled.connect(self.ptt_button.setChecked)
+        # curseur Puissance retiré de l'écran : remplacé par le bouton argent
+        # sous le galva POWER (le curseur reste caché, il fait le lien avec la radio)
+        self.power_slider.hide()
+        self.power_label.hide()
         tx_row.addSpacing(10)
         tx_row.addWidget(self.tx_source)
         tx_row.addWidget(self.tx_file_button)
-        tx_row.addSpacing(10)
-        tx_row.addWidget(QtWidgets.QLabel("Niveau"))
-        tx_row.addWidget(self.tx_level)
-        tx_row.addWidget(self.tx_level_label)
-        tx_row.addSpacing(10)
-        tx_row.addWidget(QtWidgets.QLabel("Réglage ALC"))
-        tx_row.addWidget(self.alc_slider)
-        tx_row.addWidget(self.alc_slider_label)
+        # curseurs Niveau et Réglage ALC remplacés par les boutons NIVEAU et ALC
+        # sous le S-mètre (les curseurs restent cachés : lien avec le son et la radio)
+        self.tx_level.hide()
+        self.tx_level_label.hide()
+        self.alc_slider.hide()
+        self.alc_slider_label.hide()
+        self.level_knob.setValue(self.tx_level.value())
+        self.level_knob.valueChanged.connect(self.tx_level.setValue)
+        self.alc_knob.valueChanged.connect(self.alc_slider.setValue)
         tx_row.addWidget(self.tx_meter_label)
+        tx_row.addSpacing(16)
+        tx_row.addWidget(comp_box)
         tx_row.addStretch()
         tx_row.addWidget(self.ptt_button)
         below.addLayout(tx_row)
@@ -2277,6 +2991,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cw_text = QtWidgets.QPlainTextEdit()
         self.cw_text.setReadOnly(True)
         self.cw_text.setMaximumBlockCount(2000)
+        self.cw_text.setMinimumHeight(32)       # une ligne au minimum : la fenêtre tient à l'écran
         self.cw_text.setStyleSheet("font: bold 20pt monospace; color: #3ddc84;"
                                    " background: #05080a; border: none;")
         self.cw_info = QtWidgets.QLabel("")
@@ -2299,12 +3014,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_source.currentIndexChanged.connect(self.on_tx_source)
         self.on_tx_source()
         self.power_slider.valueChanged.connect(self.on_power_slider)
+        self.power_knob.valueChanged.connect(self.power_slider.setValue)
         self.alc_slider.valueChanged.connect(self.on_alc_slider)
         self.tx_active = False
         self.tx_digital = False         # émission numérique (SSTV) : mode data
         self.tx_started = 0.0
         self.tx_limit = TX_TIMEOUT          # s ; plus pour un fichier plus long
         self.tx_loopback = None             # module PipeWire micro → radio
+        self.tx_loopback_source = None
+        self.tx_loopback_input = None
+        self._tx_mic_unload()               # restes d'une session plantée
+        source = self.tx_source.currentData()
+        if source and source != "file":
+            self._tx_mic_mute(source, True)  # liaison prête dès le départ, micro coupé
         self.tx_player = None               # paplay du fichier
         self.tx_timer = QtCore.QTimer(self)
         self.tx_timer.setInterval(250)
@@ -2325,6 +3047,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.audio.decoder_state.connect(self.on_decoder_state)
         self.audio.ssb_state.connect(self.on_ssb_state)
         self.audio.ssb_correct.connect(self.on_ssb_correct)
+        self.audio.sstv_seen.connect(self.on_sstv_seen)
+        self.audio.cw_env.connect(self.voice_scope.feed_cw)
+        self.cw_scope_timer = QtCore.QTimer(self)        # oscillo : CW reçue ou voix
+        self.cw_scope_timer.timeout.connect(self._cw_scope_update)
+        self.cw_scope_timer.start(300)
+        self.sstv_history = []          # dernières analyses de la surveillance SSTV
+        self.sstv_last = None           # (mode, Hz des tops) de la dernière détection
+        self.sstv_band_hits = []        # fréquence d'appel de la bande : signal présent ?
+        self.sstv_band_target = None    # (fréquence, mode) à rejoindre
+        self.sstv_band_timer = QtCore.QTimer(self)
+        self.sstv_band_timer.timeout.connect(self._sstv_band_check)
+        self.sstv_band_timer.start(2000)
         self.on_decoder_changed()
         self.audio.start()
 
@@ -2337,6 +3071,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.civ.cw_pitch.connect(self.on_cw_pitch)
             self.civ.vox.connect(self.on_radio_vox)
             self.civ.vox_gain.connect(self.on_radio_vox_gain)
+            self.civ.comp_on.connect(self.on_radio_comp)
+            self.civ.comp_level.connect(self.on_radio_comp_level)
             self.civ.frequency.connect(self.on_frequency)
             self.civ.mode.connect(self.on_mode)
             self.civ.other_frequency.connect(self.on_other_frequency)
@@ -2492,6 +3228,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _rx_fine_tick(self):
         """Barre RX fin animée comme l'aiguille : monte vite, redescend doucement."""
         # position exacte de l'aiguille ; sous S1, le spectre prend le relais
+        if getattr(self, "tx_active", False):
+            # en émission : pas de réception, barre à zéro
+            self.rx_fine.value = self.rx_fine.peak = self.rx_fine.minimum
+            self.rx_fine.update()
+            self.rx_fine_value.setText("TX")
+            return
         needle = self.s_meter.value
         s1 = S9 / 9
         level = max(needle, min(self.rx_scope_part * s1 / 10, s1))
@@ -2507,6 +3249,166 @@ class MainWindow(QtWidgets.QMainWindow):
         index = self.span_combo.findData(hz)
         if index >= 0:
             self.span_combo.setCurrentIndex(index)
+
+    # -- surveillance SSTV --------------------------------------------------
+
+    def on_sstv_seen(self, result):
+        """Toutes les secondes : (mode, Hz des tops) si une image SSTV passe."""
+        self.sstv_history = (self.sstv_history + [result])[-20:]
+        recent = [r for r in self.sstv_history[-6:] if r]
+        if len(recent) >= 2:                    # 2 détections sur 6 s : c'est une image
+            self.sstv_last = recent[-1]
+            self._sstv_alert()
+            self._sstv_auto_decode(recent[-1][0],
+                                   float(np.median([r[1] for r in recent])))
+        elif not any(self.sstv_history[-20:]):  # 20 s sans rien : fin d'alerte
+            self.sstv_last = None
+            self._sstv_alert()
+            win = self.sstv_window
+            if win is not None and not win.isVisible() and self.audio.sstv is not None:
+                win.refresh()                   # dernière image enregistrée
+                self.audio.sstv = None          # fin du décodage automatique
+                win.timer.stop()
+
+    def _sstv_alert(self):
+        on = self.sstv_last is not None or self.sstv_band_target is not None
+        self.function_selector.set_alert("SSTV", on)
+
+    def _sstv_auto_decode(self, mode_name, sync_hz):
+        """Décodage automatique, même fenêtre SSTV fermée ; une image prise en
+        cours de route démarre au rythme des tops (sans en-tête VIS)."""
+        if self.sstv_window is None:
+            self.sstv_window = SstvWindow(self)
+        win = self.sstv_window
+        if self.audio.sstv is None:
+            self.audio.sstv = win.decoder
+            win.timer.start()                   # enregistre les images finies
+            self.statusBar().showMessage(
+                f"SSTV détectée ({mode_name}) : décodage automatique", 5000)
+        mode = sstv_modes.BY_NAME.get(mode_name)
+        if win.decoder.mode is None:
+            # correspondant mal calé : on décale tout le signal (couleurs justes)
+            win.decoder.tune_offset = 1200 - sync_hz if abs(sync_hz - 1200) > 15 else 0.0
+            if mode:
+                win.decoder.start_without_vis(mode)
+
+    def _sstv_band_check(self):
+        """Fréquence d'appel SSTV de la bande (hors de l'écoute actuelle) : un
+        signal y tient-il plusieurs secondes dans la bande 1100–2300 Hz ?"""
+        target = None
+        band = self.freq_hz and band_of(self.freq_hz)
+        call = SSTV_CALLING.get(band) if band else None
+        if call and self.avg is not None and self.scope_edges and not self.tx_active \
+                and abs(call[0] - self.freq_hz) > 2500:
+            low, high = self.scope_edges
+            f, mode = call
+            a, b = (f + 1100, f + 2300) if mode == "USB" else (f - 2300, f - 1100)
+            if low <= a and b <= high:
+                n = len(self.avg)
+                i0 = int((a - low) / (high - low) * n)
+                i1 = max(i0 + 1, int((b - low) / (high - low) * n))
+                level = float(np.median(self.avg[i0:i1]))
+                floor = float(np.percentile(self.avg, 20))
+                self.sstv_band_hits = (self.sstv_band_hits + [level - floor > 8])[-5:]
+                if sum(self.sstv_band_hits) >= 4:
+                    target = call
+        else:
+            self.sstv_band_hits = []
+        if target != self.sstv_band_target:
+            self.sstv_band_target = target
+            self._sstv_alert()
+
+    def _sstv_tune(self):
+        """En passant sur SSTV : rejoindre le correspondant. Image entendue :
+        correction d'après la fréquence des tops (1200 Hz attendus) ; sinon
+        signal vu sur la fréquence d'appel de la bande : on y va."""
+        sign = self._ssb_sign()
+        if self.sstv_last and sign and self.freq_hz:
+            offset = self.sstv_last[1] - 1200
+            if abs(offset) > 15:
+                hz = int(round(self.freq_hz + sign * offset))
+                self.ssb_target = hz
+                self.tune_to(hz)
+                if self.sstv_window is not None:
+                    self.sstv_window.decoder.tune_offset = 0.0   # la radio est recalée
+                self.sstv_history = []          # nouvelle mesure des tops après recalage
+                self.statusBar().showMessage(
+                    f"SSTV : calé sur le correspondant ({offset:+.0f} Hz)", 5000)
+        elif self.sstv_band_target:
+            hz, mode = self.sstv_band_target
+            if mode != self.mode_combo.currentText():
+                self._set_sideband(mode)
+            self.ssb_target = hz
+            self.tune_to(hz)
+            self.statusBar().showMessage(
+                f"SSTV : fréquence d'appel {format_frequency(hz)} MHz {mode}", 5000)
+
+    def on_function(self, name):
+        """Sélecteur FONCTION. ZOOM : waterfall resserré à ±5 kHz ; SSTV : fenêtre
+        SSTV ouverte (décodage en direct) ; OFF : tout revient comme avant."""
+        if name == "SSTV":
+            self._sstv_tune()
+            self._sstv_attach()
+        elif self.sstv_window and self.sstv_window.isVisible():
+            self.sstv_window.close()
+        elif self.sstv_last is None:
+            self._sstv_detach()
+        if name == "ZOOM":
+            if self.zoom_saved_span is None:
+                self.zoom_saved_span = self.span_combo.currentData()
+            hz = 5000
+        else:
+            hz, self.zoom_saved_span = self.zoom_saved_span, None
+        index = self.span_combo.findData(hz) if hz else -1
+        if index >= 0:
+            self.span_combo.setCurrentIndex(index)
+            self.on_span_selected()
+        self.statusBar().showMessage(
+            {"ZOOM": "Fonction ZOOM : waterfall ±5 kHz",
+             "SSTV": "Fonction SSTV : décodage des images en direct"}.get(name, "Fonction OFF"),
+            3000)
+        self._function_fullscreen(name)
+
+    def _function_fullscreen(self, name):
+        """Fonction enclenchée : son contenu en plein écran ; OFF : retour."""
+        screen = self.function_screen
+        if name == "OFF":
+            self._give_back(screen.take_content())
+            screen.hide()
+            self.activateWindow()
+            return
+        if name == "ZOOM":
+            self.main_layout.removeWidget(self.graphics)
+            widget = self.graphics
+        elif name == "SSTV":
+            if self.sstv_view is None:
+                self.sstv_view = SstvLiveView(
+                    lambda: self.sstv_window.decoder if self.sstv_window else None)
+            widget = self.sstv_view
+        else:
+            widget = PendingView(name)          # fonction encore à créer
+        self._give_back(screen.show_content(name, widget))
+
+    def _give_back(self, widget):
+        """Rend le waterfall à la fenêtre principale, à sa place."""
+        if widget is self.graphics:
+            self.main_layout.insertWidget(self.graphics_index, widget, stretch=1)
+            widget.show()
+
+    def _sstv_attach(self):
+        """Décodeur SSTV branché sur le son (sans ouvrir la fenêtre SSTV)."""
+        if self.sstv_window is None:
+            self.sstv_window = SstvWindow(self)
+        if self.audio.sstv is None:
+            self.audio.sstv = self.sstv_window.decoder
+            self.sstv_window.timer.start()      # enregistre les images finies
+
+    def _sstv_detach(self):
+        win = self.sstv_window
+        if win is not None and not win.isVisible() and self.audio.sstv is not None:
+            win.refresh()
+            self.audio.sstv = None
+            win.timer.stop()
 
     def on_span_selected(self):
         if self.civ:
@@ -2539,6 +3441,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_frequency(self, hz):
         if hz != self.freq_hz:
             self.audio.ssb_tuner.request_reset()    # le son d'avant ne vaut plus
+            self._set_khz_candidates(hz)
             if self.cw_hunter.active and not self.cw_hunter.is_own(hz) \
                     and hz != self.ssb_target:      # bouton tourné : balayage CW arrêté
                 self.cw_hunter.stop()
@@ -2554,6 +3457,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if hz != self.ssb_target:               # changé à la main
                 self.ssb_recentred = False
                 self.ssb_anchor = None
+                self.ssb_pull_until = 0.0           # le rattrapage s'arrête
+                self.ssb_meter.pull_led = "off"
                 if self._detect_allowed():
                     self.detect_timer.start()       # mode reconnu quand on lâche
                 if self.audio.ssb:
@@ -2659,13 +3564,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.audio.ssb_tuner.mirror = self.sideband_button.isChecked()
         self.audio.ssb = self.audio.ssb_tuner if active else None
         self.ssb_auto.setEnabled(bool(sign))
+        self._set_khz_candidates(self.freq_hz)  # LSB/USB : le signe des écarts change
 
     def on_ssb_state(self, estimate, status, locked):
         self.ssb_estimate = 0.0 if locked else estimate
         if self.audio.ssb is None:
             return
+        if status != getattr(self, "_last_ssb_status", None):
+            self._last_ssb_status = status      # journal : pourquoi pas de correction
+            est = "-" if estimate is None else f"{estimate:+.0f}"
+            self._log_calage(f"etat « {status} » aiguille {est}")
         if locked:
             self.ssb_meter.set_state("locked", 0, status)
+            if self.ssb_meter.pull_led == "search":
+                self.ssb_meter.pull_led = "locked"   # calage parfait par le rattrapage
         elif estimate is None:
             if not self.ssb_recentred:      # après une correction : reste sur 0
                 self.ssb_meter.set_state("search", status=status)
@@ -2757,8 +3669,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # la 1re fois, la console est rangée en bas à droite du waterfall ;
         # ensuite on respecte la place où on l'a mise
         geo = QtWidgets.QApplication.primaryScreen().geometry()
-        screen = None if getattr(self, "_console_placed", False) else (geo.width(),
-                                                                        geo.height())
+        screen = None       # taille et place de la console réglées à la main
         if console.show_console(screen):
             self._console_placed = True
         else:
@@ -3087,6 +3998,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_direct_volume()
             self.rnn_timer.start(1000)
             self.clean_volume.setEnabled(True)
+            self.clean_knob.setEnabled(True)
             rnnoise_radio.set_volume(round(self.clean_volume.value()
                                            * self._preamp_factor()))
             self.statusBar().showMessage("RNNoise en marche : son filtré + une part "
@@ -3095,6 +4007,7 @@ class MainWindow(QtWidgets.QMainWindow):
             rnnoise_radio.off()
             self.rnn_timer.stop()
             self.clean_volume.setEnabled(False)
+            self.clean_knob.setEnabled(False)
             self.rnnoise_button.setText("RNNOISE")
             self._apply_direct_volume()
             self.mute_check.setChecked(False)
@@ -3102,6 +4015,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_clean_volume(self, value):
         self.clean_volume_label.setText(f"{value} %")
+        self.clean_knob.setValue(value)
         if self.rnnoise_button.isChecked():
             rnnoise_radio.set_volume(round(value * self._preamp_factor()))
 
@@ -3206,7 +4120,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hunt_button.blockSignals(False)
         self._hunt_blinking(False)
         if found:
-            self.statusBar().showMessage("Recherche arrêtée : on reste sur le QSO français")
+            self.statusBar().showMessage(
+                "QSO français trouvé : on reste dessus — rappuyer sur CHERCHER QSO FR "
+                "pour le suivant")
 
     def _whistle_text(self, on):
         self.whistle_check.setText("SIFFLEMENT " + ("ON" if on else "OFF"))
@@ -3249,7 +4165,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _detect_allowed(self):
-        return (hasattr(self, "detect_timer") and self.ssb_auto.isChecked()
+        return (not self._sstv_busy() and hasattr(self, "detect_timer") and self.ssb_auto.isChecked()
                 and not self.tx_active and self.view == "rf"
                 and self.mode_combo.currentText() in ("LSB", "USB", "AM", "FM")
                 and not (self.scanner.active or self.hunter.active
@@ -3262,6 +4178,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         result = analyse_mode(self.avg, *self.scope_edges, self.freq_hz)
         if not result:
+            if self._pulling():
+                self._log_calage("detection : aucune station trouvée à ± 6 kHz")
             return
         mode, hz = result
         current = self.mode_combo.currentText()
@@ -3276,6 +4194,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Calage auto : {mode} sur {format_frequency(hz)} MHz"
             + ("" if mode == current else f" (au lieu de {current})"), 5000)
+
+    def _start_pull(self, on):
+        """Fenêtre de rattrapage : la voix peut recaler jusqu'à ± PULL_MAX Hz
+        (au lieu de ± FINE_MAX autour du kHz rond), pendant PULL_SECONDS."""
+        self.ssb_pull_until = time.monotonic() + PULL_SECONDS if on else 0.0
+        self.ssb_meter.pull_led = "search" if on else "off"
+        # recherche élargie (± D_WIDE) pendant le rattrapage seulement
+        self.audio.ssb_tuner.d_limit = D_WIDE if on else D_MAX
+        self._set_khz_candidates(self.freq_hz)
+        if on:
+            QtCore.QTimer.singleShot(PULL_SECONDS * 1000, self._pull_narrow)
+        if on:
+            # pas de calage parfait à la fin du rattrapage : LED éteinte
+            QtCore.QTimer.singleShot((PULL_SECONDS + 5) * 1000, self._pull_timeout)
+            self.statusBar().showMessage(
+                f"Calage auto BLU : rattrapage du correspondant ({PULL_SECONDS} s)", 5000)
+
+    def _pull_narrow(self):
+        if not self._pulling():
+            self.audio.ssb_tuner.d_limit = D_MAX
+            self.audio.ssb_tuner.candidates = None
+
+    def _set_khz_candidates(self, hz):
+        """Rattrapage : kHz ronds à ± D_WIDE de hz, en écarts d pour le calage voix."""
+        sign = self._ssb_sign()
+        tuner = self.audio.ssb_tuner
+        if not hz or not sign:
+            tuner.candidates = None
+            tuner.round_ds = []
+            return
+        base = round(hz / 1000) * 1000
+        ds = [(k - hz) * sign for k in range(base - 2000, base + 3000, 1000)
+              if abs(k - hz) <= D_WIDE]
+        tuner.round_ds = ds             # le kHz rond l'emporte en cas de doute
+        tuner.candidates = ds if self._pulling() else None
+
+    def _pull_timeout(self):
+        if self.ssb_meter.pull_led == "search" and not self._pulling():
+            self.ssb_meter.pull_led = "off"
+
+    def _pulling(self):
+        return time.monotonic() < self.ssb_pull_until
 
     def _snap_to_khz(self):
         """Les stations BLU sont presque toujours sur un kHz rond : on s'y cale."""
@@ -3295,7 +4255,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_to(target)
         self.ssb_meter.set_state("locked", 0, "calé sur le kHz rond")
 
+    def _sstv_busy(self):
+        """Décodage SSTV en cours : le calage BLU sur la voix ne doit pas jouer."""
+        return self.audio.sstv is not None
+
     def on_ssb_correct(self, kind, shift):
+        if self._sstv_busy():
+            return
         sign = self._ssb_sign()
         if not sign or self.audio.ssb is None or self.tx_active or self.freq_hz is None:
             return
@@ -3315,7 +4281,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.snap_timer.start()
             return
         target = self.freq_hz + sign * round(shift)
-        if self.ssb_anchor is None or abs(target - self.ssb_anchor) > FINE_MAX:
+        if self._pulling():
+            # rattrapage : on suit la voix du correspondant, même hors du kHz rond
+            if abs(shift) > PULL_MAX:
+                self._log_calage(f"rattrapage refusé {shift:+.0f}")
+                return
+            self.ssb_anchor = target            # nouvelle référence : la vraie fréquence
+            if target % 1000 == 0 and self.audio.ssb_tuner.candidates:
+                # kHz rond trouvé : fin du rattrapage, affinage normal autour
+                self.ssb_pull_until = 0.0
+                self.audio.ssb_tuner.d_limit = D_MAX
+                self.audio.ssb_tuner.candidates = None
+                self._log_calage(f"rattrapage : kHz rond {target}")
+                self.statusBar().showMessage(
+                    f"Calage auto BLU : station trouvée sur {format_frequency(target)} MHz", 6000)
+        elif self.ssb_anchor is None or abs(target - self.ssb_anchor) > FINE_MAX:
             # trop loin du kHz rond : sans doute une erreur, on ne bouge pas
             self._log_calage(f"refus {shift:+.0f}")
             return
@@ -3380,6 +4360,37 @@ class MainWindow(QtWidgets.QMainWindow):
             steps += 1                      # on s'aligne d'abord sur le pas
         self.tune_to(base + steps * step)
 
+    def _fine_step(self):
+        """Pas fin enclenché sur la plaque (Hz), ou None."""
+        return next((hz for hz, sw, _ in self.fine_switches if sw.isChecked()), None)
+
+    def _fine_step_toggled(self, hz, on):
+        if on:                              # un seul pas fin à la fois
+            for other, sw, _ in self.fine_switches:
+                if other != hz and sw.isChecked():
+                    sw.blockSignals(True)
+                    sw.setChecked(False)
+                    sw.blockSignals(False)
+        for other, sw, led in self.fine_switches:
+            led.set_mode("blink" if sw.isChecked() else "off")
+        self._vfo_step_leds(self.vfo_step_switch.isChecked())
+
+    def _vfo_step_leds(self, on_100k):
+        fine = hasattr(self, "fine_switches") and self._fine_step() is not None
+        # pas fin enclenché : les LED 50/100 kHz s'éteignent (pas inutilisé)
+        self.led_100k.set_mode("off" if fine else "on" if on_100k else "off")
+        self.led_50k.set_mode("off" if fine or on_100k else "blink")
+
+    def on_knob_tuned(self, steps):
+        """Bouton VFO : pas de 50 kHz ou 100 kHz selon l'interrupteur à levier."""
+        if self.freq_hz is None:
+            return
+        step = self._fine_step() or self.step_combo.currentData()   # sinon : pas du menu
+        base = self.freq_hz // step * step
+        if steps < 0 and base != self.freq_hz:
+            steps += 1                      # on s'aligne d'abord sur le pas
+        self.tune_to(base + steps * step)
+
     def on_freq_entered(self):
         hz = parse_frequency(self.freq_entry.text())
         if hz is None:
@@ -3424,27 +4435,35 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_power(self, raw):
         self.power_slider.setEnabled(True)
+        self.power_knob.setEnabled(True)
         if not self.power_slider.isSliderDown():
             self.power_slider.blockSignals(True)
             self.power_slider.setValue(round(raw * 100 / 255))
             self.power_slider.blockSignals(False)
         self.power_label.setText(f"≈ {self.power_slider.value()} W")
+        if not self.power_knob._dragging:
+            self.power_knob.setValue(self.power_slider.value())
 
     def on_power_slider(self, percent):
         self.power_label.setText(f"≈ {percent} W")
+        self.power_knob.setValue(percent)
         if self.civ:
             self.civ.set_power(round(percent * 255 / 100))
 
     def on_usb_mod(self, raw):
         self.alc_slider.setEnabled(True)
+        self.alc_knob.setEnabled(True)
         if not self.alc_slider.isSliderDown():
             self.alc_slider.blockSignals(True)
             self.alc_slider.setValue(round(raw * 100 / 255))
             self.alc_slider.blockSignals(False)
         self.alc_slider_label.setText(f"{self.alc_slider.value()} %")
+        if not self.alc_knob._dragging:
+            self.alc_knob.setValue(self.alc_slider.value())
 
     def on_alc_slider(self, percent):
         self.alc_slider_label.setText(f"{percent} %")
+        self.alc_knob.setValue(percent)
         if self.civ:
             self.civ.set_usb_mod(round(percent * 255 / 100))
 
@@ -3453,6 +4472,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_file_button.setVisible(is_file)
         if is_file and self.tx_file:
             self.tx_file_button.setText(os.path.basename(self.tx_file))
+        # liaison micro → radio préparée pour le nouveau micro (coupée hors émission)
+        if (hasattr(self, "tx_loopback_input") and not is_file
+                and not getattr(self, "tx_active", False)):
+            self._tx_mic_mute(self.tx_source.currentData(), True)
+        # VOX en marche : il écoute le micro qu'on vient de choisir
+        vox_monitor = getattr(self, "vox_monitor", None)
+        if vox_monitor and not is_file and vox_monitor.source != self.tx_source.currentData():
+            vox_monitor.stop()
+            self.vox_monitor = VoxMonitor(self.tx_source.currentData())
+            self.vox_monitor.level.connect(self.on_vox_level)
+            self.vox_monitor.start()
 
     def choose_tx_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -3464,6 +4494,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_tx_level(self, value):
         self.tx_level_label.setText(f"{value} %")
+        self.level_knob.setValue(value)
         subprocess.run(["pactl", "set-sink-volume", self.radio_sink, f"{value}%"],
                        capture_output=True)
 
@@ -3489,12 +4520,11 @@ class MainWindow(QtWidgets.QMainWindow):
             # un temps pour que la radio passe en émission avant le son
             QtCore.QTimer.singleShot(400, self._play_tx_file)
         else:
-            out = subprocess.run(
-                ["pactl", "load-module", "module-loopback", f"source={source}",
-                 f"sink={self.radio_sink}", "latency_msec=40",
-                 "source_dont_move=true", "sink_dont_move=true"],
-                capture_output=True, text=True)
-            self.tx_loopback = out.stdout.strip() or None
+            self._tx_mic_mute(source, False)
+            if not self.vox_monitor:
+                self.tx_mic_monitor = VoxMonitor(source)
+                self.tx_mic_monitor.level.connect(self.on_vox_level)
+                self.tx_mic_monitor.start()
         self.tx_limit = TX_TIMEOUT
         if source == "file":
             try:
@@ -3504,6 +4534,8 @@ class MainWindow(QtWidgets.QMainWindow):
             except (OSError, wave.Error, EOFError):
                 pass
         self.tx_active = True
+        self.tx_galva.set_tx(True)
+        self._pactl_stream("set-sink-input-mute", "1")     # casque muet pendant l'émission
         self._update_ssb()              # pas de calage BLU en émission
         self.tx_started = time.monotonic()
         self.tx_timer.start()
@@ -3531,17 +4563,87 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tx_player = subprocess.Popen(
                 ["paplay", f"--device={self.radio_sink}", self.tx_file])
 
+    TX_MIC_NODE = "ic7300_tx_micro"
+
+    def _tx_mic_unload(self):
+        """Supprime la liaison micro → radio (et les restes d'une session plantée)."""
+        out = subprocess.run(["pactl", "list", "modules", "short"],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            if self.TX_MIC_NODE in line:
+                subprocess.run(["pactl", "unload-module", line.split()[0]],
+                               capture_output=True)
+        self.tx_loopback = None
+        self.tx_loopback_source = None
+        self.tx_loopback_input = None
+
+    def _tx_mic_mute(self, source, mute):
+        """Liaison micro → radio ouverte en permanence : on coupe ou rétablit
+        seulement le son. La créer/supprimer à chaque émission réorganisait le son
+        du PC et figeait la réception plusieurs secondes."""
+        if source is not None and self.tx_loopback:
+            # la liaison d'émission vers le Pi a pu tomber et être recréée :
+            # notre module a alors disparu avec elle
+            modules = subprocess.run(["pactl", "list", "modules", "short"],
+                                     capture_output=True, text=True).stdout
+            if not any(line.split("\t")[0] == self.tx_loopback
+                       for line in modules.splitlines()):
+                self.tx_loopback = None
+        if source is not None and (not self.tx_loopback
+                                   or self.tx_loopback_source != source):
+            self._tx_mic_unload()
+            out = subprocess.run(
+                ["pactl", "load-module", "module-loopback", f"source={source}",
+                 f"sink={self.radio_sink}", "latency_msec=40",
+                 "source_dont_move=true", "sink_dont_move=true",
+                 # rôle à part : sinon le système son mémorise la coupure du micro
+                 # pour toutes les liaisons et la réception démarrait muette
+                 f"sink_input_properties='node.name={self.TX_MIC_NODE} "
+                 "media.role=ic7300tx'"],
+                capture_output=True, text=True)
+            self.tx_loopback = out.stdout.strip() or None
+            self.tx_loopback_source = source
+            self.tx_loopback_input = None
+        if not self.tx_loopback:
+            return
+        if self.tx_loopback_input is None:
+            for _ in range(60):             # le flux apparaît un instant après le module
+                try:
+                    streams = json.loads(subprocess.run(
+                        ["pactl", "-f", "json", "list", "sink-inputs"],
+                        capture_output=True, text=True, env=PACTL_ENV).stdout)
+                except ValueError:
+                    streams = []
+                for stream in streams:
+                    if stream["properties"].get("node.name") == self.TX_MIC_NODE:
+                        self.tx_loopback_input = str(stream["index"])
+                if self.tx_loopback_input:
+                    break
+                time.sleep(0.05)
+        if self.tx_loopback_input:
+            subprocess.run(["pactl", "set-sink-input-mute", self.tx_loopback_input,
+                            "1" if mute else "0"], capture_output=True)
+
     def stop_tx(self, reason=None):
+        self._backlight_tx(False)           # rétro-éclairage : retour au calme
         if self.tx_player:
             self.tx_player.terminate()
             self.tx_player = None
         if self.tx_loopback:
-            subprocess.run(["pactl", "unload-module", self.tx_loopback],
-                           capture_output=True)
-            self.tx_loopback = None
+            self._tx_mic_mute(None, True)       # liaison gardée ouverte, micro coupé
         if self.civ:
             self.civ.set_ptt(False)
         self.tx_active = False
+        self.tx_galva.set_tx(False)
+        self.power_meter.reset()
+        self.swr_alarm = False
+        self.tx_stopped_at = time.monotonic()
+        # retour de l'écoute au casque (sauf si « Muet » est coché)
+        self._pactl_stream("set-sink-input-mute", "1" if self.mute_check.isChecked() else "0")
+        if getattr(self, "tx_mic_monitor", None):
+            self.tx_mic_monitor.stop()
+            self.tx_mic_monitor = None
+        self.mic_db = None
         if self.vox_tx:
             self.vox_tx = False
             self.vox_button.setText("VOX ON")
@@ -3555,12 +4657,18 @@ class MainWindow(QtWidgets.QMainWindow):
                              (self.comp_meter, self.comp_value),
                              (self.alc_meter, self.alc_value),
                              (self.id_meter, self.id_value)):
-            meter.setValue(meter.minimum)
+            meter.value = meter.minimum         # remise à zéro directe (sans descente lente)
+            meter.update()
             value.setText("")
+        self.po_meter.value = self.po_meter.minimum
+        self.po_meter.update()
         if reason:
             self.statusBar().showMessage(reason)
 
     def _set_ptt_button(self, on):
+        self.red_button.blockSignals(True)          # le bouton rouge suit l'émission
+        self.red_button.setChecked(on)
+        self.red_button.blockSignals(False)
         self.ptt_button.blockSignals(True)
         self.ptt_button.setChecked(on)
         self.ptt_button.blockSignals(False)
@@ -3575,40 +4683,135 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.tx_player and self.tx_player.poll() is not None:
             self.stop_tx("Fichier émis en entier")
 
+    def _cw_scope_update(self):
+        """Réception CW (et seulement elle) : l'oscilloscope montre la
+        manipulation reçue ; sinon, la voix du micro."""
+        cw = (self.mode_combo.currentText() in ("CW", "CW-R") and not self.tx_active
+              and not getattr(self.civ, "_tx", False))
+        self.audio.cw_env_pitch = (getattr(self, "cw_note", None) or self.radio_cw_pitch) if cw else None
+        # créneaux seulement si de la CW est vraiment reçue (gardés 3 s après)
+        if cw and self.voice_scope.has_cw():
+            self.cw_seen_t = time.monotonic()
+        received = cw and time.monotonic() - getattr(self, "cw_seen_t", 0) < 3.0
+        self.voice_scope.set_cw(received)
+
+    def _backlight_tx(self, on, watts=None):
+        """Émission en cours ou non : en émission, le rétro-éclairage des
+        tambours suit la voix (minuterie _backlight_voice)."""
+        self.backlight_on_air = on
+        if on:
+            if not self.backlight_timer.isActive():
+                self.backlight_timer.start(30)
+        else:
+            self.backlight_timer.stop()
+            self.freq_label.set_voice(None)
+            self.clocks.set_voice(None)
+
+    def _backlight_voice(self):
+        level = self.voice_scope.voice_level()
+        self.freq_label.set_voice(level)
+        self.clocks.set_voice(level)
+
     def on_transmitting(self, tx):
+        if not tx and not self.tx_active:
+            self.power_meter.setValue(0)        # plus d'émission : aiguille à 0
+            self._backlight_tx(False)
+        elif tx:
+            self._backlight_tx(True)
         if self.tx_active and not tx and time.monotonic() - self.tx_started > 2:
             self.stop_tx("La radio n'émet pas (hors bande amateur ?)")
 
+    SWR_ALARM = 2.0
+
+    def _swr_led_paint(self, on):
+        top, edge = ("#ffb0a0", "#ff1a0a") if on else ("#4a1a14", "#1e0604")
+        self.swr_led.setStyleSheet(
+            "border-radius: 6px; border: 1px solid #111;"
+            f"background: qradialgradient(cx:0.35, cy:0.35, radius:0.8, fx:0.35, fy:0.35, "
+            f"stop:0 {top}, stop:1 {edge});")
+
+    def _swr_led_tick(self):
+        if self.swr_alarm and self.tx_active:
+            self.swr_blink = not self.swr_blink
+            self._swr_led_paint(self.swr_blink)
+        elif self.swr_blink:
+            self.swr_blink = False
+            self._swr_led_paint(False)
+
     def on_tx_meters(self, po, swr, alc):
+        if self._vox_silent():
+            return                              # barres seulement sur la voix
         self.swr_meter.setValue(swr)
         self.swr_value.setText(f"{piecewise(swr, SWR_POINTS):.1f}")
+        self.tx_galva.set_swr(piecewise(swr, SWR_POINTS))
+        self.swr_alarm = piecewise(swr, SWR_POINTS) > self.SWR_ALARM      # strictement au-dessus de 2
         percent = alc * 100 / ALC_ZONE
+        self.tx_galva.set_alc(percent)
         self.alc_meter.setValue(percent)
         self.alc_value.setText(f"{percent:.0f}")
         self.tx_meter_label.setText(f"Po {piecewise(po, PO_POINTS):3.0f} %")
 
+    def _vox_silent(self):
+        """Vrai pour une mesure d'émission arrivée en retard, juste après le
+        retour en réception : elle rallumerait les barres remises à zéro."""
+        if not self.tx_active and time.monotonic() - getattr(self, "tx_stopped_at", 0) < 1.5:
+            return True
+        return False                    # barres continues tant que la radio émet
+        if not (self.vox_tx and time.monotonic() - self.vox_last_voice > 0.12):
+            return False
+        for meter in (self.po_meter, self.alc_meter, self.swr_meter,
+                      self.comp_meter, self.id_meter):
+            meter.value = meter.minimum
+            meter.update()
+        return True
+
     def on_po(self, raw):
+        if self.tx_active:              # journal provisoire : rythme des mesures Po
+            try:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "po.log"), "a") as log:
+                    log.write(f"{time.monotonic():.3f} {raw} {getattr(self, 'mic_db', None)}\n")
+            except OSError:
+                pass
+        if self._vox_silent():
+            return                              # barres seulement sur la voix
         watts = piecewise(raw, PO_POINTS)       # % de 100 W = watts
+        if self.tx_active or watts > 0.5:       # rétro-éclairage : seulement en émission réelle
+            self._backlight_tx(True, watts)
         self.po_meter.setValue(watts)
+        self.tx_galva.set_po(watts)
+        self.power_meter.setValue(watts)
         now = time.monotonic()
         if watts >= self.po_peak_w or now - self.po_peak_t > 4.0:
             self.po_peak_w, self.po_peak_t = watts, now
         self.po_value.setText(f"{self.po_peak_w:.0f} W" if self.po_peak_w >= 1 else "")
 
     def on_drain(self, raw):
+        if self._vox_silent():
+            return
         amps = piecewise(raw, ID_POINTS)
         self.id_meter.setValue(amps)
         self.id_value.setText(f"{amps:.1f} A")
 
     def on_comp(self, raw):
+        if self._vox_silent():
+            return
         db = piecewise(raw, COMP_POINTS)
         self.comp_meter.setValue(db)
+        self.tx_galva.set_comp(db)
         self.comp_value.setText(f"{db:.0f}")
 
     def on_tune(self):
         if self.civ:
             self.civ.tune()
-            self.on_tuner(0x02)
+            # flash dès l'appui ; la radio peut répondre « pas d'accord » juste
+            # avant de commencer : on attend qu'elle annonce l'accord (3 s au
+            # plus), puis le flash s'arrête dès qu'elle en annonce la fin
+            self.tune_seen = False
+            self.tune_wait_until = time.monotonic() + 3
+            QtCore.QTimer.singleShot(3100, lambda: self.on_tuner(getattr(self, "tuner_state", 0x01)))
+            self.tune_plate.set_lit(True)
+            self.red_button.set_alert(True)
 
     def on_onoff(self):
         if not self.civ:
@@ -3640,9 +4843,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.civ.set_atu(on)
 
     def on_tuner(self, state):
+        self.tuner_state = state
         self.atu_button.setChecked(state in (0x01, 0x02))
-        tuning = state == 0x02
+        if state == 0x02:
+            self.tune_seen = True               # la boîte travaille
+            tuning = True
+        elif not getattr(self, "tune_seen", True) and \
+                time.monotonic() < getattr(self, "tune_wait_until", 0):
+            tuning = True                       # pas encore commencé : on attend
+        else:
+            tuning = False                      # fin de l'accord : arrêt immédiat
+            self.tune_seen = True
         self.tune_button.setText("TUNE…" if tuning else "TUNE")
+        self.tune_plate.set_lit(tuning)
+        self.red_button.set_alert(tuning)       # voyant vert : flash rouge rapide
+        if not tuning and not self.tx_active:
+            self.power_meter.setValue(0)
+            self._backlight_tx(False)
         self.tune_button.setStyleSheet(POWER_OFF if tuning else PUSH_3D)
 
     def _pactl_stream(self, *args):
@@ -3673,25 +4890,133 @@ class MainWindow(QtWidgets.QMainWindow):
                 widget.setValue(value) if widget is self.pc_volume else widget.setChecked(value)
                 widget.blockSignals(False)
         self.pc_volume_label.setText(f"{self.pc_volume.value()} %")
+        self.mute_toggle.setDown(self.mute_check.isChecked(), emit=False)
+        self.mute_toggle.setEnabled(found)
+        self.volume_knob.setValue(self.pc_volume.value())
+        self.volume_knob.setEnabled(found)
+        if hasattr(self, "af_knob"):
+            self._af_knob_follow(self.pc_volume.value())
         return found
 
     def on_pc_volume(self, value):
         self.pc_volume_label.setText(f"{value} %")
+        self.volume_knob.setValue(value)
+        self._af_knob_follow(value)
         self._apply_direct_volume()
+
+    @staticmethod
+    def _sinks():
+        """Sorties réelles du PC : (casque USB ou None, haut-parleurs PC ou None)."""
+        out = subprocess.run(["pactl", "list", "short", "sinks"],
+                             capture_output=True, text=True).stdout
+        names = [line.split("\t")[1] for line in out.splitlines() if "\t" in line]
+        headset = next((n for n in names if n.startswith("alsa_output.usb")
+                        and "Burr-Brown" not in n), None)
+        speakers = next((n for n in names if n.startswith("alsa_output.pci")), None)
+        return headset, speakers
+
+    def _output_text(self):
+        current = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                                 text=True).stdout.strip()
+        on_pc = current.startswith("alsa_output.pci")
+        self.output_button.setText("HP PC" if on_pc else "CASQUE")
+        self.output_toggle.setDown(not on_pc, emit=False)
+        color = ("#3a1010", "#5a2020") if on_pc else ("#ff2a2a", "#ff9a9a")
+        self.headset_led.setStyleSheet(
+            "border-radius: 7px; border: 1px solid #222;"
+            f"background: qradialgradient(cx:0.35, cy:0.35, radius:0.8, "
+            f"fx:0.35, fy:0.35, stop:0 {color[1]}, stop:1 {color[0]});")
+
+    def _precision_toggled(self, on):
+        """PRÉCISION ON : double-clic pour accrocher les boutons ; OFF : direct."""
+        KNOB_MODE["precision"] = on
+        for knob in (self.preamp_knob, self.af_knob, self.level_knob, self.alc_knob,
+                     self.volume_knob, self.clean_knob, self.af_radio_knob,
+                     self.power_knob):
+            knob._release()
+        self.knob._release()
+        self.statusBar().showMessage(
+            "PRÉCISION ON : double-clic pour accrocher un bouton, double-clic pour le lâcher"
+            if on else "PRÉCISION OFF : cliquer et glisser pour tourner les boutons", 5000)
+
+    def _output_toggled(self, casque):
+        """Interrupteur ÉCOUTE : ne bascule que si la sortie n'y est pas déjà."""
+        current = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                                 text=True).stdout.strip()
+        if casque == current.startswith("alsa_output.pci"):
+            self.on_output_switch()
+        else:
+            self._output_text()
+
+    def on_output_switch(self):
+        current = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                                 text=True).stdout.strip()
+        headset, speakers = self._sinks()
+        target = headset if current.startswith("alsa_output.pci") else speakers
+        if not target:
+            self.statusBar().showMessage("Pas d'autre sortie son (casque débranché ?)", 5000)
+            return
+        subprocess.run(["pactl", "set-default-sink", target], capture_output=True)
+        # les sons déjà en cours suivent (écoute radio, sifflement, Spotify…)
+        out = subprocess.run(["pactl", "list", "short", "sink-inputs"],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            fields = line.split("\t")
+            if len(fields) > 1 and fields[1] != "" and self._sink_name(fields[1]) == current:
+                subprocess.run(["pactl", "move-sink-input", fields[0], target],
+                               capture_output=True)
+        self._output_text()
+
+    @staticmethod
+    def _sink_name(index):
+        out = subprocess.run(["pactl", "list", "short", "sinks"],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            fields = line.split("\t")
+            if fields[0] == index:
+                return fields[1]
+        return None
 
     def on_mute(self, muted):
         self._pactl_stream("set-sink-input-mute", "1" if muted else "0")
 
     def on_af_gain(self, level):
         self.af_slider.setEnabled(True)
+        if not getattr(self, "_af_radio_cut", False):
+            # écoute sur le PC : haut-parleur de la radio coupé au lancement
+            # (le son USB vers le PC ne dépend pas de ce volume)
+            self._af_radio_cut = True
+            if level > 0:
+                # ordre envoyé directement : le curseur part déjà de 0 et
+                # setValue(0) seul n'aurait rien envoyé à la radio
+                self.af_slider.blockSignals(True)
+                self.af_slider.setValue(0)
+                self.af_slider.blockSignals(False)
+                self.on_af_slider(0)
+                return
         if not self.af_slider.isSliderDown():
             self.af_slider.blockSignals(True)
             self.af_slider.setValue(level)
             self.af_slider.blockSignals(False)
         self.af_label.setText(f"{round(self.af_slider.value() * 100 / 255)} %")
+        self.af_radio_knob.setEnabled(True)
+        if not self.af_radio_knob._dragging:
+            self.af_radio_knob.setValue(round(self.af_slider.value() * 100 / 255))
+
+    def _af_knob_follow(self, percent):
+        """Le bouton rond suit le Volume PC (0–150 %) sans renvoyer d'ordre."""
+        self.af_knob.blockSignals(True)
+        self.af_knob.setValue(percent / 15)
+        self.af_knob.blockSignals(False)
+        self.af_display.setText(f"{percent}")
+        self.af_display.update()
+
+    def on_af_knob(self, value):
+        self.pc_volume.setValue(round(value * 15))          # même chemin que le curseur
 
     def on_af_slider(self, level):
         self.af_label.setText(f"{round(level * 100 / 255)} %")
+        self.af_radio_knob.setValue(round(level * 100 / 255))
         if self.civ:
             self.civ.set_af_gain(level)
 
@@ -3819,7 +5144,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rtty_invert.setVisible(name == "rtty")
         self.decoder_auto.setVisible(name in ("cw", "psk31", "rtty"))
         # FT8 : plusieurs lignes par créneau, il faut de la place
-        self.decoder_text.setFixedHeight(150 if name == "ft8" else 70)
+        self.decoder_text.setFixedHeight(104)   # sous le S-mètre, même pour FT8
         if name == "ft8" and self.decoder_text.document().isEmpty():
             self.decoder_text.setPlainText(
                 "UTC      dB   DT Freq  Message  (14.074, 7.074… en USB)\n")
@@ -3881,7 +5206,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- VOX sur le micro du PC : la parole fait passer la radio en émission ---
     VOX_VOICE_MODES = ("LSB", "USB", "AM", "FM")
-    VOX_HANG_S = 0.8
+    VOX_HANG_S = 0.25
 
     def _vox_threshold(self):
         """Seuil en dBFS : sensibilité 0 % → -10 dB, 100 % → -60 dB."""
@@ -3920,6 +5245,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vox_label.setText(f"{self.vox_knob.value * 100 / 255:.0f} %")
 
     def on_vox_level(self, db):
+        self.mic_db = db
         if not self.vox_button.isChecked():
             return
         now = time.monotonic()
@@ -3958,6 +5284,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_radio_vox_gain(self, level):
         pass
 
+    # --- compresseur de modulation de la radio ---
+    def on_comp_toggled(self, on):
+        self.comp_button.setText("COMP ON" if on else "COMP OFF")
+        if self.civ:
+            self.civ.set_comp(on)
+
+    def on_comp_knob(self, level):
+        self.comp_label.setText(f"{level * 10 / 255:.1f}".replace(".", ","))
+        self.comp_knob_touched = time.monotonic()
+        if self.civ:
+            self.civ.set_comp_level(level)
+
+    def on_radio_comp(self, on):
+        self.comp_button.blockSignals(True)
+        self.comp_button.setChecked(on)
+        self.comp_button.blockSignals(False)
+        self.comp_button.setText("COMP ON" if on else "COMP OFF")
+
+    def on_radio_comp_level(self, level):
+        if time.monotonic() - getattr(self, "comp_knob_touched", 0) < 3:
+            return                      # on vient de le tourner : la radio n'a pas fini
+        self.comp_knob.setValue(level)
+        self.comp_label.setText(f"{level * 10 / 255:.1f}".replace(".", ","))
+
     def on_cw_pitch(self, hz):
         self.radio_cw_pitch = float(hz)
 
@@ -3969,6 +5319,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_decoder_led(signal, active)
         self.decoder_info.setText(info)
         self._move_pitch_lines(pitch)
+        self._cale_cw(pitch, signal)
+
+    def _cale_cw(self, pitch, signal):
+        """En CW, le galva CALE montre l'écart entre la note du correspondant
+        et la note CW de la radio : au zéro (plein éclat) quand c'est calé."""
+        if self.mode_combo.currentText() not in ("CW", "CW-R"):
+            return
+        if not signal or not pitch:
+            # entre deux signes morse : on garde la dernière mesure 2 s
+            if time.monotonic() - getattr(self, "cw_cale_t", 0) > 2.0:
+                self.ssb_meter.set_state("search", status="CW : pas de note à mesurer")
+            return
+        self.cw_cale_t = time.monotonic()
+        offset = pitch - self.radio_cw_pitch
+        if abs(offset) < 10:
+            self.ssb_meter.set_state("locked", 0, f"CW calée (écart {offset:+.0f} Hz)")
+        else:
+            self.ssb_meter.set_state("measure", offset, f"CW : écart {offset:+.0f} Hz")
 
     def on_record(self, recording):
         if recording:
@@ -4007,6 +5375,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._remember_band()
+        self.voice_scope.stop()
+        self.function_screen.close()
+        self._tx_mic_unload()
+        if self.tx_active:              # fermé en émission : l'écoute ne doit pas rester muette
+            self._pactl_stream("set-sink-input-mute",
+                               "1" if self.mute_check.isChecked() else "0")
         if self.vox_monitor:
             self.vox_monitor.stop()
             self.vox_monitor = None

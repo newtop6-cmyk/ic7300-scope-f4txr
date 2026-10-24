@@ -106,3 +106,64 @@ def show_console(screen=None):
 def hide_console():
     """Les terminaux repassent derrière Scope."""
     set_above(terminal_windows(), False)
+
+
+# hauteur gardée fixe pour la console (pixels), retenue d'une session à l'autre
+import json
+import os
+import time
+HEIGHT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "console_hauteur.json")
+DEFAULT_HEIGHT = 494
+
+
+def fixed_height():
+    try:
+        with open(HEIGHT_FILE) as f:
+            return int(json.load(f)["hauteur"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return DEFAULT_HEIGHT
+
+
+def _geometry(wid):
+    """(largeur, hauteur, maximisée) de la fenêtre, ou None."""
+    try:
+        info = subprocess.run(["xwininfo", "-id", hex(wid)], capture_output=True,
+                              text=True, timeout=2).stdout
+        state = subprocess.run(["xprop", "-id", hex(wid), "_NET_WM_STATE"],
+                               capture_output=True, text=True, timeout=2).stdout
+        w = int(re.search(r"Width: (\d+)", info).group(1))
+        h = int(re.search(r"Height: (\d+)", info).group(1))
+    except (OSError, subprocess.TimeoutExpired, AttributeError):
+        return None
+    return w, h, "MAXIMIZED" in state
+
+
+def keep_height():
+    """Remet la console à sa hauteur fixe si elle a changé (ou a été agrandie)."""
+    wids = terminal_windows()
+    if not wids:
+        return
+    wid = wids[0]
+    geo = _geometry(wid)
+    if geo is None:
+        return
+    w, h, maxi = geo
+    target = fixed_height()
+    if not maxi and abs(h - target) <= 8:
+        return
+    if maxi:                                # sortir du plein écran d'abord
+        _send([wid], b"_NET_WM_STATE", lambda x, d: (
+            0, x.XInternAtom(d, b"_NET_WM_STATE_MAXIMIZED_VERT", 0),
+            x.XInternAtom(d, b"_NET_WM_STATE_MAXIMIZED_HORZ", 0), 1))
+        w = 520
+    flags = 10 | (1 << 10) | (1 << 11) | (2 << 12)   # largeur + hauteur seulement
+    asked = target
+    for _ in range(3):              # la barre de titre décale un peu : on rattrape
+        _send([wid], b"_NET_MOVERESIZE_WINDOW",
+              lambda xl, d, a=asked: (flags, 0, 0, w, a))
+        time.sleep(0.8)
+        geo = _geometry(wid)
+        if geo is None or abs(geo[1] - target) <= 4:
+            return
+        asked += target - geo[1]

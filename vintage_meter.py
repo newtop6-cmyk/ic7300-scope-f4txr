@@ -181,3 +181,151 @@ class VintageSMeter(QtWidgets.QWidget):
         p.setBrush(shine)
         p.drawRoundedRect(QtCore.QRectF(13, 13, w - 26, h * 0.32), 7, 7)
         p.end()
+
+
+class VintagePowerMeter(VintageSMeter):
+    """Même galva que le S-mètre (boîtier, cadran, aiguille, taille), gradué
+    en watts (0 à 100 W, échelle dilatée pour la voix), POWER au centre."""
+
+    PO_MAX = 100.0
+
+    def __init__(self):
+        super().__init__()
+        self.setToolTip("Puissance émise (Po) en watts")
+        self.watts_peak = 0.0
+
+    def frac(self, watts):
+        # échelle très dilatée en bas : la moindre puissance réelle fait bouger l'aiguille
+        return (max(0.0, min(self.PO_MAX, watts)) / self.PO_MAX) ** 0.4
+
+    def _tick(self):
+        # galva de puissance très vif : monte presque d'un coup, retombe vite
+        speed = 0.8 if self.target > self.value else 0.3
+        self.value += (self.target - self.value) * speed
+        self.update()
+
+    def setValue(self, watts):
+        """Reçoit des watts ; l'aiguille travaille en « brut » 0–241 comme le S-mètre."""
+        self.watts_peak = max(self.watts_peak * 0.98, watts)
+        self.target = self.frac(watts) * S9_PLUS_60
+
+    def reset(self):
+        self.target = 0.0
+        self.watts_peak = 0.0
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(QtCore.Qt.NoPen)
+        rim = QtGui.QLinearGradient(0, 0, 0, h)
+        rim.setColorAt(0, QtGui.QColor("#8a7058"))
+        rim.setColorAt(0.5, QtGui.QColor("#3e3024"))
+        rim.setColorAt(1, QtGui.QColor("#120c08"))
+        p.setBrush(rim)
+        p.drawRoundedRect(QtCore.QRectF(0, 0, w, h), 14, 14)
+        case = QtGui.QLinearGradient(0, 0, 0, h)
+        case.setColorAt(0, QtGui.QColor("#54422f"))
+        case.setColorAt(1, QtGui.QColor("#21170f"))
+        p.setBrush(case)
+        p.drawRoundedRect(QtCore.QRectF(3, 3, w - 6, h - 6), 12, 12)
+        bezel = QtGui.QLinearGradient(0, 8, 0, h - 8)
+        bezel.setColorAt(0, QtGui.QColor("#0a0604"))
+        bezel.setColorAt(1, QtGui.QColor("#7a6450"))
+        p.setBrush(bezel)
+        p.drawRoundedRect(QtCore.QRectF(8, 8, w - 16, h - 16), 10, 10)
+        face = QtCore.QRectF(11, 11, w - 22, h - 22)
+        glow = QtGui.QRadialGradient(w / 2, h - 12, w * 0.7)
+        glow.setColorAt(0, QtGui.QColor("#fff3cf"))
+        glow.setColorAt(0.55, QtGui.QColor("#f1d999"))
+        glow.setColorAt(1, QtGui.QColor("#c49c55"))
+        p.setBrush(glow)
+        p.drawRoundedRect(face, 8, 8)
+        shade = QtGui.QLinearGradient(0, 11, 0, 40)
+        shade.setColorAt(0, QtGui.QColor(0, 0, 0, 130))
+        shade.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+        p.setBrush(shade)
+        p.drawRoundedRect(face, 8, 8)
+        for x0, x1 in ((11, 28), (w - 11, w - 28)):
+            side = QtGui.QLinearGradient(x0, 0, x1, 0)
+            side.setColorAt(0, QtGui.QColor(0, 0, 0, 80))
+            side.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+            p.setBrush(side)
+            p.drawRoundedRect(face, 8, 8)
+
+        cx, cy = w / 2, h + 50
+        r_out, r_in = 150, 128
+        ink = QtGui.QColor("#2b2116")
+        red = QtGui.QColor("#b3261e")
+
+        def ang(f):
+            return math.radians(-SPAN + 2 * SPAN * f)
+
+        def arc(radius, f0, f1, color, width):
+            a0 = 90 - math.degrees(ang(f0))
+            a1 = 90 - math.degrees(ang(f1))
+            p.setPen(QtGui.QPen(color, width, cap=QtCore.Qt.FlatCap))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawArc(QtCore.QRectF(cx - radius, cy - radius, 2 * radius, 2 * radius),
+                      int(a1 * 16), int((a0 - a1) * 16))
+
+        def point(f, radius):
+            a = ang(f)
+            return QtCore.QPointF(cx + radius * math.sin(a), cy - radius * math.cos(a))
+
+        def label(f, radius, text, color, size, bold=False):
+            p.setPen(color)
+            p.setFont(QtGui.QFont("DejaVu Serif", size, QtGui.QFont.Bold if bold else -1))
+            pt = point(f, radius)
+            p.drawText(QtCore.QRectF(pt.x() - 16, pt.y() - 8, 32, 16),
+                       QtCore.Qt.AlignCenter, text)
+
+        red_f = self.frac(80)
+        arc(r_out, 0, red_f, ink, 1.4)
+        arc(r_out, red_f, 1, red, 1.4)
+        arc(r_out - 3, red_f, 1, red, 5)
+        arc(r_in, 0, 1, ink, 1)
+        for watts in (0, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100):
+            f = self.frac(watts)
+            big = watts in (0, 2, 5, 10, 20, 30, 50, 70, 100)
+            color = red if watts >= 80 else ink
+            p.setPen(QtGui.QPen(color, 1.4 if big else 1))
+            p.drawLine(point(f, r_out), point(f, r_out + (9 if big else 5)))
+            if big:
+                label(f, r_out + 18, str(watts), color, 9, bold=True)
+        for pct in (0, 25, 50, 75, 100):                 # échelle intérieure en %
+            f = self.frac(pct)
+            p.setPen(QtGui.QPen(ink, 1))
+            p.drawLine(point(f, r_in), point(f, r_in - 5))
+            label(f, r_in - 13, f"{pct}%" if pct in (0, 100) else str(pct), ink, 6)
+        p.setPen(ink)
+        p.setFont(QtGui.QFont("DejaVu Serif", 10, QtGui.QFont.Bold))
+        p.drawText(QtCore.QRectF(18, h - 46, 40, 16), QtCore.Qt.AlignLeft, "W")
+        p.setFont(QtGui.QFont("DejaVu Serif", 6))
+        p.drawText(QtCore.QRectF(w - 58, h - 44, 40, 14), QtCore.Qt.AlignRight, "Po")
+        # POWER au centre, et la crête dessous
+        p.setFont(QtGui.QFont("DejaVu Serif", 11, QtGui.QFont.Bold))
+        p.setPen(red if self.watts_peak >= 80 else ink)
+        p.drawText(QtCore.QRectF(cx - 60, h - 62, 120, 18), QtCore.Qt.AlignCenter, "POWER")
+        p.setFont(QtGui.QFont("DejaVu Serif", 8))
+        p.setPen(ink)
+        p.drawText(QtCore.QRectF(cx - 60, h - 46, 120, 14), QtCore.Qt.AlignCenter,
+                   f"{self.watts_peak:.0f} W" if self.watts_peak >= 1 else "")
+        tip = point(self.value / S9_PLUS_60, r_out + 4)
+        base = point(self.value / S9_PLUS_60, 52)
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 55), 2.4))
+        p.drawLine(base + QtCore.QPointF(3, 2), tip + QtCore.QPointF(3, 2))
+        p.setPen(QtGui.QPen(QtGui.QColor("#141414"), 1.7))
+        p.drawLine(base, tip)
+        p.setPen(QtCore.Qt.NoPen)
+        hub = QtGui.QLinearGradient(0, h - 26, 0, h - 11)
+        hub.setColorAt(0, QtGui.QColor("#3a2e22"))
+        hub.setColorAt(1, QtGui.QColor("#120c08"))
+        p.setBrush(hub)
+        p.drawRoundedRect(QtCore.QRectF(cx - 46, h - 26, 92, 15), 6, 6)
+        shine = QtGui.QLinearGradient(0, 11, 0, h * 0.5)
+        shine.setColorAt(0, QtGui.QColor(255, 255, 255, 75))
+        shine.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setBrush(shine)
+        p.drawRoundedRect(QtCore.QRectF(13, 13, w - 26, h * 0.32), 7, 7)
+        p.end()

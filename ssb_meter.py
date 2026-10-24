@@ -2,6 +2,7 @@
 recherche, montre l'écart estimé, puis se pose sur le 0 central quand c'est calé."""
 
 import math
+import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -44,10 +45,8 @@ class SsbMeter(QtWidgets.QWidget):
         if not self.isVisible():
             return
         if self.state == "search":
-            # balayage lent, comme une recherche
-            self.phase += 0.033 * 2 * math.pi / 3.0
-            goal = SPAN * 0.85 * math.sin(self.phase)
-            speed = 0.15
+            # pas de mesure : aiguille au repos (plus de balayage simulé)
+            goal, speed = -SPAN - 8, 0.08
         elif self.state == "off":
             goal, speed = -SPAN - 8, 0.08            # au repos, à gauche
         else:
@@ -59,12 +58,13 @@ class SsbMeter(QtWidgets.QWidget):
             widget.update()
 
     def light(self):
-        """Éclairage du cadran, 0 (éteint) à 1 (calé) : suit l'aiguille."""
-        if self.state == "off":
-            return 0.0
+        """Éclairage du cadran : toujours allumé ; plus on approche du calage
+        exact (écart mesuré), plus il brille ; plein éclat quand c'est calé."""
         if self.state == "locked":
             return 1.0
-        return 0.25 + 0.6 * (1.0 - min(self.needle_hz(), 60.0) / 60.0)
+        if self.state == "measure":
+            return 0.45 + 0.5 * (1.0 - min(self.needle_hz(), 60.0) / 60.0)
+        return 0.4                              # allumé, sans mesure en cours
 
     def needle_hz(self):
         """Écart (Hz) que montre l'aiguille en ce moment."""
@@ -280,4 +280,157 @@ class PlainLed(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(QtGui.QColor("#111"), 1))
         p.setBrush(bulb)
         p.drawEllipse(c, 6, 6)
+        p.end()
+
+
+class SsbMeterSmall(SsbMeter):
+    """Même galva de calage, au format des galvas Po W / COMP : petit cadre
+    en demi-cercle (dôme en haut, base plate), cadran crème, aiguille rouge."""
+
+    W, H = 116, 80
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(self.W, self.H)
+        self.pull_led = "off"           # rattrapage : off, search (flash), locked (fixe)
+
+    def _shape(self, inset):
+        w, h = self.width(), self.height()
+        r = w / 2 - inset
+        cx, cy = w / 2, w / 2
+        path = QtGui.QPainterPath()
+        path.moveTo(inset, h - inset)
+        path.lineTo(inset, cy)
+        path.arcTo(QtCore.QRectF(cx - r, cy - r, 2 * r, 2 * r), 180, -180)
+        path.lineTo(w - inset, h - inset)
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(QtCore.Qt.NoPen)
+        rim = QtGui.QLinearGradient(0, 0, 0, h)
+        rim.setColorAt(0, QtGui.QColor("#8a7058"))
+        rim.setColorAt(0.5, QtGui.QColor("#3e3024"))
+        rim.setColorAt(1, QtGui.QColor("#120c08"))
+        p.setBrush(rim)
+        p.drawPath(self._shape(0))
+        case = QtGui.QLinearGradient(0, 0, 0, h)
+        case.setColorAt(0, QtGui.QColor("#54422f"))
+        case.setColorAt(1, QtGui.QColor("#21170f"))
+        p.setBrush(case)
+        p.drawPath(self._shape(2))
+        bezel = QtGui.QLinearGradient(0, 4, 0, h - 4)
+        bezel.setColorAt(0, QtGui.QColor("#0a0604"))
+        bezel.setColorAt(1, QtGui.QColor("#7a6450"))
+        p.setBrush(bezel)
+        p.drawPath(self._shape(4))
+        # cadran éclairé : plus on approche du 0, plus il s'allume
+        face = self._shape(6)
+        light = self.light()
+        dim = (QtGui.QColor("#cfc4a4"), QtGui.QColor("#b2a585"), QtGui.QColor("#857a62"))
+        bright = (QtGui.QColor("#fff8d8"), QtGui.QColor("#ffe08a"), QtGui.QColor("#d9a84c"))
+
+        def mix(a, b, t):
+            return QtGui.QColor.fromRgbF(*(a.getRgbF()[i] * (1 - t) + b.getRgbF()[i] * t
+                                           for i in range(3)))
+        glow = QtGui.QRadialGradient(w / 2, h - 6, w * 0.75)
+        for stop, a, b in zip((0, 0.6, 1), dim, bright):
+            glow.setColorAt(stop, mix(a, b, light))
+        p.setBrush(glow)
+        p.drawPath(face)
+        shade = QtGui.QLinearGradient(0, 6, 0, 22)
+        shade.setColorAt(0, QtGui.QColor(0, 0, 0, 110))
+        shade.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+        p.setBrush(shade)
+        p.drawPath(face)
+        p.save()
+        p.setClipPath(face)
+
+        cx, cy = w / 2, h - 13
+        radius = w * 0.30
+        ink = QtGui.QColor("#2b2116")
+        locked = self.state == "locked"
+        if locked:                          # halo vert autour du 0
+            halo = QtGui.QRadialGradient(cx, cy - radius - 6, 18)
+            halo.setColorAt(0, QtGui.QColor(120, 255, 120, 150))
+            halo.setColorAt(1, QtGui.QColor(120, 255, 120, 0))
+            p.setBrush(halo)
+            p.drawEllipse(QtCore.QPointF(cx, cy - radius - 6), 18, 18)
+        p.setPen(QtGui.QPen(ink, 1.0))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawArc(QtCore.QRectF(cx - radius, cy - radius, 2 * radius, 2 * radius),
+                  int((90 - SPAN) * 16), int(2 * SPAN * 16))
+        good = angle_of(15)                 # zone « calé » ± 15 Hz
+        p.setPen(QtGui.QPen(QtGui.QColor("#2e7d32"), 2.5))
+        p.drawArc(QtCore.QRectF(cx - radius + 1.5, cy - radius + 1.5,
+                                2 * radius - 3, 2 * radius - 3),
+                  int((90 - good) * 16), int(2 * good * 16))
+        p.setFont(QtGui.QFont("DejaVu Sans", 5, QtGui.QFont.Bold))
+        for hz, label in TICKS:
+            for sign in ((1,) if hz == 0 else (-1, 1)):
+                a = math.radians(angle_of(sign * hz))
+                big = bool(label)
+                r1, r2 = radius, radius + (4 if big else 2)
+                p.setPen(QtGui.QPen(ink, 1.0 if big else 0.7))
+                p.drawLine(QtCore.QPointF(cx + r1 * math.sin(a), cy - r1 * math.cos(a)),
+                           QtCore.QPointF(cx + r2 * math.sin(a), cy - r2 * math.cos(a)))
+                if big and hz in (100, 200):
+                    r3 = radius + 9
+                    pt = QtCore.QPointF(cx + r3 * math.sin(a), cy - r3 * math.cos(a))
+                    p.drawText(QtCore.QRectF(pt.x() - 10, pt.y() - 5, 20, 10),
+                               QtCore.Qt.AlignCenter, label)
+        p.setFont(QtGui.QFont("DejaVu Serif", 6, QtGui.QFont.Bold))
+        p.setPen(QtGui.QColor("#1b5e20" if locked else ink))
+        p.drawText(QtCore.QRectF(cx - 8, cy - radius - 14, 16, 10), QtCore.Qt.AlignCenter, "0")
+        text = {"off": "CALE", "search": "rech.",
+                "measure": f"{self.target:+.0f} Hz", "locked": "CALÉ"}[self.state]
+        p.setFont(QtGui.QFont("DejaVu Serif", 5, QtGui.QFont.Bold))
+        p.drawText(QtCore.QRectF(cx - 20, cy - radius * 0.42 - 5, 40, 10),
+                   QtCore.Qt.AlignCenter, text)
+        # aiguille rouge depuis l'axe visible
+        a = math.radians(self.needle)
+        tip = QtCore.QPointF(cx + (radius + 3) * math.sin(a), cy - (radius + 3) * math.cos(a))
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 60), 1.8))
+        p.drawLine(QtCore.QPointF(cx + 1.5, cy + 1.5), tip + QtCore.QPointF(1.5, 1.5))
+        p.setPen(QtGui.QPen(QtGui.QColor("#b3261e"), 1.3, cap=QtCore.Qt.RoundCap))
+        p.drawLine(QtCore.QPointF(cx, cy), tip)
+        hub = QtGui.QRadialGradient(cx - 1, cy - 1, 4)
+        hub.setColorAt(0, QtGui.QColor("#6a6a6a"))
+        hub.setColorAt(1, QtGui.QColor("#0a0a0a"))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(hub)
+        p.drawEllipse(QtCore.QPointF(cx, cy), 3.5, 3.5)
+        shine = QtGui.QLinearGradient(0, 6, 0, h * 0.5)
+        shine.setColorAt(0, QtGui.QColor(255, 255, 255, 60))
+        shine.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setBrush(shine)
+        p.drawPath(face)
+        if self.state == "off":             # voile quand le calage est arrêté
+            p.setBrush(QtGui.QColor(0, 0, 0, 60))
+            p.drawPath(face)
+        p.restore()
+        # petite LED bleue dans l'angle : flash pendant le rattrapage, fixe si calé
+        # voyant bleu : fixe si calé, flash si un écart est mesuré (ou rattrapage)
+        flash = int(time.monotonic() / 0.12) % 2 == 0
+        lit = self.state == "locked" or (
+            (self.state == "measure" or self.pull_led == "search") and flash)
+        led = QtCore.QPointF(w - 9, h - 9)
+        if lit:
+            halo = QtGui.QRadialGradient(led, 9)
+            halo.setColorAt(0, QtGui.QColor(160, 210, 255, 255))
+            halo.setColorAt(0.5, QtGui.QColor(40, 130, 255, 200))
+            halo.setColorAt(1, QtGui.QColor(30, 100, 255, 0))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(halo)
+            p.drawEllipse(led, 9, 9)
+        g = QtGui.QRadialGradient(led - QtCore.QPointF(1, 1), 4)
+        g.setColorAt(0, QtGui.QColor("#ffffff" if lit else "#1c2638"))
+        g.setColorAt(0.5, QtGui.QColor("#4aa0ff" if lit else "#0e1626"))
+        g.setColorAt(1, QtGui.QColor("#0a3a9a" if lit else "#05080f"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 0.8))
+        p.setBrush(g)
+        p.drawEllipse(led, 3.5, 3.5)
         p.end()
