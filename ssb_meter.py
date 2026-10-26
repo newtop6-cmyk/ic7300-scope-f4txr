@@ -6,6 +6,8 @@ import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+import pump_glow
+
 FULL = 200.0                    # Hz au bout de l'échelle
 SPAN = 55.0                     # degrés de part et d'autre du 0
 TICKS = [(0, "0"), (25, ""), (50, "50"), (100, "100"), (200, "200")]
@@ -341,6 +343,7 @@ class SsbMeterSmall(SsbMeter):
             glow.setColorAt(stop, mix(a, b, light))
         p.setBrush(glow)
         p.drawPath(face)
+        pump_glow.paint(p, face, getattr(self, "pump", None))
         shade = QtGui.QLinearGradient(0, 6, 0, 22)
         shade.setColorAt(0, QtGui.QColor(0, 0, 0, 110))
         shade.setColorAt(1, QtGui.QColor(0, 0, 0, 0))

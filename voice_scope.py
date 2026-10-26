@@ -7,6 +7,8 @@ boutons en bakélite. La trace est synchronisée sur les fronts montants
 """
 
 import collections
+import json
+import os
 import random
 import subprocess
 
@@ -14,11 +16,19 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 RATE = 16000
-BLOCK = 512                     # 32 ms par bloc lu
+BLOCK = 128                     # 8 ms par bloc lu : la trace suit la voix sans retard
 SHOW = 400                      # échantillons affichés (25 ms : 2 à 6 périodes de voix)
 PERSIST = 4                     # anciennes traces gardées (rémanence du phosphore)
 CW_POINTS = 600                 # réception CW : 3 s de manipulation (5 ms par point)
 FLOOR = 0.006                   # en dessous (≈ -44 dBFS) : pas d'amplification du souffle
+
+# vobulation : spectre de la voix balayé par un spot, comme un vobulateur
+VOBU_FMIN, VOBU_FMAX = 100, 4000   # Hz, échelle logarithmique
+VOBU_POINTS = 180
+VOBU_FFT = 1024                    # 64 ms de son analysés (fenêtre de Hann)
+VOBU_RANGE_DB = 48                 # hauteur de l'écran au-dessus du bruit de fond
+VOBU_SWEEP_TICKS = 14              # un balayage complet ≈ 0,22 s
+CONFIG = os.path.expanduser("~/.config/ic7300-scope/oscillo.json")
 
 
 class MicReader(QtCore.QThread):
@@ -34,7 +44,7 @@ class MicReader(QtCore.QThread):
         try:
             self._proc = subprocess.Popen(
                 ["parec", "--raw", "--format=s16le", f"--rate={RATE}", "--channels=1",
-                 f"--device={self.source}", "--latency-msec=30",
+                 f"--device={self.source}", "--latency-msec=10",
                  "--client-name=IC-7300 oscilloscope"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except OSError:
@@ -71,16 +81,78 @@ class VoiceScope(QtWidgets.QWidget):
         # réception CW : enveloppe de la note (une valeur toutes les 5 ms, 3 s)
         self.cw_mode = False
         self.cw_env = collections.deque([0.0] * CW_POINTS, maxlen=CW_POINTS)
+        # vobulation
+        self.vobu = self._load_mode()       # vobulation choisie (clic sur l'écran)
+        self.tx = False                     # elle ne s'affiche qu'en émission
+        self._win = np.hanning(VOBU_FFT).astype(np.float32)
+        freqs = np.fft.rfftfreq(VOBU_FFT, 1 / RATE)
+        edges = np.geomspace(VOBU_FMIN, VOBU_FMAX, VOBU_POINTS + 1)
+        self._bins = [(int(np.searchsorted(freqs, a)), max(int(np.searchsorted(freqs, b)),
+                       int(np.searchsorted(freqs, a)) + 1)) for a, b in zip(edges[:-1], edges[1:])]
+        self.spec = np.full(VOBU_POINTS, -120.0)      # dB affichés (descente lente)
+        self.noise_db = -75.0                         # bruit de fond suivi
+        self.curve = np.zeros(VOBU_POINTS)            # balayage en cours (0 à 1)
+        self.old_curve = np.zeros(VOBU_POINTS)        # balayage précédent
+        self.sweep = 0                                # position du spot (points)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
-        self.timer.start(33)
+        self.timer.start(16)
+        self._update_tooltip()
+
+    # --- vobulation / forme d'onde (clic sur l'écran) -------------------------
+    def set_tx(self, on):
+        """La radio émet : vobulation (si choisie) ; en réception : forme d'onde."""
+        if on != self.tx:
+            self.tx = on
+            self.traces = []
+            self.sweep = 0
+            self.curve[:] = 0
+            self.old_curve[:] = 0
+            self.update()
+
+    def _vobu_on(self):
+        return self.vobu and self.tx and not self.cw_mode
+
+    @staticmethod
+    def _load_mode():
+        try:
+            with open(CONFIG) as f:
+                return bool(json.load(f).get("vobulation", True))
+        except (OSError, ValueError, AttributeError):
+            return True
+
+    def _update_tooltip(self):
+        if self.cw_mode:
+            return
+        self.setToolTip(
+            "Oscilloscope : forme d'onde de ta voix ; EN ÉMISSION, vobulation (spectre de "
+            "la voix 100 Hz à 4 kHz balayé par le spot, très sensible). "
+            "Clic : vobulation en émission arrêtée." if self.vobu else
+            "Oscilloscope : la forme d'onde de ta voix au micro. "
+            "Clic : vobulation en émission.")
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and not self.cw_mode:
+            self.vobu = not self.vobu
+            self.traces = []
+            try:
+                os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+                with open(CONFIG, "w") as f:
+                    json.dump({"vobulation": self.vobu}, f)
+            except OSError:
+                pass
+            self._update_tooltip()
+            self.update()
+        super().mousePressEvent(event)
 
     # --- réception CW : manipulation ON / OFF --------------------------------
     def set_cw(self, on):
         if on != self.cw_mode:
             self.cw_mode = on
-            self.setToolTip("Oscilloscope : manipulation CW reçue (ON en haut, OFF en bas)"
-                            if on else "Oscilloscope : la forme d'onde de ta voix au micro")
+            if on:
+                self.setToolTip("Oscilloscope : manipulation CW reçue (ON en haut, OFF en bas)")
+            else:
+                self._update_tooltip()
             self.update()
 
     def has_cw(self):
@@ -142,6 +214,9 @@ class VoiceScope(QtWidgets.QWidget):
             self.level = self.level * 0.7 + 0.3 * float(env[-20:].max() > self._cw_threshold(env))
             self.update()
             return
+        if self._vobu_on():
+            self._tick_vobu()
+            return
         recent = self.buf[-1024:]
         peak = float(np.max(np.abs(recent)))
         self.env = max(peak, self.env * 0.96, FLOOR)
@@ -162,6 +237,94 @@ class VoiceScope(QtWidgets.QWidget):
         y = np.clip(seg[start:start + SHOW] * self.gain, -1.15, 1.15)
         self.traces = (self.traces + [y.copy()])[-PERSIST:]
         self.update()
+
+    def _tick_vobu(self):
+        """Spectre du son le plus récent ; le spot avance et redessine la courbe
+        avec ce spectre : la trace est toujours celle de la voix de l'instant."""
+        x = self.buf[-VOBU_FFT:] * self._win
+        mag = np.abs(np.fft.rfft(x)) / (self._win.sum() / 2)
+        db_bins = 20 * np.log10(np.array([mag[a:b].max() for a, b in self._bins]) + 1e-9)
+        # montée immédiate, descente douce (comme le phosphore)
+        self.spec = np.maximum(db_bins, self.spec - 2.5)
+        # bruit de fond : suit vite vers le bas, lentement vers le haut
+        floor = float(np.percentile(db_bins, 25))
+        rate = 0.25 if floor < self.noise_db else 0.01
+        self.noise_db += (floor - self.noise_db) * rate
+        low = self.noise_db - 2
+        y = np.clip((self.spec - low) / VOBU_RANGE_DB, 0.0, 1.05)
+        step = max(1, VOBU_POINTS // VOBU_SWEEP_TICKS)
+        end = min(self.sweep + step, VOBU_POINTS)
+        self.curve[:end] = y[:end]          # derrière le spot : la voix de maintenant
+        self.sweep = end
+        if self.sweep >= VOBU_POINTS:       # fin de balayage : on repart à gauche
+            self.old_curve = self.curve.copy()
+            self.sweep = 0
+        peak = float(np.max(np.abs(self.buf[-800:])))
+        self.level = self.level * 0.6 + 0.4 * min(peak / 0.3, 1.0)
+        # bouton GAIN : sensibilité (bruit de fond bas = gain fort)
+        self.gain = float(10 ** np.clip((-self.noise_db - 30) / 60 * np.log10(0.8 / FLOOR), 0,
+                                        np.log10(0.8 / FLOOR)))
+        self.update()
+
+    def _paint_vobu(self, p, screen):
+        """Trace en miroir autour de la ligne centrale : plate sans modulation,
+        pics vers le haut ET vers le bas avec la voix."""
+        n = VOBU_POINTS
+        xs = screen.left() + 4 + np.arange(n) * (screen.width() - 8) / (n - 1)
+        bottom = screen.bottom() - 14                   # place des repères en bas
+        mid = (screen.top() + 14 + bottom) / 2          # ligne centrale (repos)
+        half = (bottom - screen.top() - 14) / 2
+        shown = np.concatenate((self.curve[:self.sweep], self.old_curve[self.sweep:]))
+        up = [QtCore.QPointF(float(x), float(mid - v * half)) for x, v in zip(xs, shown)]
+        down = [QtCore.QPointF(float(x), float(mid + v * half)) for x, v in zip(xs, shown)]
+        # ligne centrale de repos
+        p.setPen(QtGui.QPen(QtGui.QColor(120, 255, 170, 70), 1))
+        p.drawLine(QtCore.QPointF(screen.left() + 4, mid), QtCore.QPointF(screen.right() - 4, mid))
+        # surface entre les deux branches (lueur verte, plus forte au centre)
+        area = QtGui.QPolygonF(up + down[::-1])
+        g = QtGui.QLinearGradient(0, mid - half, 0, mid + half)
+        g.setColorAt(0.0, QtGui.QColor(40, 200, 110, 10))
+        g.setColorAt(0.5, QtGui.QColor(90, 255, 160, 75))
+        g.setColorAt(1.0, QtGui.QColor(40, 200, 110, 10))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(g)
+        p.drawPolygon(area)
+        # partie ancienne (après le spot) plus pâle
+        if self.sweep < n - 1:
+            p.setPen(QtGui.QPen(QtGui.QColor(90, 255, 160, 70), 1.6))
+            p.drawPolyline(QtGui.QPolygonF(up[self.sweep:]))
+            p.drawPolyline(QtGui.QPolygonF(down[self.sweep:]))
+        k = max(self.sweep, 1)
+        for width, color, alpha in ((7, (60, 255, 140), 34), (3.5, (90, 255, 160), 95),
+                                    (1.4, (215, 255, 225), 240)):
+            p.setPen(QtGui.QPen(QtGui.QColor(*color, alpha), width,
+                                cap=QtCore.Qt.RoundCap, join=QtCore.Qt.RoundJoin))
+            p.drawPolyline(QtGui.QPolygonF(up[:k]))
+            p.drawPolyline(QtGui.QPolygonF(down[:k]))
+        # spot du balayage : sur les deux branches
+        if self.sweep:
+            for spot in (up[self.sweep - 1], down[self.sweep - 1]):
+                halo = QtGui.QRadialGradient(spot, 9)
+                halo.setColorAt(0, QtGui.QColor(230, 255, 235, 240))
+                halo.setColorAt(1, QtGui.QColor(90, 255, 160, 0))
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(halo)
+                p.drawEllipse(spot, 9, 9)
+            x = up[self.sweep - 1].x()
+            p.setPen(QtGui.QPen(QtGui.QColor(120, 255, 170, 55), 1))
+            p.drawLine(QtCore.QPointF(x, screen.top() + 4), QtCore.QPointF(x, bottom))
+        # repères de fréquence
+        p.setFont(QtGui.QFont("DejaVu Sans Mono", 6, QtGui.QFont.Bold))
+        p.setPen(QtGui.QColor(150, 255, 190, 170))
+        span = np.log(VOBU_FMAX / VOBU_FMIN)
+        for f, label in ((200, "200"), (500, "500"), (1000, "1k"), (2000, "2k"), (3000, "3k")):
+            x = screen.left() + 4 + np.log(f / VOBU_FMIN) / span * (screen.width() - 8)
+            p.drawLine(QtCore.QPointF(x, bottom), QtCore.QPointF(x, bottom + 3))
+            p.drawText(QtCore.QRectF(x - 14, bottom + 2, 28, 10), QtCore.Qt.AlignCenter, label)
+        p.drawText(QtCore.QRectF(screen.left() + 8, screen.top() + 5, 100, 10),
+                   QtCore.Qt.AlignLeft, "VOBULATION")
+        p.drawText(QtCore.QRectF(screen.right() - 80, screen.top() + 5, 72, 10),
+                   QtCore.Qt.AlignRight, f"{self.noise_db:.0f} dB")
 
     @staticmethod
     def _cw_threshold(env):
@@ -355,6 +518,9 @@ class VoiceScope(QtWidgets.QWidget):
 
         if self.cw_mode:                        # réception CW : manipulation
             self._paint_cw(p, screen, cy)
+            self.traces = []
+        elif self._vobu_on():                   # en émission : spectre balayé
+            self._paint_vobu(p, screen)
             self.traces = []
         # traces : les plus anciennes pâlissent (rémanence)
         xs = screen.left() + np.arange(SHOW) * screen.width() / (SHOW - 1)

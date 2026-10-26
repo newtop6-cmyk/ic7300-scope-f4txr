@@ -14,6 +14,8 @@ import math
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+import pump_glow
+
 PO_MAX = 100.0
 COMP_MAX = 30.0
 PO_CURVE = 0.3                  # 8 W ≈ mi-course, 35 W ≈ 3/4
@@ -121,6 +123,7 @@ class RoundGalva(QtWidgets.QWidget):
             glow.setColorAt(stop, _mix(a, b, self.light))
         p.setBrush(glow)
         p.drawPath(face_path)
+        pump_glow.paint(p, face_path, getattr(self, "pump", None))
         shade = QtGui.QLinearGradient(0, 6, 0, 22)
         shade.setColorAt(0, QtGui.QColor(0, 0, 0, 110))
         shade.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
@@ -342,6 +345,12 @@ class RedButton(QtWidgets.QAbstractButton):
         self.flash_timer.timeout.connect(self._flash)
         self.flash_timer.start(400)      # clignotement lent : 0,4 s allumé / 0,4 s éteint
         self.alert = False               # TUNE : flash rouge rapide sans émettre le PTT
+
+    def hitButton(self, pos):
+        """Seul le bouton rond lui-même lance l'émission (pas la place du halo)."""
+        c = QtCore.QPointF(self.width() / 2, self.height() / 2)
+        d = QtCore.QPointF(pos) - c
+        return d.x() * d.x() + d.y() * d.y() <= (self.core / 2) ** 2
 
     def set_alert(self, on):
         """Flash rouge RAPIDE (accord TUNE en cours), sans toucher au bouton."""

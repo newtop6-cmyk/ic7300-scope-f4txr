@@ -3,6 +3,7 @@
 dessous. Glisser (le repère suit la souris), molette = 1 W, Maj + molette = 10 W."""
 
 import math
+import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -81,13 +82,17 @@ class VintageKnob(QtWidgets.QWidget):
                     self._user_set(w)
             event.accept()
             return
-        if self._dragging and event.button() == QtCore.Qt.RightButton:
-            self._release()
+        if self._dragging and not self.rect().contains(event.pos()):
+            self._release()                     # accroché : un clic EN DEHORS décroche
+            self._unhooked_at = time.monotonic()
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
         if not MODE["precision"]:
             event.accept()
+            return
+        if time.monotonic() - getattr(self, "_unhooked_at", 0) < 0.6:
+            event.accept()                      # 2e clic du double-clic qui a décroché
             return
         if self._dragging:
             self._release()
@@ -118,8 +123,16 @@ class VintageKnob(QtWidgets.QWidget):
         self._release()
         super().hideEvent(event)
 
+    def _too_far(self, pos):
+        """La souris s'éloigne du bouton (> 1,5 fois sa taille) : on décroche."""
+        c = self.rect().center()
+        return max(abs(pos.x() - c.x()), abs(pos.y() - c.y())) > 1.5 * self.width()
+
     def mouseMoveEvent(self, event):
         if not self._dragging:
+            return
+        if not getattr(self, "_direct", False) and self._too_far(event.pos()):
+            self._release()
             return
         w = self._watts_at(event.pos())
         if w is not None and abs(w - self.value) <= self.maximum / 2:     # pas de saut 0 ↔ 100
@@ -324,6 +337,9 @@ class ScaleBakelite(VintageKnob):
 
     def mouseMoveEvent(self, event):
         if not self._dragging:
+            return
+        if not getattr(self, "_direct", False) and self._too_far(event.pos()):
+            self._release()
             return
         v = self._watts_at(event.pos())
         if v is not None and abs(v - self.value) <= 5:

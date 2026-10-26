@@ -9,12 +9,15 @@ import datetime
 import json
 import math
 import os
+import tempfile
 import queue
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import types
 import wave
 
 import numpy as np
@@ -26,11 +29,18 @@ from cw_decoder import CwDecoder
 from psk31_decoder import Psk31Decoder
 from rtty_decoder import RttyDecoder
 from ft8_decoder import Ft8Decoder
+import ft8_bridge
+from ft8_map import Ft8Map
+from demo_finger import DemoFinger, SIZES as DEMO_SIZES
+from ball_button import BallButton
+from rtty_screen import RttyScreen
 from sstv_window import SstvWindow
 import sstv as sstv_modes
 from sstv_watch import SstvWatch
 from ssb_tuner import SsbTuner, D_MAX, D_WIDE
 import console
+from emission_button import EmissionButton
+WSJTX_QSS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wsjtx-sombre.qss")
 from wifi_bar import WifiBar
 from traffic_bar import TrafficBar
 from mode_detect import analyse as analyse_mode, analyse_station
@@ -45,7 +55,9 @@ from title_plate import TitlePlate
 from rust_style import AmberLed, MilitaryLever, RustPlate
 from function_selector import FunctionSelector
 from vintage_toggle import ToggleSwitch
+from loupe import AltWheel, Loupe
 from push_plate import PushPlate
+from paddle_clavier import MORSE
 from drum_display import DrumClock, DrumDisplay
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
@@ -75,6 +87,10 @@ PULSE_TCP_PORT = 4713
 REMOTE_RX = "ic7300_distant_rx"
 REMOTE_TX = "ic7300_distant_tx"
 REMOTE_RX_PIPE = "ic7300_distant_rx_pipe"   # contient REMOTE_RX : déchargé avec lui
+# sortie « enregistrement » : réception + émission (micro, FT8…) mélangées,
+# à choisir dans SimpleScreenRecorder (entrée « Monitor of IC-7300_enregistrement »).
+# Jamais déchargée : l'enregistreur garde sa source même si le Scope redémarre.
+RECORD_SINK = "ic7300_enregistrement"
 REMOTE_FORMAT = ["format=s16le", "rate=16000", "channels=1"]
 
 
@@ -97,6 +113,8 @@ STATE_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME")
                           "ic7300-scope", "etat-origine.json")
 # dernière fréquence et dernier mode utilisés sur chaque bande
 BANDS_FILE = os.path.join(os.path.dirname(STATE_FILE), "bandes.json")
+MESSAGE_FILE = os.path.join(os.path.dirname(STATE_FILE), "message-cw.txt")
+DEFAULT_MESSAGE = "CQ CQ CQ DE F4TXR F4TXR K"
 # bandes émission de l'IC-7300 : nom, limites (Hz), fréquence et mode de départ
 BANDS = [("160m", 1_810_000, 2_000_000, 1_850_000, "LSB"),
          ("80m", 3_500_000, 3_800_000, 3_700_000, "LSB"),
@@ -235,6 +253,11 @@ PUSH_3D_MODE = PUSH_3D          # bande / mode choisis : vert aussi
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
 FINE_MAX = 300                  # Hz : l'affinage par la voix reste à ± 300 Hz du kHz rond
 PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO BLU
+# Verrou de fréquence : un calage automatique ne peut corriger la fréquence
+# choisie que peu après le choix, et jamais loin ; ensuite elle ne bouge plus.
+CALAGE_WINDOW_S = 60            # s après le choix de la fréquence
+CALAGE_MAX_HZ = 3000            # Hz d'écart maximal avec la fréquence choisie
+ECHO_TIMEOUT_S = 3.0            # s : attente de la confirmation de la radio
 PULL_SECONDS = 45               # durée du rattrapage
 
 
@@ -348,6 +371,11 @@ def remote_audio(host):
     """Crée ici l'entrée et la sortie son de la radio branchée sur `host`,
     plus l'écoute sur la sortie par défaut. Renvoie les modules à décharger."""
     unload_remote_audio(None)       # restes d'une session plantée
+    # relais son orphelins d'une session précédente (ils joueraient la radio
+    # directement dans le casque, sans tenir compte du MUET)
+    for pattern in ("ic7300-scope/rx_relay.py", "client-name=IC-7300 emission",
+                    "stream-name=IC-7300 reception"):
+        subprocess.run(["pkill", "-f", pattern], capture_output=True)
     server = f"server=tcp:{host}:{PULSE_TCP_PORT}"
     commands = [
         # son allégé pour la 4G : mono 16 kHz (≈ 32 Ko/s au lieu de ≈ 190)
@@ -378,6 +406,7 @@ def remote_audio(host):
             error = out.stderr.strip() if out else "pas de réponse"
             raise RuntimeError(f"{command[0]} : {error or 'échec'}")
         modules.append(out.stdout.strip())
+    modules += record_mix()
     # son d'émission vers le Pi : flux continu par SSH (silence hors émission),
     # lu par pw-play sur la carte son de la radio
     global _TX_KEEPALIVE
@@ -400,6 +429,30 @@ def remote_audio(host):
 
 _TX_KEEPALIVE = None
 _RX_RELAY = None
+
+
+def record_mix():
+    """Relie réception et émission à la sortie d'enregistrement (créée si absente).
+    Le micro n'y arrive qu'en émission : sa liaison vers la radio est muette sinon."""
+    sinks = subprocess.run(["pactl", "list", "short", "sinks"],
+                           capture_output=True, text=True).stdout
+    if not any(line.split("\t")[1:2] == [RECORD_SINK] for line in sinks.splitlines()):
+        subprocess.run(["pactl", "load-module", "module-null-sink",
+                        f"sink_name={RECORD_SINK}", "rate=48000", "channels=2",
+                        "sink_properties=device.description=IC-7300_enregistrement"],
+                       capture_output=True)
+    modules = []
+    for name, source in (("ic7300_enreg_rx", f"{REMOTE_RX_PIPE}.monitor"),
+                         ("ic7300_enreg_tx", f"{REMOTE_TX}.monitor")):
+        out = subprocess.run(
+            ["pactl", "load-module", "module-loopback", f"source={source}",
+             f"sink={RECORD_SINK}", "latency_msec=60",
+             "source_dont_move=true", "sink_dont_move=true",
+             f"sink_input_properties='node.name={name} media.role=ic7300rec'"],
+            capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            modules.append(out.stdout.strip())
+    return modules
 
 
 def remote_audio_present():
@@ -817,6 +870,10 @@ class CivReader(QtCore.QThread):
     def set_power(self, level):
         self._pending_power = level
 
+    def stop_cw(self):
+        """Arrête tout de suite le texte CW en cours d'émission par la radio."""
+        self._commands.put((0x17, 0xFF))
+
     def send_cw(self, text):
         """La radio émet ce texte en CW (30 caractères au plus par commande)."""
         data = text.upper().encode("ascii", "ignore")[:30]
@@ -883,8 +940,10 @@ class CivReader(QtCore.QThread):
             self._key_data(ser)
         else:
             self._key_voice(ser)
+        self._buf = bytearray()             # vieilles réponses « réception » jetées
         self._command(ser, 0x1C, 0x00, 0x01)
         self._ptt = True
+        self._keyed_at = time.monotonic()
 
     def _key_voice(self, ser):
         # hors mode data, la radio prend le son sur l'entrée du menu
@@ -1119,8 +1178,10 @@ class CivReader(QtCore.QThread):
             self._tuner = data[1]
             self.tuner.emit(data[1])
         elif cmd == 0x1C and len(data) == 2 and data[0] == 0x00:
-            self._tx = data[1] == 0x01
-            self.transmitting.emit(self._tx)
+            if not (data[1] == 0x00 and self._ptt
+                    and time.monotonic() - getattr(self, "_keyed_at", 0) < 3):
+                self._tx = data[1] == 0x01
+                self.transmitting.emit(self._tx)
         elif cmd == 0x1A and len(data) == 3 and data[0] == 0x06:
             self._data_state = (data[1], data[2])
             self._emit_mode()
@@ -1495,6 +1556,17 @@ class ClockPair(FrequencyDisplay):
         event.ignore()                  # pas de réglage sur une horloge
 
 
+class CwEntry(QtWidgets.QLineEdit):
+    """Champ de saisie CW : Échap arrête l'émission en cours."""
+    escape = QtCore.pyqtSignal()
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Escape:
+            self.escape.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class TuningKnob(QtWidgets.QWidget):
     """Bouton de VFO : on le tourne à la souris (glisser) ou à la molette."""
     tuned = QtCore.pyqtSignal(int)
@@ -1534,13 +1606,17 @@ class TuningKnob(QtWidgets.QWidget):
                 self._last = self._angle_at(event.pos())
             event.accept()
             return
-        if self._last is not None and event.button() == QtCore.Qt.RightButton:
-            self._release()
+        if self._last is not None and not self.rect().contains(event.pos()):
+            self._release()                     # accroché : un clic EN DEHORS décroche
+            self._unhooked_at = time.monotonic()
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
         if not KNOB_MODE["precision"]:
             event.accept()
+            return
+        if time.monotonic() - getattr(self, "_unhooked_at", 0) < 0.6:
+            event.accept()                      # 2e clic du double-clic qui a décroché
             return
         if self._last is not None:
             self._release()
@@ -1573,6 +1649,11 @@ class TuningKnob(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event):
         if self._last is None:
+            return
+        c = self.rect().center()
+        if not getattr(self, "_direct", False) and max(
+                abs(event.pos().x() - c.x()), abs(event.pos().y() - c.y())) > 1.5 * self.width():
+            self._release()                     # souris partie loin du VFO : décroché
             return
         a = self._angle_at(event.pos())
         delta = (a - self._last + 180) % 360 - 180
@@ -1918,6 +1999,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.backlight_on_air = False
         self.backlight_timer = QtCore.QTimer(self)    # émission : lumière = voix
         self.backlight_timer.timeout.connect(self._backlight_voice)
+        self.freq_label.lamp.connect(self._pump_meters)   # cadrans : même pompage
         top.addWidget(self.clocks)
         top.addSpacing(10)
         top.addWidget(self.step_combo)
@@ -2047,6 +2129,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.precision_toggle.setDown(True, emit=False)   # ON au démarrage
         self.precision_toggle.pos_f = 1.0
         self.precision_toggle.toggled.connect(self._precision_toggled)
+        self.message_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="MESSAGE : levier en bas = la radio émet en CW le "
+            "message préparé (puis revient sur OFF) ; en haut = arrêt. "
+            "Clic droit : écrire le message.")
+        self.message_toggle.toggled.connect(self._message_toggled)
+        self.message_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.message_toggle.customContextMenuRequested.connect(self._edit_message)
+        self.message_timer = QtCore.QTimer(self)
+        self.message_timer.setSingleShot(True)
+        self.message_timer.timeout.connect(self._message_next)
+        self.message_chunks = []
+        # FT8 : WSJT-X en plein écran, piloté à travers le Scope (ft8_bridge.py)
+        self.ft8_source = args.source
+        self.ft8_proc = None
+        self.ft8_tx = False             # émission en cours demandée par WSJT-X
+        self.ft8_server = ft8_bridge.RigctlServer(types.SimpleNamespace(
+            get_freq=self.ft8_get_freq, set_freq=self.ft8_set_freq,
+            get_mode=self.ft8_get_mode, set_mode=self.ft8_set_mode,
+            get_ptt=self.ft8_get_ptt, set_ptt=self.ft8_set_ptt), self)
+        self.ft8_server.status.connect(lambda t: self.statusBar().showMessage(t, 5000))
+        self.ft8_timer = QtCore.QTimer(self)
+        self.ft8_timer.timeout.connect(self._ft8_watch)
+        self.ft8_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="FT8 : levier en bas = WSJT-X s'ouvre en plein écran "
+            "et peut recevoir et émettre en FT8 (fréquence, mode et émission passent "
+            "par le Scope), avec la mappemonde des stations entendues derrière ; "
+            "en haut = WSJT-X fermé. Clic droit : opacité de WSJT-X.")
+        self.ft8_toggle.toggled.connect(self._ft8_toggled)
+        self.ft8_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.ft8_toggle.customContextMenuRequested.connect(self._ft8_menu)
+        self.ft8_map = Ft8Map()             # mappemonde derrière WSJT-X
+        # bouton boule bleue en bas à droite de l'écran FT8 : ferme FT8
+        self.ft8_close = BallButton("FERMER\nFT8")
+        self.ft8_close.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint
+                                      | QtCore.Qt.WindowStaysOnTopHint
+                                      | QtCore.Qt.X11BypassWindowManagerHint)
+        self.ft8_close.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        self.ft8_close.setToolTip("Ferme WSJT-X et la carte, la radio repasse en réception, "
+                                  "les fenêtres reviennent")
+        self.ft8_hidden = []                # fenêtres rangées pendant FT8
+        self.ft8_close.clicked.connect(lambda: self.ft8_toggle.setDown(False))
+        self.ft8_opacity = self._ft8_load_opacity()
+        # DÉCODEUR RTTY : carte plein écran + texte décodé (rtty_screen.py)
+        self.rtty_screen = RttyScreen()
+        self.rtty_hidden = []
+        self.rtty_prev_decoder = 0
+        self.rtty_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="DÉCODEUR RTTY : levier en bas = la radio passe en RTTY "
+            "(fréquence RTTY de la bande), écran plein avec la mappemonde, le texte décodé "
+            "et un point rouge sur la station pendant qu'elle émet ; en haut = retour.")
+        self.rtty_toggle.toggled.connect(self._rtty_toggled)
+        self.rtty_close = BallButton("FERMER\nRTTY")
+        self.rtty_close.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint
+                                       | QtCore.Qt.WindowStaysOnTopHint
+                                       | QtCore.Qt.X11BypassWindowManagerHint)
+        self.rtty_close.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        self.rtty_close.setToolTip("Ferme l'écran RTTY, les fenêtres reviennent")
+        self.rtty_close.clicked.connect(lambda: self.rtty_toggle.setDown(False))
+        self.rtty_timer = QtCore.QTimer(self)
+        self.rtty_timer.timeout.connect(self._rtty_tick)
+        # DÉMO : la souris devient un gros doigt (demo_finger.py)
+        self.demo_finger = DemoFinger()
+        self.demo_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="DÉMO : levier en bas = la souris devient un gros doigt "
+            "(visible en partage d'écran et en vidéo), le bout du doigt = l'endroit visé, "
+            "onde rouge à chaque clic ; en haut = souris normale. "
+            "Clic droit : taille du doigt.")
+        self.demo_toggle.toggled.connect(self._demo_toggled)
+        self.demo_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.demo_toggle.customContextMenuRequested.connect(self._demo_menu)
+        # LOUPE : lentille ronde qui suit le pointeur (loupe.py)
+        self.loupe = Loupe()
+        self.loupe_wheel = AltWheel(self.loupe)
+        QtWidgets.QApplication.instance().installEventFilter(self.loupe_wheel)
+        self.loupe.zoom_changed.connect(
+            lambda z: self.statusBar().showMessage(f"Loupe : grossissement × {z}", 2000))
+        self.loupe_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="LOUPE : levier en bas = lentille qui suit le pointeur, "
+            "réticule rouge sur le pixel visé ; en haut = arrêt. Grossissement : "
+            "Alt + molette, ou clic droit sur l'interrupteur (× 2 à × 10).")
+        self.loupe_toggle.toggled.connect(self._loupe_toggled)
+        self.loupe_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.loupe_toggle.customContextMenuRequested.connect(self._loupe_menu)
         self.output_toggle = ToggleSwitch(
             "HP PC", "CASQUE", tooltip="Sortie du son du PC : levier en haut = "
             "haut-parleurs du PC, en bas = casque")
@@ -2064,7 +2229,12 @@ class MainWindow(QtWidgets.QMainWindow):
                            (self.volume_knob, "VOLUME"), (self.clean_knob, "FILTRE RX"),
                            (self.af_radio_knob, "AF RADIO"), (self.view_toggle, "AFFICHAGE"), (self.mute_toggle, "MUET"),
                            (self.precision_toggle, "PRÉCISION"),
-                           (self.output_toggle, "ÉCOUTE")):
+                           (self.output_toggle, "ÉCOUTE"),
+                           (self.loupe_toggle, "LOUPE"),
+                           (self.message_toggle, "MESSAGE"),
+                           (self.ft8_toggle, "FT8"),
+                           (self.rtty_toggle, "DÉCODEUR RTTY"),
+                           (self.demo_toggle, "DÉMO")):
             col = QtWidgets.QVBoxLayout()
             col.setSpacing(1)
             col.addWidget(NamePlate(name, 88), 0, QtCore.Qt.AlignHCenter)
@@ -2420,6 +2590,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tune_col.setContentsMargins(0, 0, 0, 0)
         tune_col.addSpacing(115)
         tune_col.addWidget(self.tune_plate, 0, QtCore.Qt.AlignHCenter)
+        self.tune_col = tune_col                    # le bouton EMISSION s'y ajoute plus bas
         modes.addLayout(tune_col, rows + 2, 0, 1, 2, QtCore.Qt.AlignHCenter)
         modes.setRowStretch(rows + 4, 1)
 
@@ -2661,6 +2832,14 @@ class MainWindow(QtWidgets.QMainWindow):
         vox_row.setContentsMargins(0, 0, 0, 0)
         vox_row.setSpacing(4)
         vox_row.addWidget(self.vox_button)
+        self.vox_button.hide()          # remplacé par le bouton EMISSION (sous TUNE)
+        self.emission_button = EmissionButton()
+        self.emission_button.setToolTip(self.vox_button.toolTip() + "\nMise en marche "
+                                        "manuelle ; coupure 2 s après la fin de modulation.")
+        self.emission_button.is_tx = lambda: self.vox_tx
+        self.emission_button.toggled.connect(self.vox_button.setChecked)
+        self.vox_button.toggled.connect(self._emission_sync)
+        self.tune_col.addWidget(self.emission_button, 0, QtCore.Qt.AlignHCenter)
         vox_row.addWidget(self.vox_knob)
         vox_row.addWidget(self.vox_label)
         extras.addWidget(vox_box, 0, 7)
@@ -2706,7 +2885,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scanner.status.connect(lambda text: self.statusBar().showMessage(text))
         self.scanner.heard.connect(self.on_station_heard)
         # QSO français repéré pendant le scan : bip + bouton rouge RESTER ICI
-        self.scanner.found.connect(lambda hz, text: QtWidgets.QApplication.beep())
+        self.scanner.found.connect(self.on_scan_found)
         self.scanner.holding.connect(self.on_hunt_holding)
         self.scanner.finished.connect(self.on_scan_finished)
         self.scan_blink = False
@@ -2982,6 +3161,17 @@ class MainWindow(QtWidgets.QMainWindow):
         tx_row.addWidget(self.tx_meter_label)
         tx_row.addSpacing(16)
         tx_row.addWidget(comp_box)
+        # champ de saisie CW : texte tapé → émis par la radio (Entrée), Échap = stop
+        tx_row.addSpacing(16)
+        self.cw_entry = CwEntry()
+        self.cw_entry.setPlaceholderText("Texte CW à émettre… (Entrée = émettre, Échap = stop)")
+        self.cw_entry.setMinimumWidth(420)
+        self.cw_entry.setStyleSheet(
+            "QLineEdit { font: bold 12pt monospace; color: #3ddc84; background: #05080a; "
+            "border: 2px solid #3e3024; border-radius: 6px; padding: 3px 8px; }")
+        self.cw_entry.returnPressed.connect(self._cw_entry_send)
+        self.cw_entry.escape.connect(self._cw_entry_stop)
+        tx_row.addWidget(self.cw_entry, stretch=1)
         tx_row.addStretch()
         tx_row.addWidget(self.ptt_button)
         below.addLayout(tx_row)
@@ -3438,7 +3628,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spec_curve.setData(np.arange(k) * BIN_HZ, visible)
         self._add_waterfall_row(db[:k], visible)
 
+    def _spy(self, text, stack=False):
+        """Journal des changements de fréquence (freq.log) : qui, quand, refus."""
+        try:
+            who = ""
+            if stack:
+                import inspect
+                who = " par " + " < ".join(f.function for f in inspect.stack()[2:6])
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "freq.log")
+            if os.path.exists(path) and os.path.getsize(path) > 2_000_000:
+                os.replace(path, path + ".1")       # journal gardé à taille raisonnable
+            with open(path, "a") as log:
+                log.write(f"{datetime.datetime.now():%H:%M:%S.%f} {text} "
+                          f"{self.mode_combo.currentText()}{who}\n")
+        except Exception:
+            pass
+
     def on_frequency(self, hz):
+        """Fréquence annoncée par la radio. Tant que la radio n'a pas confirmé
+        la dernière fréquence demandée, ce qu'elle annonce d'autre est un
+        ancien état en retard : on l'ignore (l'affichage ne recule jamais)."""
+        now = time.monotonic()
+        pending = getattr(self, "_pending", None)
+        if pending:
+            if hz == pending[0]:
+                self._pending = None            # confirmé par la radio
+            elif now - pending[1] < ECHO_TIMEOUT_S:
+                return                          # écho en retard : ignoré
+            else:
+                self._pending = None            # la radio n'a pas pris la commande
+                self._spy(f"RADIO n'a pas pris {pending[0]}, reste sur {hz}")
+        if hz != self.freq_hz:
+            # la radio a changé d'elle-même (son bouton) : c'est le nouveau choix
+            self._spy(f"RADIO {self.freq_hz} -> {hz}")
+            self._chosen = (hz, now)
+        self._apply_frequency(hz)
+
+    def _apply_frequency(self, hz):
         if hz != self.freq_hz:
             self.audio.ssb_tuner.request_reset()    # le son d'avant ne vaut plus
             self._set_khz_candidates(hz)
@@ -3614,6 +3840,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_sideband(name)
 
     def on_hunt_toggled(self, on):
+        if on and self.scanner.resume():            # scan verrouillé : on le libère
+            self.hunt_button.blockSignals(True)
+            self.hunt_button.setChecked(False)
+            self.hunt_button.blockSignals(False)
+            self._hunt_blinking(False)
+            return
         if on and not self.hunter.active:
             if not self.civ or self.tx_active:
                 self.hunt_button.setChecked(False)
@@ -3820,6 +4052,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                              5000)
             return
         mode, hz = result
+        if not self._calage_ok(hz):
+            return
         current = self.mode_combo.currentText()
         if mode == "CW" and current == "CW-R":
             mode = "CW-R"
@@ -3834,7 +4068,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lock_hz = hz
         if abs(hz - self.freq_hz) >= 10:
             self.ssb_target = hz
-            self.tune_to(hz)
+            self.tune_to(hz, calage=True)
         self._log_calage(f"rech man {mode} {hz}")
         self.statusBar().showMessage(
             f"RECH MAN : station en {mode} sur {format_frequency(hz)} MHz", 6000)
@@ -3863,9 +4097,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         sign = -1 if self.mode_combo.currentText() == "CW-R" else 1
         hz = int(round(self.freq_hz + sign * offset))
+        if not self._calage_ok(hz):
+            return
         self.lock_hz = hz
         self._log_calage(f"rech man cw affine {offset:+.0f}")
-        self.tune_to(hz)
+        self.tune_to(hz, calage=True)
         if attempt < 4:                     # on vérifie après le réglage
             QtCore.QTimer.singleShot(2500, lambda: self._cw_fine_lock(lock, attempt + 1))
 
@@ -3918,6 +4154,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if found:
             self.statusBar().showMessage("Scan arrêté : on reste sur le QSO français")
 
+    def on_scan_found(self, hz, text):
+        QtWidgets.QApplication.beep()
+        self.statusBar().showMessage(
+            f"QSO français sur {hz / 1e6:.3f} MHz : écoute verrouillée — "
+            "appuyer sur CHERCHER QSO FR pour reprendre le scan")
+
     # --- décodage CW -------------------------------------------------
     def on_cw_toggled(self, on):
         if on:
@@ -3931,7 +4173,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cw_view(True)
             self.cw_text.clear()
             self.decoder_combo.setCurrentIndex(self.decoder_combo.findData("cw"))
-            self.cw_hunter.start()
+            # décodage SUR PLACE : la fréquence choisie ne bouge pas (plus de
+            # balayage automatique de la bande, qui déplaçait le VFO)
+            self.cw_info.setText(f"Décodage CW sur {format_frequency(self.freq_hz or 0)} MHz "
+                                 "(sur place, la fréquence ne bouge pas)")
         else:
             self.cw_hunter.stop()
             self._cw_view(False)
@@ -4102,7 +4347,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stay_timer.stop()
             self.stay_button.setVisible(False)
             return
-        self.stay_button.setText(f"RESTER ICI {left} s")
+        self.stay_button.setText("QSO FR VERROUILLÉ" if left < 0 else f"RESTER ICI {left} s")
         if not self.stay_button.isVisible():
             self.stay_button.setVisible(True)
             self.stay_blink = True
@@ -4182,6 +4427,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log_calage("detection : aucune station trouvée à ± 6 kHz")
             return
         mode, hz = result
+        if not self._calage_ok(hz):
+            self._spy(f"REFUS mode {mode} {hz} (fréquence verrouillée)")
+            return
         current = self.mode_combo.currentText()
         if mode != current:
             self._set_sideband(mode)
@@ -4189,7 +4437,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.snap_timer.stop()                  # pas d'arrondi BLU ici
         if abs(hz - self.freq_hz) >= 10:
             self.ssb_target = hz
-            self.tune_to(hz)
+            self.tune_to(hz, calage=True)
         self._log_calage(f"mode {mode} {hz}")
         self.statusBar().showMessage(
             f"Calage auto : {mode} sur {format_frequency(hz)} MHz"
@@ -4199,6 +4447,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Fenêtre de rattrapage : la voix peut recaler jusqu'à ± PULL_MAX Hz
         (au lieu de ± FINE_MAX autour du kHz rond), pendant PULL_SECONDS."""
         self.ssb_pull_until = time.monotonic() + PULL_SECONDS if on else 0.0
+        if on and self.freq_hz:             # demandé par l'opérateur : calage permis
+            self._chosen = (self.freq_hz, time.monotonic())
         self.ssb_meter.pull_led = "search" if on else "off"
         # recherche élargie (± D_WIDE) pendant le rattrapage seulement
         self.audio.ssb_tuner.d_limit = D_WIDE if on else D_MAX
@@ -4247,12 +4497,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ssb_recentred = True
             self.ssb_meter.set_state("locked", 0, "calé sur le kHz rond")
             return
+        if not self._calage_ok(target):
+            return                      # fréquence verrouillée : on n'y touche plus
         self._log_calage(f"arrondi {target - self.freq_hz:+d}")
         self.statusBar().showMessage(
             f"Calage BLU : kHz rond {format_frequency(target)}", 4000)
         self.ssb_target = target
         self.ssb_recentred = True
-        self.tune_to(target)
+        self.tune_to(target, calage=True)
         self.ssb_meter.set_state("locked", 0, "calé sur le kHz rond")
 
     def _sstv_busy(self):
@@ -4271,16 +4523,21 @@ class MainWindow(QtWidgets.QMainWindow):
             # le correspondant est sur l'autre bande latérale : on y passe,
             # la porteuse est à « shift » Hz ; le calage fin suit
             carrier = self.freq_hz + sign * round(shift)
+            if not self._calage_ok(carrier):
+                return
             self._set_sideband("LSB" if sign > 0 else "USB")
             self._log_calage(f"bascule, porteuse {shift:+.0f}")
             self.ssb_target = carrier
             self.ssb_recentred = False
             self.ssb_anchor = None
             self.ssb_meter.set_state("search", status="autre bande latérale, recalage…")
-            self.tune_to(carrier)
+            self.tune_to(carrier, calage=True)
             self.snap_timer.start()
             return
         target = self.freq_hz + sign * round(shift)
+        if not self._calage_ok(target):
+            self._log_calage(f"verrou {shift:+.0f}")
+            return
         if self._pulling():
             # rattrapage : on suit la voix du correspondant, même hors du kHz rond
             if abs(shift) > PULL_MAX:
@@ -4304,7 +4561,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Calage BLU : correction de {shift:+.0f} Hz", 4000)
         self.ssb_target = target
         self.ssb_recentred = True
-        self.tune_to(self.ssb_target)
+        self.tune_to(self.ssb_target, calage=True)
         self.ssb_meter.set_state("locked", 0, "recalé, vérification…")
 
     def _auto_decoder(self):
@@ -4340,18 +4597,390 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo.setCurrentText(name)
         self.on_mode_selected(name)
 
-    def tune_to(self, hz):
+    def tune_to(self, hz, calage=False):
+        """Seule porte d'entrée pour changer la fréquence depuis le Scope.
+        calage=True : correction automatique (arrondi, calage BLU/CW, mode
+        reconnu). Elle n'est permise que dans les CALAGE_WINDOW_S secondes
+        qui suivent le choix de la fréquence et à moins de CALAGE_MAX_HZ de
+        celle-ci ; sinon elle est refusée et la fréquence ne bouge pas."""
         if not self.civ:
-            return
+            return False
+        hz = int(hz)
         if not MIN_FREQ <= hz <= MAX_FREQ:
             self.statusBar().showMessage(
                 f"Hors de la plage de la radio ({MIN_FREQ // 1000}–"
                 f"{MAX_FREQ // 1_000_000} MHz)")
-            return
-        self.on_frequency(hz)
+            return False
+        now = time.monotonic()
+        chosen = getattr(self, "_chosen", None)
+        if calage:
+            if chosen is None or now - chosen[1] > CALAGE_WINDOW_S \
+                    or abs(hz - chosen[0]) > CALAGE_MAX_HZ:
+                self._spy(f"REFUS calage {self.freq_hz} -> {hz} (fréquence verrouillée)",
+                          stack=True)
+                return False
+        else:
+            self._chosen = (hz, now)            # nouvelle fréquence choisie
+        self._pending = (hz, now)               # en attente de confirmation radio
+        self._spy(f"SCOPE {self.freq_hz} -> {hz}{' calage' if calage else ''}", stack=True)
+        self._apply_frequency(hz)
         self.civ.set_frequency(hz)
+        return True
+
+    def _loupe_toggled(self, on):
+        """Interrupteur LOUPE : levier en bas = lentille autour du pointeur."""
+        if on:
+            self.loupe.start()
+            self.statusBar().showMessage(
+                f"Loupe × {self.loupe.zoom} : Alt + molette pour régler", 4000)
+        else:
+            self.loupe.stop()
+
+    # --- FT8 : WSJT-X piloté par le Scope ----------------------------------
+    HAMLIB_MODES = {"USB-D": "PKTUSB", "LSB-D": "PKTLSB", "FM-D": "PKTFM", "AM-D": "PKTAM"}
+
+    def _ft8_toggled(self, on):
+        if on:
+            if self.rtty_toggle.down:           # un seul écran plein à la fois
+                self.rtty_toggle.setDown(False)
+            if self.vox_button.isChecked():         # le micro ne doit pas émettre
+                self.vox_button.setChecked(False)
+            if not self.ft8_server.start():
+                self.ft8_toggle.setDown(False)
+                return
+            ft8_bridge.ensure_wsjtx_config(self.ft8_source, self.radio_sink)
+            self._ft8_force_freq()
+            if self.ft8_proc is None or self.ft8_proc.poll() is not None:
+                self.ft8_proc = subprocess.Popen(
+                    ["wsjtx", "-stylesheet", WSJTX_QSS], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+            screen = (self.windowHandle().screen() if self.windowHandle()
+                      else QtWidgets.QApplication.primaryScreen())
+            self.ft8_map.setGeometry(screen.geometry())
+            self.ft8_map.start()
+            self.ft8_map.showFullScreen()
+            geo = screen.geometry()
+            self.ft8_close.move(geo.right() - self.ft8_close.width() - 6,
+                                geo.bottom() - self.ft8_close.height() - 22)
+            self.ft8_close.show()
+            self.ft8_close.raise_()
+            self.ft8_window = None
+            self.ft8_ids = set()
+            self.ft8_tries = 0
+            self.ft8_timer.start(500)
+            self.statusBar().showMessage("FT8 : ouverture de WSJT-X…", 5000)
+        else:
+            self.ft8_timer.stop()
+            if self.ft8_tx:
+                self.ft8_set_ptt(False)
+            proc = self.ft8_proc
+            if proc and proc.poll() is None:
+                # fermeture normale (WSJT-X garde ses réglages), forcée après 5 s
+                if self.ft8_window:
+                    subprocess.run(["wmctrl", "-i", "-c", self.ft8_window])
+                else:
+                    proc.terminate()
+                QtCore.QTimer.singleShot(5000, lambda: proc.poll() is None and proc.terminate())
+            self.ft8_proc = None
+            self.ft8_map.stop()
+            self.ft8_close.hide()
+            self._ft8_restore_windows()
+            self.ft8_server.stop()
+            before = getattr(self, "ft8_before", None)
+            self.ft8_before = None
+            if before and self.civ and not self.tx_active:
+                hz, mode = before
+                if mode.endswith("-D"):             # jamais laissé en mode données
+                    mode = mode[:-2]
+                self.ft8_set_mode(mode)
+                self._manual_tuning()
+                self.tune_to(hz)
+                self.statusBar().showMessage(
+                    f"FT8 arrêté : retour sur {hz / 1e6:.3f} MHz {mode}", 5000)
+            else:
+                self.statusBar().showMessage("FT8 arrêté", 3000)
+
+    def _ft8_force_freq(self):
+        """Radio calée sur la fréquence FT8 normalisée de la bande, en USB-D."""
+        if not self.civ or self.tx_active:
+            return
+        self._manual_tuning()           # SCAN, recherches… s'arrêtent
+        # fréquence et mode d'avant, rendus à l'arrêt du FT8
+        self.ft8_before = (self.freq_hz, self.mode_combo.currentText())
+        hz = ft8_bridge.ft8_freq_for(self.freq_hz)
+        self.ft8_set_mode("PKTUSB")
+        if hz != self.freq_hz:
+            self.tune_to(hz)
+        self.statusBar().showMessage(f"FT8 : radio calée sur {hz / 1e6:.3f} MHz USB-D", 6000)
+
+    def _ft8_watch(self):
+        """Met WSJT-X en plein écran dès que sa fenêtre paraît ; si on ferme
+        WSJT-X, l'interrupteur repasse sur OFF."""
+        if self.ft8_proc is None or self.ft8_proc.poll() is not None:
+            self.ft8_toggle.setDown(False)
+            return
+        if self.ft8_window:
+            self._ft8_keep_map_below()
+            return
+        if self.ft8_tries > 60:
+            return
+        self.ft8_tries += 1
+        out = subprocess.run(["wmctrl", "-l", "-p"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            cols = line.split(None, 4)
+            if len(cols) == 5 and cols[2] == str(self.ft8_proc.pid):
+                self.ft8_ids.add(int(cols[0], 16))
+                if "K1JT" in cols[4]:           # fenêtre principale (titre avec version)
+                    self.ft8_window = cols[0]
+                    subprocess.run(["wmctrl", "-i", "-r", cols[0], "-b", "add,fullscreen"])
+                    self._ft8_apply_opacity()
+                    QtCore.QTimer.singleShot(300, self._ft8_hide_windows)
+                    subprocess.run(["wmctrl", "-i", "-a", cols[0]])
+                elif "Wide Graph" in cols[4]:   # cascade masquée : la carte reste dégagée
+                    subprocess.run(["wmctrl", "-i", "-c", cols[0]])
+
+    FT8_CONFIG = os.path.expanduser("~/.config/ic7300-scope/ft8.json")
+
+    def _ft8_load_opacity(self):
+        try:
+            with open(self.FT8_CONFIG) as f:
+                return max(40, min(100, int(json.load(f)["opacite"])))
+        except (OSError, ValueError, KeyError, TypeError):
+            return 75
+
+    def _ft8_apply_opacity(self):
+        """WSJT-X un peu transparent : la mappemonde se voit derrière."""
+        if self.ft8_window:
+            value = int(self.ft8_opacity / 100 * 0xFFFFFFFF)
+            subprocess.run(["xprop", "-id", self.ft8_window, "-f", "_NET_WM_WINDOW_OPACITY",
+                            "32c", "-set", "_NET_WM_WINDOW_OPACITY", str(value)],
+                           capture_output=True)
+
+    def _ft8_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        menu.addSection("Opacité de WSJT-X sur la carte")
+        for value in (100, 90, 85, 80, 75, 70, 60, 50):
+            action = menu.addAction(f"{value} %")
+            action.setCheckable(True)
+            action.setChecked(value == self.ft8_opacity)
+            action.triggered.connect(lambda _, v=value: self._ft8_set_opacity(v))
+        menu.exec_(self.ft8_toggle.mapToGlobal(pos))
+
+    def _ft8_set_opacity(self, value):
+        self.ft8_opacity = value
+        try:
+            os.makedirs(os.path.dirname(self.FT8_CONFIG), exist_ok=True)
+            with open(self.FT8_CONFIG, "w") as f:
+                json.dump({"opacite": value}, f)
+        except OSError:
+            pass
+        self._ft8_apply_opacity()
+
+    def _ft8_hide_windows(self):
+        """Range toutes les autres fenêtres (Scope compris) : derrière WSJT-X il
+        ne reste que la mappemonde. Elles reviennent à la fermeture de FT8."""
+        keep = {int(self.ft8_map.winId())}
+        if self.console_button.isChecked():         # CONSOLE allumé : le terminal reste
+            keep |= set(console.terminal_windows())
+        self.ft8_hidden = self._hide_windows(
+            keep, str(self.ft8_proc.pid) if self.ft8_proc else "")
+        if self.console_button.isChecked():         # … et passe devant WSJT-X
+            QtCore.QTimer.singleShot(400, lambda: console.show_console(None))
+
+    def _rtty_hide(self):
+        keep = {int(self.rtty_screen.winId())}
+        if self.console_button.isChecked():         # CONSOLE allumé : le terminal reste
+            keep |= set(console.terminal_windows())
+        self.rtty_hidden = self._hide_windows(keep)
+        if self.console_button.isChecked():
+            QtCore.QTimer.singleShot(200, lambda: console.show_console(None))
+
+    def _hide_windows(self, keep, pid=""):
+        """Réduit toutes les fenêtres sauf `keep` et celles du processus `pid` ;
+        renvoie la liste (du bas vers le haut) pour les rendre ensuite."""
+        out = subprocess.run(["wmctrl", "-l", "-p"], capture_output=True, text=True).stdout
+        candidates = set()
+        for line in out.splitlines():
+            cols = line.split(None, 4)
+            if len(cols) < 4 or cols[1] == "-1" or cols[2] == pid:
+                continue                    # bureau, panneaux, fenêtres de WSJT-X
+            w = int(cols[0], 16)
+            if w not in keep:
+                candidates.add(w)
+        stack = subprocess.run(["xprop", "-root", "_NET_CLIENT_LIST_STACKING"],
+                               capture_output=True, text=True).stdout
+        order = [int(x, 16) for x in re.findall(r"0x[0-9a-f]+", stack)]
+        hidden = [w for w in order if w in candidates]   # du bas vers le haut
+        for w in hidden:
+            self.demo_finger.x11.iconify(w)
+        return hidden
+
+    def _restore_windows(self, hidden):
+        """Fenêtres rangées : de retour, dans leur ordre d'avant."""
+        for w in hidden:
+            subprocess.run(["wmctrl", "-i", "-a", hex(w)], capture_output=True)
+
+    def _ft8_restore_windows(self):
+        self._restore_windows(self.ft8_hidden)
+        self.ft8_hidden = []
+
+    # --- DÉCODEUR RTTY plein écran ------------------------------------------
+    RTTY_FREQS = (3_590_000, 7_043_000, 10_142_000, 14_085_000, 18_105_000,
+                  21_085_000, 24_925_000, 28_085_000)
+    RTTY_BANDS = ((3_580_000, 3_600_000), (7_040_000, 7_050_000), (10_140_000, 10_150_000),
+                  (14_080_000, 14_099_000), (18_095_000, 18_109_000),
+                  (21_080_000, 21_120_000), (24_915_000, 24_929_000),
+                  (28_050_000, 28_150_000))
+
+    def _rtty_tick(self):
+        """Écran RTTY : fréquence et émission de ma radio, en temps réel."""
+        self.rtty_screen.set_frequency(self.freq_hz)
+        self.rtty_screen.set_tx(self.tx_active or getattr(self.civ, "_tx", False))
+
+    def _rtty_toggled(self, on):
+        if on:
+            if self.ft8_toggle.down:            # un seul écran plein à la fois
+                self.ft8_toggle.setDown(False)
+            if self.civ and not self.tx_active:
+                self._manual_tuning()
+                hz = self.freq_hz or 14_085_000
+                if not any(lo <= hz <= hi for lo, hi in self.RTTY_BANDS):
+                    hz = min(self.RTTY_FREQS, key=lambda f: abs(f / hz - 1))
+                    self.tune_to(hz)
+                self.ft8_set_mode("RTTY")
+            self.rtty_prev_decoder = self.decoder_combo.currentIndex()
+            self.decoder_combo.setCurrentIndex(self.decoder_combo.findData("rtty"))
+            self.decoder_auto.setChecked(True)
+            screen = (self.windowHandle().screen() if self.windowHandle()
+                      else QtWidgets.QApplication.primaryScreen())
+            geo = screen.geometry()
+            self.rtty_screen.reset()
+            self.rtty_screen.set_frequency(self.freq_hz)
+            self.rtty_screen.setGeometry(geo)
+            self.rtty_screen.start()
+            self.rtty_screen.showFullScreen()
+            self.rtty_close.move(geo.right() - self.rtty_close.width() - 6,
+                                 geo.bottom() - self.rtty_close.height() - 22)
+            self.rtty_close.show()
+            self.rtty_close.raise_()
+            self.rtty_timer.start(250)
+            QtCore.QTimer.singleShot(400, lambda: self.rtty_toggle.down and self._rtty_hide())
+        else:
+            self.rtty_timer.stop()
+            self.rtty_close.hide()
+            self.rtty_screen.stop()
+            self._restore_windows(self.rtty_hidden)
+            self.rtty_hidden = []
+            self.decoder_combo.setCurrentIndex(self.rtty_prev_decoder)
+
+    def _ft8_keep_map_below(self):
+        """Quand WSJT-X est au premier plan, la carte doit être juste dessous
+        (sinon c'est le Scope qu'on verrait à travers WSJT-X)."""
+        def root(prop):
+            out = subprocess.run(["xprop", "-root", prop], capture_output=True,
+                                 text=True).stdout
+            return [int(x, 16) for x in re.findall(r"0x[0-9a-f]+", out)]
+        active = root("_NET_ACTIVE_WINDOW")
+        if not active or active[0] not in self.ft8_ids:
+            return
+        stack = root("_NET_CLIENT_LIST_STACKING")
+        map_id, main = int(self.ft8_map.winId()), int(self.ft8_window, 16)
+        if map_id not in stack or main not in stack:
+            return
+        i_map, i_main = stack.index(map_id), stack.index(main)
+        if i_map < i_main and all(w in self.ft8_ids for w in stack[i_map + 1:i_main]):
+            return
+        subprocess.run(["wmctrl", "-i", "-a", hex(map_id)])
+        for w in [w for w in stack if w in self.ft8_ids and w != main] + [main]:
+            subprocess.run(["wmctrl", "-i", "-a", hex(w)])
+
+    # appelées par ft8_bridge (WSJT-X → radio)
+    def ft8_get_freq(self):
+        return self.freq_hz
+
+    def ft8_set_freq(self, hz):
+        if not self.tx_active and hz != self.freq_hz:
+            self.tune_to(hz)
+
+    def ft8_get_mode(self):
+        mode = self.mode_combo.currentText()
+        return self.HAMLIB_MODES.get(mode, mode)
+
+    def ft8_set_mode(self, name):
+        mode = {v: k for k, v in self.HAMLIB_MODES.items()}.get(name, name)
+        if self.civ and mode in MODE_NAMES and mode != self.mode_combo.currentText():
+            self.mode_combo.setCurrentText(mode)
+            self._sync_mode_buttons()
+            self.civ.set_mode(mode)
+
+    def ft8_get_ptt(self):
+        return self.tx_active
+
+    def ft8_set_ptt(self, on):
+        """Émission FT8 : mode data, son pris sur l'USB (WSJT-X), micro coupé."""
+        if on and not self.tx_active and self.civ:
+            self.civ.set_ptt(True, data=True)
+            self.ft8_tx = True
+            self.tx_limit = TX_TIMEOUT
+            self.tx_active = True
+            self.tx_galva.set_tx(True)
+            self._pactl_stream("set-sink-input-mute", "1")     # écoute muette en émission
+            self._update_ssb()
+            self.tx_started = time.monotonic()
+            self.tx_timer.start()
+            self._set_ptt_button(True)
+        elif not on and self.tx_active:
+            self.ft8_tx = False
+            self.stop_tx()
+
+    def _demo_toggled(self, on):
+        """Interrupteur DÉMO : levier en bas = la souris devient un gros doigt."""
+        if on:
+            self.demo_finger.start()
+            self.statusBar().showMessage(
+                f"Démo : doigt {self.demo_finger.size_name.lower()} (clic droit sur DÉMO "
+                "pour la taille)", 4000)
+        else:
+            self.demo_finger.stop()
+
+    def _demo_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        for name in DEMO_SIZES:
+            action = menu.addAction(f"Doigt {name.lower()}")
+            action.setCheckable(True)
+            action.setChecked(name == self.demo_finger.size_name)
+            action.triggered.connect(lambda _, n=name: self.demo_finger.set_size(n))
+        menu.exec_(self.demo_toggle.mapToGlobal(pos))
+
+    def _loupe_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        for z in range(2, 11):
+            action = menu.addAction(f"Grossissement × {z}")
+            action.setCheckable(True)
+            action.setChecked(z == self.loupe.zoom)
+            action.triggered.connect(lambda _, z=z: self.loupe.set_zoom(z))
+        menu.exec_(self.loupe_toggle.mapToGlobal(pos))
+
+    def _calage_ok(self, hz):
+        """Un calage automatique peut-il encore aller sur hz ? (voir tune_to)"""
+        chosen = getattr(self, "_chosen", None)
+        return (chosen is not None and time.monotonic() - chosen[1] <= CALAGE_WINDOW_S
+                and abs(hz - chosen[0]) <= CALAGE_MAX_HZ)
+
+    def _manual_tuning(self):
+        """L'opérateur règle la fréquence lui-même : toute recherche automatique
+        (DÉCODAGE CW, SCAN, CHERCHER QSO FR) s'arrête et la fréquence reste là."""
+        if self.cw_hunter.active:
+            self.cw_hunter.stop()
+            self.cw_info.setText("Balayage arrêté (réglage à la main) : décodage sur place")
+        if self.scanner.active:
+            self.scan_button.setChecked(False)
+        if self.hunter.active:
+            self.hunt_button.setChecked(False)
+        self.statusBar().showMessage("Réglage à la main : recherches automatiques arrêtées", 3000)
 
     def on_tuned(self, steps):
+        self._manual_tuning()
         if self.freq_hz is None:
             return
         step = self.step_combo.currentData()
@@ -4383,6 +5012,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_knob_tuned(self, steps):
         """Bouton VFO : pas de 50 kHz ou 100 kHz selon l'interrupteur à levier."""
+        self._manual_tuning()
         if self.freq_hz is None:
             return
         step = self._fine_step() or self.step_combo.currentData()   # sinon : pas du menu
@@ -4392,6 +5022,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_to(base + steps * step)
 
     def on_freq_entered(self):
+        self._manual_tuning()
         hz = parse_frequency(self.freq_entry.text())
         if hz is None:
             self.statusBar().showMessage("Fréquence non comprise")
@@ -4646,8 +5277,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mic_db = None
         if self.vox_tx:
             self.vox_tx = False
-            self.vox_button.setText("VOX ON")
-            self.vox_button.setStyleSheet(PUSH_3D)
+            QtCore.QTimer.singleShot(0, lambda: self._vox_disarm(
+                "VOX coupé : émission terminée. Rappuie sur VOX pour le réarmer"))
         self._update_ssb()
         self.tx_digital = False
         self.tx_timer.stop()
@@ -4705,7 +5336,17 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.backlight_timer.stop()
             self.freq_label.set_voice(None)
+            self._pump_meters(None)
             self.clocks.set_voice(None)
+
+    def _pump_meters(self, light):
+        """S-mètre et 3 petits galvas : lumière du centre qui suit la lampe des
+        tambours en émission ; éclairage normal en réception."""
+        value = light if self.backlight_on_air else None
+        for meter in (self.s_meter, self.tx_galva.po_g, self.tx_galva.comp_g, self.ssb_meter):
+            if getattr(meter, "pump", None) != value:
+                meter.pump = value
+                meter.update()
 
     def _backlight_voice(self):
         level = self.voice_scope.voice_level()
@@ -4713,12 +5354,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clocks.set_voice(level)
 
     def on_transmitting(self, tx):
+        self.voice_scope.set_tx(tx)        # vobulation seulement en émission
         if not tx and not self.tx_active:
             self.power_meter.setValue(0)        # plus d'émission : aiguille à 0
             self._backlight_tx(False)
         elif tx:
             self._backlight_tx(True)
-        if self.tx_active and not tx and time.monotonic() - self.tx_started > 2:
+        delay = 6 if str(self.civ.port).startswith("socket://") else 2
+        if self.tx_active and not tx and time.monotonic() - self.tx_started > delay:
             self.stop_tx("La radio n'émet pas (hors bande amateur ?)")
 
     SWR_ALARM = 2.0
@@ -4885,6 +5528,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if found:
             self.loopback_timer.stop()
             _, volume, muted = self.loopback
+            if muted and not getattr(self, "_loopback_seen", False):
+                # sourdine laissée par une session précédente (RM Noise…) : au
+                # démarrage aucun filtre ne tourne, le son direct doit revenir
+                subprocess.run(["pactl", "set-sink-input-mute", str(self.loopback[0]), "0"],
+                               capture_output=True)
+                muted = False
+            self._loopback_seen = True
             for widget, value in ((self.pc_volume, volume), (self.mute_check, muted)):
                 widget.blockSignals(True)
                 widget.setValue(value) if widget is self.pc_volume else widget.setChecked(value)
@@ -4938,6 +5588,102 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "PRÉCISION ON : double-clic pour accrocher un bouton, double-clic pour le lâcher"
             if on else "PRÉCISION OFF : cliquer et glisser pour tourner les boutons", 5000)
+
+    # --- message CW préparé -----------------------------------------------
+    def _message_text(self):
+        try:
+            with open(MESSAGE_FILE) as f:
+                return f.read().strip() or DEFAULT_MESSAGE
+        except OSError:
+            return DEFAULT_MESSAGE
+
+    def _edit_message(self, *_):
+        """Clic droit sur MESSAGE : écrire le message (gardé pour les fois suivantes)."""
+        text, ok = QtWidgets.QInputDialog.getText(
+            self, "Message CW", "Message émis en CW (lettres, chiffres, / ? . , =) :",
+            QtWidgets.QLineEdit.Normal, self._message_text())
+        if ok and text.strip():
+            os.makedirs(os.path.dirname(MESSAGE_FILE), exist_ok=True)
+            with open(MESSAGE_FILE, "w") as f:
+                f.write(text.strip().upper() + "\n")
+            self.statusBar().showMessage(f"Message enregistré : {text.strip().upper()}", 5000)
+
+    def _morse_seconds(self, text):
+        """Durée d'émission du texte (unités morse à la vitesse choisie)."""
+        codes = {v: k for k, v in MORSE.items()}
+        units = 0
+        for ch in text:
+            if ch == " ":
+                units += 4                          # 7 entre mots (3 déjà comptés)
+                continue
+            code = codes.get(ch, "")
+            units += sum(1 if c == "." else 3 for c in code) + len(code) - 1 + 3
+        return units * 1.2 / self.paddle_wpm.value()
+
+    def _cw_split(self, text):
+        """Texte → paquets de 30 caractères au plus (limite de la commande CI-V)."""
+        chunks, cur = [], ""
+        for w in " ".join(text.upper().split()).split(" "):
+            if len(cur) + len(w) + 1 > 30 and cur:
+                chunks.append(cur)
+                cur = w
+            else:
+                cur = f"{cur} {w}".strip()
+        if cur:
+            chunks.append(cur)
+        return chunks
+
+    def _cw_entry_send(self):
+        text = self.cw_entry.text().strip()
+        if not text:
+            return
+        if not self.civ or self.mode_combo.currentText() not in ("CW", "CW-R"):
+            self.statusBar().showMessage("Saisie CW : seulement en mode CW (rien d'émis)", 5000)
+            return
+        self.cw_entry.clear()
+        busy = bool(self.message_chunks) or self.message_timer.isActive()
+        self.message_chunks += self._cw_split(text)     # à la suite de ce qui part déjà
+        self.statusBar().showMessage(f"CW émis : {text.upper()}")
+        if not busy:
+            self.civ.set_key_speed(self.paddle_wpm.value())
+            self._message_next()
+
+    def _cw_entry_stop(self):
+        if self.message_chunks or self.message_timer.isActive():
+            self.message_toggle.setDown(False)          # même arrêt que MESSAGE sur OFF
+        self.message_timer.stop()
+        self.message_chunks = []
+        if self.civ:
+            self.civ.stop_cw()
+        self.statusBar().showMessage("Émission CW arrêtée", 4000)
+
+    def _message_toggled(self, on):
+        if not on:
+            if self.message_chunks or self.message_timer.isActive():
+                self.message_timer.stop()
+                self.message_chunks = []
+                if self.civ:
+                    self.civ.stop_cw()
+                self.statusBar().showMessage("Message CW arrêté", 4000)
+            return
+        if not self.civ or self.mode_combo.currentText() not in ("CW", "CW-R"):
+            self.statusBar().showMessage("MESSAGE : seulement en CW (rien d'émis)", 5000)
+            self.message_toggle.setDown(False, emit=False)
+            return
+        text = " ".join(self._message_text().upper().split())
+        self.message_chunks = self._cw_split(text)
+        self.civ.set_key_speed(self.paddle_wpm.value())
+        self.statusBar().showMessage(f"Message CW : {text}")
+        self._message_next()
+
+    def _message_next(self):
+        if not self.message_chunks:             # message fini : levier sur OFF
+            self.message_toggle.setDown(False, emit=False)
+            self.statusBar().showMessage("Message CW émis", 4000)
+            return
+        chunk = self.message_chunks.pop(0)
+        self.civ.send_cw(chunk + (" " if self.message_chunks else ""))
+        self.message_timer.start(int(self._morse_seconds(chunk + " ") * 1000) + 300)
 
     def _output_toggled(self, casque):
         """Interrupteur ÉCOUTE : ne bascule que si la sortie n'y est pas déjà."""
@@ -5196,6 +5942,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.decoder_led.setStyleSheet(f"font: 16pt; color: {color};")
 
     def on_decoded(self, text):
+        if self.rtty_toggle.down:
+            self.rtty_screen.feed_text(text)
         if self.cw_view_active:
             self.cw_text.moveCursor(QtGui.QTextCursor.End)
             self.cw_text.insertPlainText(text)
@@ -5206,7 +5954,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- VOX sur le micro du PC : la parole fait passer la radio en émission ---
     VOX_VOICE_MODES = ("LSB", "USB", "AM", "FM")
-    VOX_HANG_S = 0.25
+    VOX_HANG_S = 2.0           # fin de modulation + 2 s → retour réception ET VOX coupé
 
     def _vox_threshold(self):
         """Seuil en dBFS : sensibilité 0 % → -10 dB, 100 % → -60 dB."""
@@ -5222,6 +5970,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_vox_toggled(self, on):
         if on:
+            mode = self.mode_combo.currentText()
+            if mode.endswith("-D") and mode[:-2] in self.VOX_VOICE_MODES:
+                self.ft8_set_mode(mode[:-2])        # USB-D → USB : le VOX est pour la phonie
+                self.statusBar().showMessage(f"VOX : passage de {mode} en {mode[:-2]}", 5000)
             mic = self._vox_mic()
             if not self.civ or not mic:
                 self.statusBar().showMessage("VOX : pas de CAT ou pas de micro", 5000)
@@ -5272,14 +6024,31 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.vox_tx and now - self.vox_last_voice > self.VOX_HANG_S:
             self.vox_tx = False
             self.stop_tx()
-            self.vox_button.setText("VOX ON")
-            self.vox_button.setStyleSheet(PUSH_3D)
+            self._vox_disarm("VOX coupé : 2 s sans modulation. Rappuie sur VOX pour le réarmer")
+
+    def _vox_disarm(self, message):
+        """Le VOX ne reste jamais armé après une émission : remise en marche manuelle."""
+        if self.vox_button.isChecked():
+            self.vox_button.setChecked(False)
+        self.statusBar().showMessage(message, 8000)
+
+    def _emission_sync(self, on):
+        """Le bouton EMISSION suit l'état du VOX (coupures automatiques comprises)."""
+        if self.emission_button.isChecked() != on:
+            self.emission_button.blockSignals(True)
+            self.emission_button.setChecked(on)
+            self.emission_button.blockSignals(False)
+            self.emission_button.update()
 
     def on_vox_knob(self, level):
         self.vox_label.setText(f"{level * 100 / 255:.0f} %")
 
     def on_radio_vox(self, on):
-        pass                            # le VOX de la radio n'est pas utilisé
+        # le VOX interne de la radio n'est jamais utilisé : s'il est allumé, on l'éteint
+        if on and self.civ:
+            self.civ.set_vox(False)
+            self.statusBar().showMessage("VOX de la radio éteint : seul le bouton VOX "
+                                         "du Scope (mise en marche manuelle) est permis", 8000)
 
     def on_radio_vox_gain(self, level):
         pass
@@ -5312,6 +6081,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.radio_cw_pitch = float(hz)
 
     def on_decoder_state(self, info, pitch, signal, active):
+        if self.rtty_toggle.down:
+            self.rtty_screen.set_signal(signal)
         if self.audio.decoder is None:
             return
         self.cw_note = pitch if (signal and self.decoder_combo.currentData() == "cw"
@@ -5375,6 +6146,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._remember_band()
+        if self.ft8_toggle.down:
+            self.ft8_toggle.setDown(False)
+        if self.rtty_toggle.down:
+            self.rtty_toggle.setDown(False)
+        self.loupe.stop()
+        self.loupe.close()
+        self.demo_finger.stop()             # la flèche de la souris revient
+        self.demo_finger.close()
         self.voice_scope.stop()
         self.function_screen.close()
         self._tx_mic_unload()
@@ -5450,6 +6229,14 @@ def main():
     pg.setConfigOptions(imageAxisOrder="row-major", antialias=True,
                         background="#101418")
     app = QtWidgets.QApplication(sys.argv)
+    # un seul IC-7300 Scope à la fois : deux se disputeraient la radio (CAT)
+    # et le second démonterait le son du premier (relais orphelins)
+    lock = QtCore.QLockFile(os.path.join(tempfile.gettempdir(), "ic7300-scope.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(200):
+        QtWidgets.QMessageBox.information(None, "IC-7300 Scope",
+                                          "IC-7300 Scope est déjà ouvert.")
+        sys.exit(0)
     app.setApplicationName("IC-7300 Scope")
     app.setDesktopFileName("ic7300-scope")      # lien avec le menu des applications
     app.setWindowIcon(QtGui.QIcon(ICON))
@@ -5460,6 +6247,20 @@ def main():
     # haut restent accessibles (F11 : plein écran total / fenêtre agrandie)
     window.setGeometry(app.primaryScreen().availableGeometry())
     window.showMaximized()
+
+    def fix_position():
+        """Le gestionnaire de fenêtres place parfois Scope décalé hors de l'écran
+        malgré « agrandie » : on le remet en place."""
+        avail = app.primaryScreen().availableGeometry()
+        if window.isFullScreen() or avail.contains(window.frameGeometry().topLeft()) \
+                and window.frameGeometry().left() <= avail.left() + 20 \
+                and window.frameGeometry().top() <= avail.top() + 20:
+            return
+        window.showNormal()
+        window.setGeometry(avail)
+        window.showMaximized()
+    QtCore.QTimer.singleShot(1200, fix_position)
+    QtCore.QTimer.singleShot(4000, fix_position)
 
     def toggle_full_screen():
         if window.isFullScreen():

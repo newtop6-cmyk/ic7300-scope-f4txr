@@ -166,6 +166,15 @@ class QsoHunter(QtCore.QObject):
             self.holding.emit(0)
             self.stop(True)
 
+    def resume(self):
+        """Scan verrouillé sur un QSO français : on reprend le balayage."""
+        if self.active and self.state == "hold":
+            self.holding.emit(0)
+            self._say("Scan : déverrouillé, reprise du balayage…")
+            self._next_candidate()
+            return True
+        return False
+
     def shutdown(self):
         self.stop()
         self.worker.stop()
@@ -371,12 +380,11 @@ class QsoHunter(QtCore.QObject):
                 self.found.emit(self.target, text)
                 self.stop(True)
                 return
-            # scan : on reste dessus 20 s ; le bouton RESTER ICI arrête le scan
+            # scan : verrouillé sur ce QSO, sans limite de temps ; l'appui
+            # sur CHERCHER QSO FR déverrouille et reprend le scan
             self.state = "hold"
-            self.hold_left = HOLD_S
             self.found.emit(self.target, text)
-            self.holding.emit(self.hold_left)
-            self.timer.start(1000)
+            self.holding.emit(-1)
             return
         self._say(f"Recherche : {where} = {lang or '?'} ({prob:.0%}), suivant…")
         self._next_candidate()

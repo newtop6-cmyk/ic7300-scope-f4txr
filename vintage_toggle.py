@@ -22,13 +22,30 @@ class ToggleSwitch(QtWidgets.QWidget):
             self.setToolTip(tooltip)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
+        # voyant : ON (levier en bas) = bleu clignotant, OFF = rouge fixe
+        self.lamp_on = True
+        self.blink_timer = QtCore.QTimer(self)
+        self.blink_timer.timeout.connect(self._blink)
 
     def setDown(self, down, emit=True):
         if down != self.down:
             self.down = down
             self.timer.start(16)
+            self._lamp_mode()
             if emit:
                 self.toggled.emit(down)
+
+    def _lamp_mode(self):
+        self.lamp_on = True
+        if self.down:
+            self.blink_timer.start(400)
+        else:
+            self.blink_timer.stop()
+        self.update()
+
+    def _blink(self):
+        self.lamp_on = not self.lamp_on
+        self.update()
 
     def mousePressEvent(self, event):
         self.setDown(not self.down)
@@ -129,4 +146,33 @@ class ToggleSwitch(QtWidgets.QWidget):
         g.setColorAt(1, QtGui.QColor("#3c3f42"))
         p.setBrush(g)
         p.drawEllipse(tip, 5.5, 5.5)
+        self._paint_lamp(p, QtCore.QPointF(plate.right() - 11, c.y()))
         p.end()
+
+    def _paint_lamp(self, p, at):
+        """Voyant à droite de l'écrou : bleu clignotant (ON) ou rouge fixe (OFF)."""
+        if self.down:
+            lit = self.lamp_on
+            core, glow, dark = "#4fc3ff", QtGui.QColor(40, 150, 255), "#0b2a4a"
+        else:
+            lit = True
+            core, glow, dark = "#ff5a4f", QtGui.QColor(255, 40, 30), "#4a0b0b"
+        p.setPen(QtGui.QPen(QtGui.QColor("#1c1e20"), 1))      # sertissage
+        p.setBrush(QtGui.QColor("#6a6f74"))
+        p.drawEllipse(at, 7, 7)
+        if lit:
+            halo = QtGui.QRadialGradient(at, 14)
+            glow.setAlpha(170)
+            halo.setColorAt(0, glow)
+            glow.setAlpha(0)
+            halo.setColorAt(1, glow)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(halo)
+            p.drawEllipse(at, 14, 14)
+        g = QtGui.QRadialGradient(at - QtCore.QPointF(1.5, 1.5), 6)
+        g.setColorAt(0, QtGui.QColor("#ffffff" if lit else "#3a3d40"))
+        g.setColorAt(0.35, QtGui.QColor(core if lit else dark))
+        g.setColorAt(1, QtGui.QColor(dark))
+        p.setPen(QtGui.QPen(QtGui.QColor("#111"), 0.8))
+        p.setBrush(g)
+        p.drawEllipse(at, 5.5, 5.5)

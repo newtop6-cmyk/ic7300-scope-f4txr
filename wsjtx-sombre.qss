@@ -1,0 +1,16 @@
+/* WSJT-X en bleu nuit pour l'écran FT8 du Scope (la carte se voit à travers) */
+QWidget { background-color: #071638; color: #dce8ff; }
+QMainWindow, QDialog { background-color: #071638; }
+QLabel, QCheckBox, QRadioButton, QGroupBox { background: transparent; }
+QTextEdit, QTextBrowser, QPlainTextEdit, QLineEdit, QSpinBox, QDoubleSpinBox,
+QComboBox, QTableView, QListView {
+  background-color: #030b22; color: #f0f5ff; border: 1px solid #2c4f96;
+  selection-background-color: #2a5cb0; selection-color: #ffffff; }
+QPushButton { background-color: #143073; color: #ffffff; border: 1px solid #3d68c0;
+  border-radius: 4px; padding: 3px 8px; }
+QPushButton:hover { background-color: #1d42a0; }
+QMenuBar, QMenu { background-color: #071638; color: #dce8ff; }
+QMenuBar::item:selected, QMenu::item:selected { background-color: #2a5cb0; }
+QHeaderView::section { background-color: #143073; color: #ffffff; border: 1px solid #2c4f96; }
+QStatusBar { background-color: #050f2a; color: #dce8ff; }
+QScrollBar { background-color: #050f2a; }

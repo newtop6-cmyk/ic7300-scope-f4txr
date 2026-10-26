@@ -4,12 +4,14 @@ les chiffres voisins dépasser en haut et en bas, assombris par la courbure ;
 fenêtre en verre, cadre en laiton vieilli, points en laiton entre les groupes."""
 
 import math
+import random
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 class DrumDisplay(QtWidgets.QWidget):
     tuned = QtCore.pyqtSignal(int)
+    lamp = QtCore.pyqtSignal(float)    # niveau de la lampe (pompage), pour les cadrans
 
     def __init__(self, width=370, height=74):
         super().__init__()
@@ -38,20 +40,44 @@ class DrumDisplay(QtWidgets.QWidget):
             self.set_voice(None)
 
     def set_voice(self, level):
-        """Émission : l'intensité suit la voix (level 0 à 1) ; None = repos.
-        La couleur reste l'ambre de réception."""
+        """Émission : l'éclairage « pompe sur le secteur » comme sous un gros ampli.
+        Modulation forte → la lampe baisse ; la modulation retombe → flash très
+        lumineux qui s'éteint vite. None = repos (éteint)."""
         self.tx_goal = 0.0
-        # silence → presque éteint, voix forte → éclat maximal (contraste fort)
-        self.light_goal = 0.0 if level is None else 0.05 + 1.25 * min(1.0, level)
+        if level is None:
+            self.light_goal = 0.0
+            self.voice_prev = 0.0
+            self.surge = 0.0
+        else:
+            level = min(1.0, max(0.0, level))
+            drop = getattr(self, "voice_prev", 0.0) - level
+            if drop > 0.04:                     # baisse de signal → surtension
+                self.surge = min(1.6, getattr(self, "surge", 0.0) + drop * 3.5)
+            self.voice_prev = level
+            # lampe pleine au repos d'émission, effondrée sur les pointes de voix
+            self.light_goal = 1.0 - 0.88 * level ** 0.7
         if not self.light_timer.isActive():
             self.light_timer.start(30)
 
     def _light_tick(self):
-        up = self.light_goal > self.light
-        self.light += (self.light_goal - self.light) * (0.7 if up else 0.3)   # très vif
+        surge = getattr(self, "surge", 0.0)
+        down = self.light_goal < self.base_light if hasattr(self, "base_light") else False
+        base = getattr(self, "base_light", self.light)
+        base += (self.light_goal - base) * (0.6 if down else 0.25)   # chute rapide
+        self.base_light = base
+        # ondulation 50 Hz : le secteur « tremble » d'autant plus que l'on tire
+        ripple = 0.0
+        if self.light_goal > 0 and getattr(self, "voice_prev", 0.0) > 0.15:
+            ripple = (random.random() - 0.5) * 0.25 * self.voice_prev
+        self.light = max(0.0, base + 1.1 * surge + ripple)
+        self.surge = surge * 0.78                # le flash retombe en ~0,3 s
+        self.lamp.emit(self.light)
         self.tx += (self.tx_goal - self.tx) * (0.4 if self.tx_goal > self.tx else 0.1)
-        if abs(self.light_goal - self.light) < 0.005 and abs(self.tx_goal - self.tx) < 0.005:
-            self.light, self.tx = self.light_goal, self.tx_goal
+        if (self.light_goal == 0 and abs(base) < 0.005 and self.surge < 0.005
+                and abs(self.tx_goal - self.tx) < 0.005):
+            self.light = self.base_light = 0.0
+            self.tx = self.tx_goal
+            self.surge = 0.0
             self.light_timer.stop()
         self.update()
 

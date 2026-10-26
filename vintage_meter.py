@@ -7,6 +7,8 @@ import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+import pump_glow
+
 S9 = 120                        # valeurs brutes Icom : 0 = S0, 120 = S9
 S9_PLUS_60 = 241                # 241 = S9 + 60 dB
 SPAN = 48.0                     # degrés de part et d'autre du centre
@@ -86,6 +88,7 @@ class VintageSMeter(QtWidgets.QWidget):
         glow.setColorAt(1, QtGui.QColor("#c49c55"))
         p.setBrush(glow)
         p.drawRoundedRect(face, 8, 8)
+        pump_glow.paint(p, face, getattr(self, "pump", None))
         # ombres intérieures : le cadran est en retrait
         shade = QtGui.QLinearGradient(0, 11, 0, 40)
         shade.setColorAt(0, QtGui.QColor(0, 0, 0, 130))
