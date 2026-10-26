@@ -66,7 +66,9 @@ from vintage_meter import VintageSMeter, VintagePowerMeter
 from whistle import Whistle
 from qso_hunter import QsoHunter, find_signals
 from panel_frame import PanelFrame
+from silver_frame import SilverFrame
 from cw_station import CwStation
+from egaliseur import EqEngine, EqWindow
 import rm_noise
 import rnnoise_radio
 from cw_hunter import CwHunter
@@ -562,6 +564,14 @@ def unload_remote_audio(modules):
                    if REMOTE_RX in line or REMOTE_TX in line]
     for module in reversed(modules):
         subprocess.run(["pactl", "unload-module", module], capture_output=True)
+
+
+def mic_gain_now():
+    """Gain actuel du micro par défaut du PC, en % (100 si inconnu)."""
+    out = subprocess.run(["pactl", "get-source-volume", "@DEFAULT_SOURCE@"],
+                         capture_output=True, text=True, env=PACTL_ENV).stdout
+    m = re.search(r"(\d+)%", out)
+    return int(m.group(1)) if m else 100
 
 
 def list_microphones(exclude):
@@ -2226,28 +2236,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.volume_knob = VintageKnob(
             88, 150, "%", None, "",
             "Volume du son de la radio sur le PC (0 à 150 %) : glisser, ou molette")
+        # GAIN MICRO : volume d'entrée du micro du PC (remplace la liste « Micro » du bas)
+        self.mic_knob = ScaleBakelite(
+            mic_gain_now() / 15, 88, "", lambda v: f"{round(v * 15)} %",
+            "Gain du micro du PC (0 à 150 %) : glisser, ou molette "
+            "(Maj+molette = pas de 15 %)")
+        self.mic_knob.valueChanged.connect(self.on_mic_knob)
+        # NIVEAU COMP : niveau du compresseur de la radio (0 à 10), en bouton rond
+        self.comp_round = ScaleBakelite(
+            0.0, 88, "", lambda v: f"{v:.1f}".replace(".", ","),
+            "Niveau du compresseur de l'IC-7300 (0 à 10 comme sur la radio). "
+            "Molette 0,1 · Maj+molette 1 · glisser")
+        self.comp_round.valueChanged.connect(
+            lambda v: self.on_comp_knob(round(v * 25.5)))
         # rangée PRÉ-BF, VOL PC, NIV, ALC : au-dessus du waterfall (voir plus bas),
         # alignée à gauche ; la place à droite est gardée pour d'autres boutons
         self.knob_bar = QtWidgets.QHBoxLayout()
         self.knob_bar.setSpacing(8)
         self.knob_bar.setContentsMargins(6, 0, 6, 0)
         # chaque bouton avec, juste au-dessus, sa plaque d'aluminium gravée
-        for knob, name in ((self.preamp_knob, "PRÉAMPLI BF"), (self.af_knob, "VOLUME PC"),
-                           (self.level_knob, "NIVEAU TX"), (self.alc_knob, "ALC"),
-                           (self.volume_knob, "VOLUME"), (self.clean_knob, "FILTRE RX"),
-                           (self.af_radio_knob, "AF RADIO"), (self.view_toggle, "AFFICHAGE"), (self.mute_toggle, "MUET"),
-                           (self.precision_toggle, "PRÉCISION"),
-                           (self.output_toggle, "ÉCOUTE"),
-                           (self.loupe_toggle, "LOUPE"),
-                           (self.message_toggle, "MESSAGE"),
-                           (self.ft8_toggle, "FT8"),
-                           (self.rtty_toggle, "DÉCODEUR RTTY"),
-                           (self.demo_toggle, "DÉMO")):
-            col = QtWidgets.QVBoxLayout()
-            col.setSpacing(1)
-            col.addWidget(NamePlate(name, 88), 0, QtCore.Qt.AlignHCenter)
-            col.addWidget(knob, 0, QtCore.Qt.AlignHCenter)
-            self.knob_bar.addLayout(col)
+        # famille RÉGLAGES AUDIO : dans un cadre d'argent, à gauche
+        self.audio_bar = QtWidgets.QHBoxLayout()
+        self.audio_bar.setSpacing(6)
+        audio = ((self.preamp_knob, "PRÉAMPLI BF"), (self.af_knob, "VOLUME PC"),
+                 (self.volume_knob, "VOLUME"), (self.af_radio_knob, "AF RADIO"),
+                 (self.clean_knob, "FILTRE RX"),
+                 (self.mic_knob, "GAIN MICRO"), (self.level_knob, "NIVEAU TX"),
+                 (self.alc_knob, "ALC"), (self.comp_round, "NIVEAU COMP"),
+                 (self.mute_toggle, "MUET"), (self.output_toggle, "ÉCOUTE"))
+        others = ((self.view_toggle, "AFFICHAGE"),
+                  (self.precision_toggle, "PRÉCISION"),
+                  (self.loupe_toggle, "LOUPE"),
+                  (self.message_toggle, "MESSAGE"),
+                  (self.ft8_toggle, "FT8"),
+                  (self.rtty_toggle, "DÉCODEUR RTTY"),
+                  (self.demo_toggle, "DÉMO"))
+        for bar, items in ((self.audio_bar, audio), (self.knob_bar, others)):
+            for knob, name in items:
+                col = QtWidgets.QVBoxLayout()
+                col.setSpacing(1)
+                col.addWidget(NamePlate(name, 88), 0, QtCore.Qt.AlignHCenter)
+                col.addWidget(knob, 0, QtCore.Qt.AlignHCenter)
+                bar.addLayout(col)
+            if bar is self.audio_bar:
+                self.audio_frame = SilverFrame(self.audio_bar, "RÉGLAGES AUDIO")
+                self.knob_bar.addWidget(self.audio_frame)
+                self.knob_bar.addSpacing(6)
         self.knob_bar.addStretch()              # futurs boutons : knob_bar.insertWidget(4, …)
         s_col.addStretch()
         meters.addLayout(s_col)
@@ -2851,6 +2885,24 @@ class MainWindow(QtWidgets.QMainWindow):
         vox_row.addWidget(self.vox_knob)
         vox_row.addWidget(self.vox_label)
         extras.addWidget(vox_box, 0, 7)
+        # ÉGALISEUR : timbre de la voix d'émission (egaliseur.py, egaliseur-voix.ini)
+        self.eq_engine = EqEngine()
+        self.eq_window = None
+        self.eq_button = QtWidgets.QPushButton("ÉGALISEUR")
+        self.eq_button.setMinimumWidth(58)
+        self.eq_button.setStyleSheet(PUSH_3D)
+        self.eq_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.eq_button.setToolTip("Égaliseur de la voix du micro avant la radio. Réglages "
+                                  "aussi dans egaliseur-voix.ini (relu tout seul).")
+        self.eq_button.clicked.connect(self.on_eq_button)
+        eq_col = QtWidgets.QVBoxLayout()           # dans le cadre RÉGLAGES AUDIO
+        eq_col.setSpacing(1)
+        eq_col.addWidget(NamePlate("ÉGALISEUR", 88), 0, QtCore.Qt.AlignHCenter)
+        self.eq_button.setText("RÉGLER")
+        self.eq_button.setMinimumHeight(44)
+        eq_col.addWidget(self.eq_button, 0, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+        eq_col.addStretch()
+        self.audio_bar.addLayout(eq_col)
         # compresseur de modulation de la radio (BLU) : marche/arrêt + niveau 0–10
         self.comp_button = QtWidgets.QPushButton("COMP OFF")
         self.comp_button.setCheckable(True)
@@ -3051,6 +3103,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.decoder_info = QtWidgets.QLabel("")
         self.decoder_info.setStyleSheet("font: 11pt monospace;")
         decoder_clear = QtWidgets.QPushButton("Effacer")
+        self.decoder_clear = decoder_clear
+        self.decoder_row = decoder_row
         decoder_row.addWidget(QtWidgets.QLabel("Décodeur"))
         decoder_row.addWidget(self.decoder_combo)
         decoder_row.addWidget(self.decoder_auto)
@@ -3156,6 +3210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.power_label.hide()
         tx_row.addSpacing(10)
         tx_row.addWidget(self.tx_source)
+        self.tx_source.hide()           # remplacé par le bouton GAIN MICRO (micro par défaut)
         tx_row.addWidget(self.tx_file_button)
         # curseurs Niveau et Réglage ALC remplacés par les boutons NIVEAU et ALC
         # sous le S-mètre (les curseurs restent cachés : lien avec le son et la radio)
@@ -3182,6 +3237,13 @@ class MainWindow(QtWidgets.QMainWindow):
         tx_row.addWidget(self.cw_entry, stretch=1)
         tx_row.addStretch()
         tx_row.addWidget(self.ptt_button)
+        self.ptt_button.hide()          # caché : l'émission passe par EMISSION / bouton rouge
+        self.cw_entry.hide()            # champ CW vert retiré (l'écran CW a le sien)
+        # ligne vidée : Niveau COMP et mesure d'émission remontent sur la ligne Décodeur
+        at = self.decoder_row.indexOf(self.decoder_clear)
+        comp_box.hide()                 # remplacé par le bouton rond NIVEAU COMP
+        self.decoder_row.insertWidget(at, self.tx_meter_label)
+        self.decoder_row.insertSpacing(at + 2, 16)
         below.addLayout(tx_row)
 
         # Fenêtre de décodage CW : prend toute la place sous le waterfall
@@ -3224,6 +3286,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tx_mic_unload()               # restes d'une session plantée
         source = self.tx_source.currentData()
         if source and source != "file":
+            self.eq_engine.start(source)    # voix égalisée prête avant la liaison
             self._tx_mic_mute(source, True)  # liaison prête dès le départ, micro coupé
         self.tx_player = None               # paplay du fichier
         self.tx_timer = QtCore.QTimer(self)
@@ -5120,6 +5183,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_file_button.setVisible(is_file)
         if is_file and self.tx_file:
             self.tx_file_button.setText(os.path.basename(self.tx_file))
+        if not is_file and hasattr(self, "eq_engine"):
+            self.eq_engine.start(self.tx_source.currentData())
         # liaison micro → radio préparée pour le nouveau micro (coupée hors émission)
         if (hasattr(self, "tx_loopback_input") and not is_file
                 and not getattr(self, "tx_active", False)):
@@ -5241,7 +5306,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                    or self.tx_loopback_source != source):
             self._tx_mic_unload()
             out = subprocess.run(
-                ["pactl", "load-module", "module-loopback", f"source={source}",
+                ["pactl", "load-module", "module-loopback",
+                 f"source={self.eq_engine.monitor_for(source)}",
                  f"sink={self.radio_sink}", "latency_msec=40",
                  "source_dont_move=true", "sink_dont_move=true",
                  # rôle à part : sinon le système son mémorise la coupure du micro
@@ -5780,6 +5846,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.af_display.setText(f"{percent}")
         self.af_display.update()
 
+    def on_eq_button(self):
+        if self.eq_window is None:
+            self.eq_window = EqWindow(self.eq_engine, self)
+            self.eq_window.opened.connect(self._eq_opened)
+            self.eq_window.closed.connect(self._eq_closed)
+        self.eq_window.show()
+        self.eq_window.raise_()
+        self.eq_window.activateWindow()
+
+    def _eq_opened(self):
+        """Réglage de l'égaliseur : le trafic de la radio est coupé sur le PC."""
+        if getattr(self, "eq_mute_before", None) is None:
+            self.eq_mute_before = self.mute_check.isChecked()
+        self.mute_check.setChecked(True)
+        self.statusBar().showMessage("Égaliseur : réception coupée pendant les réglages", 4000)
+
+    def _eq_closed(self):
+        """Égaliseur fermé : la réception revient tout de suite (comme avant)."""
+        before = getattr(self, "eq_mute_before", None)
+        self.eq_mute_before = None
+        if before is not None:
+            self.mute_check.setChecked(before)
+
+    def on_mic_knob(self, value):
+        source = getattr(self, "tx_source", None)
+        source = source.currentData() if source is not None else None
+        if not source or source == "file":
+            source = "@DEFAULT_SOURCE@"
+        subprocess.Popen(["pactl", "set-source-volume", source, f"{round(value * 15)}%"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=PACTL_ENV)
+
     def on_af_knob(self, value):
         self.pc_volume.setValue(round(value * 15))          # même chemin que le curseur
 
@@ -6151,6 +6248,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return                      # on vient de le tourner : la radio n'a pas fini
         self.comp_knob.setValue(level)
         self.comp_label.setText(f"{level * 10 / 255:.1f}".replace(".", ","))
+        self.comp_round.blockSignals(True)      # valeur lue dans la radio : pas de renvoi
+        self.comp_round.setValue(level * 10 / 255)
+        self.comp_round.blockSignals(False)
 
     def on_cw_pitch(self, hz):
         self.radio_cw_pitch = float(hz)
@@ -6232,6 +6332,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demo_finger.stop()             # la flèche de la souris revient
         self.demo_finger.close()
         self.voice_scope.stop()
+        self.eq_engine.stop()
         self.function_screen.close()
         self._tx_mic_unload()
         if self.tx_active:              # fermé en émission : l'écoute ne doit pas rester muette
