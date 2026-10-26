@@ -66,6 +66,7 @@ from vintage_meter import VintageSMeter, VintagePowerMeter
 from whistle import Whistle
 from qso_hunter import QsoHunter, find_signals
 from panel_frame import PanelFrame
+from cw_station import CwStation
 import rm_noise
 import rnnoise_radio
 from cw_hunter import CwHunter
@@ -879,6 +880,10 @@ class CivReader(QtCore.QThread):
         data = text.upper().encode("ascii", "ignore")[:30]
         if data:
             self._commands.put((0x17, *data))
+
+    def set_break_in(self, on):
+        """BK-IN de la radio : semi break-in (True) ou coupé (False)."""
+        self._commands.put((0x16, 0x47, 0x01 if on else 0x00))
 
     def set_key_speed(self, wpm):
         """Vitesse du manipulateur de la radio (6 à 48 mots/min)."""
@@ -2140,6 +2145,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_timer.setSingleShot(True)
         self.message_timer.timeout.connect(self._message_next)
         self.message_chunks = []
+        # écran CW plein écran (bouton de mode CW) : EMISSION en haut, RECEPTION en bas
+        self.cw_station = None
+        self.cw_hidden = []             # fenêtres réduites pour laisser l'écran CW devant
         # FT8 : WSJT-X en plein écran, piloté à travers le Scope (ft8_bridge.py)
         self.ft8_source = args.source
         self.ft8_proc = None
@@ -4578,6 +4586,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_mode_buttons(self):
         current = self.mode_combo.currentText()
+        if (self.cw_station is not None and self.cw_station.isVisible()
+                and current not in ("CW", "CW-R")):
+            self._cw_station_close()
         self._auto_decoder()
         for name, button in self.mode_buttons.items():
             button.setChecked(name == current)
@@ -4587,6 +4598,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sync_mode_buttons()
             return
         current = self.mode_combo.currentText()
+        if (name == "CW" and current == "CW"
+                and (self.cw_station is None or not self.cw_station.isVisible())):
+            self._cw_station_open()             # écran fermé par RETOUR : on le rouvre
+            return
         if name == current:
             # second appui sur le mode en cours : retour au mode d'avant
             back = getattr(self, "previous_mode", None)
@@ -4596,6 +4611,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.previous_mode = current
         self.mode_combo.setCurrentText(name)
         self.on_mode_selected(name)
+        if name == "CW":
+            self._cw_station_open()
 
     def tune_to(self, hz, calage=False):
         """Seule porte d'entrée pour changer la fréquence depuis le Scope.
@@ -5354,6 +5371,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clocks.set_voice(level)
 
     def on_transmitting(self, tx):
+        if self.cw_station is not None:
+            self.cw_station.set_tx(tx)      # cadre EMISSION plus vif pendant l'émission
         self.voice_scope.set_tx(tx)        # vobulation seulement en émission
         if not tx and not self.tx_active:
             self.power_meter.setValue(0)        # plus d'émission : aiguille à 0
@@ -5655,6 +5674,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message_chunks = []
         if self.civ:
             self.civ.stop_cw()
+        if self.cw_station is not None:
+            self.cw_station.stop_play()
         self.statusBar().showMessage("Émission CW arrêtée", 4000)
 
     def _message_toggled(self, on):
@@ -5683,6 +5704,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         chunk = self.message_chunks.pop(0)
         self.civ.send_cw(chunk + (" " if self.message_chunks else ""))
+        if self.cw_station is not None and self.cw_station.isVisible():
+            self.cw_station.play(chunk + " ", self.paddle_wpm.value())
         self.message_timer.start(int(self._morse_seconds(chunk + " ") * 1000) + 300)
 
     def _output_toggled(self, casque):
@@ -5941,7 +5964,59 @@ class MainWindow(QtWidgets.QMainWindow):
         color = "#3ddc84" if active else ("#2e5d41" if signal else "#37474f")
         self.decoder_led.setStyleSheet(f"font: 16pt; color: {color};")
 
+    # --- écran CW plein écran -----------------------------------------
+    def _cw_station_open(self):
+        if self.cw_station is None:
+            self.cw_station = CwStation(self.paddle_wpm.value())
+            self.cw_station.send.connect(self._cw_station_send)
+            self.cw_station.stop_tx.connect(self._cw_entry_stop)
+            self.cw_station.leave.connect(lambda: self.on_mode_button("CW"))
+            self.cw_station.wpm_changed.connect(self.paddle_wpm.setValue)
+            self.cw_station.back.connect(self._cw_station_restore)
+        self.civ.set_break_in(True)         # BK-IN d'office : le texte tapé part à l'antenne
+        self.cw_station.rx_text.clear()
+        self.cw_station.set_info(f"{format_frequency(self.freq_hz or 0)} MHz — BK-IN allumé")
+        self.cw_station.open(self.windowHandle().screen() if self.windowHandle() else None)
+        self.statusBar().showMessage("Écran CW : BK-IN allumé", 4000)
+        # comme l'écran RTTY : les autres fenêtres (dont le Scope) sont réduites
+        QtCore.QTimer.singleShot(400, self._cw_station_front)
+
+    def _cw_station_front(self):
+        if self.cw_station is None or not self.cw_station.isVisible():
+            return
+        if not self.cw_hidden:
+            self.cw_hidden = self._hide_windows({int(self.cw_station.winId())})
+        self.cw_station.raise_()
+        self.cw_station.activateWindow()
+        self.cw_station.entry.setFocus()
+
+    def _cw_station_restore(self):
+        """Écran CW fermé : les fenêtres réduites reviennent."""
+        self._restore_windows(self.cw_hidden)
+        self.cw_hidden = []
+
+    def _cw_station_close(self):
+        self._cw_entry_stop()
+        if self.civ:
+            self.civ.set_break_in(False)    # BK-IN coupé en quittant la CW
+        self.cw_station.hide()
+        self._cw_station_restore()
+        self.statusBar().showMessage("Écran CW fermé : BK-IN coupé", 4000)
+
+    def _cw_station_send(self, text):
+        if not self.civ or self.mode_combo.currentText() not in ("CW", "CW-R"):
+            self.cw_station.set_info("La radio n'est pas en CW : rien d'émis")
+            return
+        self.cw_station.sent(text)
+        busy = bool(self.message_chunks) or self.message_timer.isActive()
+        self.message_chunks += self._cw_split(text)     # à la suite de ce qui part déjà
+        if not busy:
+            self.civ.set_key_speed(self.paddle_wpm.value())
+            self._message_next()
+
     def on_decoded(self, text):
+        if self.cw_station is not None and self.cw_station.isVisible():
+            self.cw_station.feed_rx(text)
         if self.rtty_toggle.down:
             self.rtty_screen.feed_text(text)
         if self.cw_view_active:
@@ -6146,6 +6221,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._remember_band()
+        if self.cw_station is not None and self.cw_station.isVisible():
+            self._cw_station_close()
         if self.ft8_toggle.down:
             self.ft8_toggle.setDown(False)
         if self.rtty_toggle.down:
