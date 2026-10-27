@@ -85,6 +85,21 @@ def apply(src, dst):
     peak = np.max(np.abs(z)) if len(z) else 0
     if peak > 0:
         z = z * (10 ** (-1 / 20) / peak)
+        # blancs du début et de la fin coupés sur la voix elle-même (un petit bruit
+        # avant la parole ne doit pas retarder le départ du message)
+        n = int(0.02 * rate_o)
+        m = len(z) // n
+        if m:
+            db = 10 * np.log10((z[:m * n].reshape(m, n) ** 2).mean(1) + 1e-12)
+            loud = np.where(db > db.max() - 35)[0]
+            # début : premier passage de voix d'au moins 0,1 s
+            starts = [i for i in loud if np.all(db[i:i + 5] > db.max() - 35)]
+            a = max((starts[0] if starts else loud[0]) * n - int(0.15 * rate_o), 0)
+            z_end = min((loud[-1] + 1) * n + int(0.25 * rate_o), len(z))
+            z = z[a:z_end].copy()
+            f1, f2 = int(0.02 * rate_o), int(0.06 * rate_o)
+            z[:f1] *= np.linspace(0, 1, f1)
+            z[-f2:] *= np.linspace(1, 0, f2)
     with wave.open(dst, "wb") as o:
         o.setnchannels(1)
         o.setsampwidth(2)
