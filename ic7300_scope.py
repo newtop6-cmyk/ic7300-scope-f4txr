@@ -68,7 +68,7 @@ from drum_display import DrumClock, DrumDisplay
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
-from vintage_meter import SwrMicroGalva, VintageSMeter, VintagePowerMeter
+from vintage_meter import SwrMicroGalva, SwrTitle, VintageSMeter, VintagePowerMeter
 from whistle import Whistle
 from qso_hunter import QsoHunter, find_signals
 from panel_frame import PanelFrame
@@ -287,9 +287,9 @@ PUSH_YELLOW_3D = (
     " stop:0.4 #e0b000, stop:1 #ffe04a); }")
 
 
-SWR_GALVA_PX = 46              # hauteur du micro-galva ROS (au-dessus du POWER)
-KNOB_POWER_PX = 128            # bouton de puissance (154 avant le micro-galva ROS)
-FUNC_SCALE = 0.84              # sélecteur FONCTION (1.0 avant le micro-galva ROS)
+SWR_GALVA_PX = 44              # hauteur du micro-galva ROS (au-dessus du POWER)
+KNOB_POWER_PX = 120            # bouton de puissance (154 avant le micro-galva ROS)
+FUNC_SCALE = 0.77              # sélecteur FONCTION (1.0 avant le micro-galva ROS)
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
 FINE_MAX = 300                  # Hz : l'affinage par la voix reste à ± 300 Hz du kHz rond
 PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO BLU
@@ -2556,6 +2556,8 @@ class MainWindow(QtWidgets.QMainWindow):
         power_col = QtWidgets.QVBoxLayout()
         power_col.setSpacing(1)
         self.swr_galva.setFixedWidth(self.power_meter.width())   # même largeur que POWER
+        self.swr_title = SwrTitle(self.power_meter.width())       # « R . O . S » au-dessus
+        power_col.addWidget(self.swr_title)
         power_col.addWidget(self.swr_galva)
         power_col.addWidget(self.power_meter)
         # sous le galva POWER : bouton argent de réglage de la puissance (W)
@@ -6410,6 +6412,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _swr_led_paint(self, on):
         if hasattr(self, "swr_galva"):
             self.swr_galva.set_led(on)          # LED du micro-galva ROS
+        if hasattr(self, "swr_title"):
+            self.swr_title.set_alert(on)        # « R . O . S » clignote avec la LED
         top, edge = ("#ffb0a0", "#ff1a0a") if on else ("#4a1a14", "#1e0604")
         self.swr_led.setStyleSheet(
             "border-radius: 6px; border: 1px solid #111;"

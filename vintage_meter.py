@@ -342,7 +342,7 @@ class SwrMicroGalva(QtWidgets.QWidget):
 
     # (valeur brute de la radio, ROS) — même graduation que la barre de l'IC-7300
     POINTS = [(0, 1.0), (48, 1.5), (80, 2.0), (120, 3.0), (255, 6.0)]
-    SPAN_DEG = 15                   # demi-ouverture de l'arc (plat : tient dans 46 px)
+    SPAN_DEG = 12                   # demi-ouverture de l'arc (plat : tient dans 46 px)
 
     def __init__(self, width=300, height=62):
         super().__init__()
@@ -387,7 +387,7 @@ class SwrMicroGalva(QtWidgets.QWidget):
     def _geom(self):
         w = self.width()
         r = (w - 116) / 2 / math.sin(math.radians(self.SPAN_DEG))   # place : loupe | LED
-        cx, cy = w / 2, 21 + r                  # pivot sous le cadran : arc très plat
+        cx, cy = w / 2, 22 + r                  # pivot sous le cadran : arc très plat
         return cx, cy, r
 
     def _pt(self, raw, radius):
@@ -447,15 +447,12 @@ class SwrMicroGalva(QtWidgets.QWidget):
         for raw, label in ((0, "1"), (48, "1.5"), (80, "2"), (120, "3"), (255, "∞")):
             p.setPen(QtGui.QPen(QtGui.QColor("#1a1208"), 1.4))
             p.drawLine(self._pt(raw, r + 1), self._pt(raw, r - 9))
-            t = self._pt(raw, r + 9)
-            p.drawText(QtCore.QRectF(t.x() - 14, t.y() - 7, 28, 12), QtCore.Qt.AlignCenter, label)
+            t = self._pt(raw, r + 8)
+            p.drawText(QtCore.QRectF(t.x() - 14, t.y() - 6, 28, 11), QtCore.Qt.AlignCenter, label)
         for raw in (24, 64, 100, 180):
             p.setPen(QtGui.QPen(QtGui.QColor("#3a2c18"), 0.9))
             p.drawLine(self._pt(raw, r), self._pt(raw, r - 5))
-        # nom du cadran
-        p.setPen(QtGui.QColor("#2a1c0c"))
-        p.setFont(QtGui.QFont("DejaVu Serif", 8, QtGui.QFont.Bold))
-        p.drawText(QtCore.QRectF(w / 2 - 25, h - 21, 50, 13), QtCore.Qt.AlignCenter, "ROS")
+        # (nom « R . O . S » au-dessus du galva : SwrTitle)
         # aiguille
         tip, base = self._pt(self.value, r + 4), self._pt(self.value, r - 40)
         p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 70), 2.4))
@@ -560,4 +557,39 @@ class SwrMicroGalva(QtWidgets.QWidget):
         edge.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
         p.setPen(QtGui.QPen(QtGui.QBrush(edge), 1.2))
         p.drawRoundedRect(face.adjusted(0.6, 0.6, -0.6, -0.6), 6, 6)
+        p.end()
+
+
+class SwrTitle(QtWidgets.QWidget):
+    """« R . O . S » en lettres grasses espacées au-dessus du micro-galva ROS ;
+    clignote en rouge (avec halo) quand le ROS dépasse 2."""
+
+    def __init__(self, width=300, height=12):
+        super().__init__()
+        self.setFixedSize(width, height)
+        self.red = False
+
+    def set_alert(self, on):
+        if on != self.red:
+            self.red = on
+            self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        f = QtGui.QFont("DejaVu Sans", 8, QtGui.QFont.Black)
+        f.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, 2.5)
+        p.setFont(f)
+        r = QtCore.QRectF(0, -1, self.width(), self.height() + 2)
+        text = "R . O . S"
+        if self.red:
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):     # halo rouge
+                p.setPen(QtGui.QColor(255, 60, 30, 110))
+                p.drawText(r.translated(dx, dy), QtCore.Qt.AlignCenter, text)
+            p.setPen(QtGui.QColor("#e01208"))
+        else:
+            p.setPen(QtGui.QColor(255, 255, 255, 160))                # gravure
+            p.drawText(r.translated(0, 0.8), QtCore.Qt.AlignCenter, text)
+            p.setPen(QtGui.QColor("#2a1c0c"))
+        p.drawText(r, QtCore.Qt.AlignCenter, text)
         p.end()
