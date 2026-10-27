@@ -303,6 +303,7 @@ PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO B
 # choisie que peu après le choix, et jamais loin ; ensuite elle ne bouge plus.
 CALAGE_WINDOW_S = 60            # s après le choix de la fréquence
 CALAGE_MAX_HZ = 3000            # Hz d'écart maximal avec la fréquence choisie
+CALAGE_FINE_HZ = 350            # au-delà de la fenêtre : affinage permis à ± 350 Hz du choix
 ECHO_TIMEOUT_S = 3.0            # s : attente de la confirmation de la radio
 PULL_SECONDS = 45               # durée du rattrapage
 
@@ -4833,6 +4834,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.audio.ssb is None or self.tx_active or self.freq_hz is None:
             return
         target = round(self.freq_hz / 1000) * 1000
+        if self.ssb_target is not None and self.freq_hz == self.ssb_target \
+                and abs(self.freq_hz - target) <= FINE_MAX:
+            self.ssb_anchor = target        # fréquence posée par le calage voix :
+            return                          # l'arrondi ne la défait pas
         self.ssb_anchor = target
         if target == self.freq_hz:
             self.ssb_recentred = True
@@ -4964,8 +4969,7 @@ class MainWindow(QtWidgets.QMainWindow):
         now = time.monotonic()
         chosen = getattr(self, "_chosen", None)
         if calage:
-            if chosen is None or now - chosen[1] > CALAGE_WINDOW_S \
-                    or abs(hz - chosen[0]) > CALAGE_MAX_HZ:
+            if not self._calage_ok(hz):
                 self._spy(f"REFUS calage {self.freq_hz} -> {hz} (fréquence verrouillée)",
                           stack=True)
                 return False
@@ -5968,7 +5972,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _calage_ok(self, hz):
         """Un calage automatique peut-il encore aller sur hz ? (voir tune_to)"""
         chosen = getattr(self, "_chosen", None)
-        return (chosen is not None and time.monotonic() - chosen[1] <= CALAGE_WINDOW_S
+        if chosen is None:
+            return False
+        if abs(hz - chosen[0]) <= CALAGE_FINE_HZ:
+            return True             # affinage par la voix : toujours permis, sans dériver
+        return (time.monotonic() - chosen[1] <= CALAGE_WINDOW_S
                 and abs(hz - chosen[0]) <= CALAGE_MAX_HZ)
 
     def _manual_tuning(self):
