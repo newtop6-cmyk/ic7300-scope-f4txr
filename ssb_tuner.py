@@ -46,6 +46,11 @@ ROUND_WIN = 25                  # Hz : tolérance de ce pic autour du kHz rond
 KHZ_FRAMES = 5                  # rattrapage : tranches voisées avant de choisir le kHz rond
 KHZ_WIN = 60                    # Hz : tolérance autour de chaque kHz rond essayé
 KHZ_MARGIN = 0.8                # 2e kHz rond < 80 % du 1er, sinon on attend
+# mode rapide (après un réglage dans WATERFALL FR) : signal faible accepté, décision vite
+FAST_CLEAR = 3.0                # voix nette : bruit + 3 écarts (au lieu de 4,5)
+FAST_QUICK = 5                  # correction dès 5 tranches voisées (au lieu de 8)
+FAST_MIN = 10                   # « longue écoute » dès 10 tranches (au lieu de 15)
+FAST_HOLD_S = 0.5               # attente après un changement de fréquence
 
 
 class Track:
@@ -55,6 +60,7 @@ class Track:
         self.acc = np.zeros(n)
         self.frames = 0.0
         self.history = []               # scores récents (bruit et voix)
+        self.clear = CLEAR              # seuil « voix nette » (FAST_CLEAR en mode rapide)
 
     def add(self, scores):
         """Ajoute une tranche ; True si elle contenait une voix nette."""
@@ -69,7 +75,7 @@ class Track:
         base = np.percentile(hist, NOISE_PCT)
         low = hist[hist <= np.percentile(hist, 60)]
         spread = max(float(low.std()), 0.02)
-        weight = (score - base) / spread - CLEAR
+        weight = (score - base) / spread - self.clear
         if score < VOICED or weight <= 0:                  # pas de voix nette
             # oubli doux (moitié en ~15 s) : du bruit isolé ne suffit jamais
             self.frames *= 0.995
@@ -127,6 +133,7 @@ class SsbTuner:
         # c'est la voix à l'octave du dessous (ou un faux peigne)
         mid = np.round(pos + F0S[:, None, None] / 2)
         self.mid = np.clip(mid, 0, self.top).astype(np.int32)
+        self.fast = False               # mode rapide (signal faible, décision vite)
         self.reset()
 
     def request_reset(self):
@@ -147,7 +154,7 @@ class SsbTuner:
         for new, prev in zip((self.normal, self.flipped), old):
             if prev is not None:
                 new.history = prev.history[-HISTORY:]
-        self.hold = int(self.rate * HOLD_S)
+        self.hold = int(self.rate * (FAST_HOLD_S if self.fast else HOLD_S))
         self.status = "attente de voix"
         self.clock = 0.0                # secondes de son analysées depuis le reset
         self.recent = []                # (instant, d) des dernières analyses voisées
@@ -181,6 +188,9 @@ class SsbTuner:
             return None                                    # silence numérique
         log = np.log(spec + 1e-12)
         peaks = np.maximum(log - np.convolve(log, self.kernel, mode="same"), 0)
+        self.normal.clear = self.flipped.clear = FAST_CLEAR if self.fast else CLEAR
+        quick = FAST_QUICK if self.fast else QUICK_FRAMES
+        need = FAST_MIN if self.fast else MIN_FRAMES
         voiced = self.normal.add(self._comb(peaks[:self.top + 1]))
         # toujours écoutée à l'envers aussi : sert de garde-fou, même si on ne
         # change pas de bande latérale tout seul (self.mirror)
@@ -205,10 +215,10 @@ class SsbTuner:
         choice = self._pick_khz()
         if choice is not None:
             return ("shift", choice)
-        if frames < QUICK_FRAMES:
-            self.status = f"écoute de la voix… {int(frames)}/{QUICK_FRAMES}"
+        if frames < quick:
+            self.status = f"écoute de la voix… {int(frames)}/{quick}"
             return None
-        margin = MARGIN if frames >= MIN_FRAMES else QUICK_MARGIN
+        margin = MARGIN if frames >= need else QUICK_MARGIN
         d, clear, ratio = self.normal.peak(self.ds, margin, self.d_limit)
         if clear and self.flipped.frames >= 3:
             # l'écoute à l'envers doit être nettement moins nette

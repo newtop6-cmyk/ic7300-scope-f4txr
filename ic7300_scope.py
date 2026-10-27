@@ -4597,6 +4597,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._pulling():
             self.audio.ssb_tuner.d_limit = D_MAX
             self.audio.ssb_tuner.candidates = None
+            self.audio.ssb_tuner.fast = False   # fin du rattrapage : réglages habituels
 
     def _set_khz_candidates(self, hz):
         """Rattrapage : kHz ronds à ± D_WIDE de hz, en écarts d pour le calage voix."""
@@ -5031,6 +5032,11 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
     def _fr_tick(self):
         self.fr_screen.set_frequency(self.freq_hz, self.mode_combo.currentText())
+        if base_mode(self.mode_combo.currentText()) in ("LSB", "USB") and self.ssb_auto.isChecked():
+            tuner = self.audio.ssb_tuner
+            self.fr_screen.set_calage(("⚡ " if tuner.fast else "") + tuner.status, tuner.locked)
+        else:
+            self.fr_screen.set_calage("", False)
         if self.fr_full and self.freq_hz and band_of(self.freq_hz) != self.fr_full_band:
             self._fr_full_band()                # autre bande : l'affichage suit
 
@@ -5185,6 +5191,10 @@ class MainWindow(QtWidgets.QMainWindow):
             def pull():
                 self._start_pull(True)
                 self.ssb_anchor = self.freq_hz  # référence : la fréquence choisie
+                tuner = self.audio.ssb_tuner
+                tuner.fast = True               # signal faible accepté, décision rapide
+                tuner.candidates = None         # pas de kHz rond imposé (station à x,48…)
+                tuner.request_reset()
             QtCore.QTimer.singleShot(300, pull)
 
     def _ft8_keep_map_below(self):

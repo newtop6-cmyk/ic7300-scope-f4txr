@@ -309,7 +309,13 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.freq_label = QtWidgets.QLabel("—")
         self.freq_label.setStyleSheet("font: bold 26pt monospace; color: #ffd54a;")
         top.addWidget(self.freq_label)
-        top.addSpacing(20)
+        top.addSpacing(12)
+        # état du calage sur la voix (BLU) : vert quand c'est calé
+        self.calage_label = QtWidgets.QLabel("")
+        self.calage_label.setFixedWidth(330)
+        self.calage_label.setStyleSheet("font: bold 12pt sans-serif; color: #ffb74d;")
+        top.addWidget(self.calage_label)
+        top.addSpacing(12)
         self.count_label = QtWidgets.QLabel("")
         self.count_label.setStyleSheet("font: bold 15pt sans-serif; color: #9fd0ff;")
         top.addWidget(self.count_label)
@@ -695,6 +701,14 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.mode = mode
         if hz:
             self.freq_label.setText(f"{fmt_khz(hz / 1000)} kHz  {mode}")
+
+    def set_calage(self, text, locked):
+        """État du calage sur la voix, affiché en haut (vert = voix calée)."""
+        text = f"Voix : {text}" if text else ""
+        if text != self.calage_label.text():
+            self.calage_label.setText(text)
+            self.calage_label.setStyleSheet(
+                "font: bold 12pt sans-serif; color: %s;" % ("#3ddc84" if locked else "#ffb74d"))
 
     def set_span(self, hz):
         b = self.span_buttons.button(hz)
