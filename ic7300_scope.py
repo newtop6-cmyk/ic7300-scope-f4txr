@@ -2313,7 +2313,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vox_msg_blink = False
         self.vox_msg_blink_timer = QtCore.QTimer(self)
         self.vox_msg_blink_timer.timeout.connect(self._vox_msg_show)
-        self.vox_msg_blink_timer.start(400)
+        self.vox_msg_blink_timer.start(60)     # rythmes calculés sur l'heure
         # REC BF : son seul (réception + émission + micro) ; VDO+BF : écran + son
         self.rec_bf = ScreenRecorder(audio_only=True)
         self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
@@ -5165,12 +5165,15 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- VOX1, VOX2… : messages vocaux déclenchés par la parole ------------
     def _vox_msg_show(self):
         """Poussoirs : orange clignotant = en attente de « VOX n », rouge = émission."""
-        self.vox_msg_blink = not self.vox_msg_blink
+        now = time.monotonic()
+        self.vox_msg_blink = int(now / 0.4) % 2 == 0      # attente : clignote lentement
+        fast = int(now / 0.12) % 2 == 0                    # message en cours : très vite
         for n, button in self.vox_msg_buttons.items():
             # « :checked » aussi : sinon le fond du bouton enfoncé masquerait la couleur
             over = "QPushButton, QPushButton:checked, QPushButton:hover { %s }"
             if self.vox_msg_sending == n:
-                style = over % "background: #c62828; color: white;"
+                style = over % ("background: %s; color: white;"
+                                % ("#ff2a2a" if fast else "#5a0000"))
                 text = "ÉMET"
             elif n in self.vox_msg_armed:
                 style = over % ("background: %s; color: #151515; font-size: 8pt;"
