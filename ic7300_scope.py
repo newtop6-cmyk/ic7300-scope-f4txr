@@ -2309,6 +2309,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vox_msg_armed = set()          # messages en attente de « VOX n »
         self.vox_msg_dry = False            # ESSAI : tout comme en vrai, sans émettre
         self.vox_msg_dry_auto = set()       # voix pas apprise : essai à blanc d'office
+        self.vox_match_detail = ""          # dernier résultat de reconnaissance
+        self.vox_seg_time = 0.0
         self.vox_dry_player = None
         self.vox_dry_timer = QtCore.QTimer(self)
         self.vox_dry_timer.timeout.connect(self._vox_dry_check)
@@ -5228,6 +5230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not on:
             self.vox_msg_armed.discard(n)
             self.vox_msg_dry_auto.discard(n)
+            self._vox_log(f"VOX{n} : attente annulée (nouvel appui)")
             self.statusBar().showMessage(f"VOX{n} : attente annulée", 4000)
         else:
             problem = None
@@ -5240,9 +5243,13 @@ class MainWindow(QtWidgets.QMainWindow):
             elif not self._vox_mic():
                 problem = f"VOX{n} : pas de micro pour entendre « VOX {n} »"
             if problem:
+                self._vox_log(problem)
                 self.statusBar().showMessage(problem, 6000)
             else:
                 self.vox_msg_armed.add(n)
+                self._vox_log(f"VOX{n} appuyé : en attente"
+                              + (" (ESSAI)" if self.vox_msg_dry or n in self.vox_msg_dry_auto
+                                 else ""))
                 if n in self.vox_msg_dry_auto:
                     self.statusBar().showMessage(
                         f"VOX{n} : ESSAI À BLANC (ta voix n'est pas encore apprise, rien ne "
@@ -5358,6 +5365,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return                              # essai à blanc : décidé par le texte
         n, dist, detail = self.voice_cmds.match(clip, self.vox_msg_armed - self.vox_msg_dry_auto)
         self.vox_match_detail = detail
+        self._vox_log(f"voix : {detail}" + (" → reconnue" if n is not None else ""))
         if n is not None:
             self.statusBar().showMessage(f"Ta voix reconnue : {detail}", 6000)
             self._vox_msg_send(n)
@@ -5475,6 +5483,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._vox_msg_show()
         QtCore.QTimer.singleShot(300, lambda: self._vox_msg_play(n))  # radio en émission d'abord
 
+    VOX_LOG = os.path.expanduser("~/.cache/ic7300-scope/vox-essais.log")
+
+    def _vox_log(self, text):
+        """Journal des VOX n (essais et émissions) : pour relire après coup."""
+        try:
+            os.makedirs(os.path.dirname(self.VOX_LOG), exist_ok=True)
+            with open(self.VOX_LOG, "a") as f:
+                f.write(time.strftime("%H:%M:%S ") + text + "\n")
+        except OSError:
+            pass
+
     def _vox_dry_send(self, n):
         """ESSAI : même déroulé, sans PTT ; message joué sur la sortie du PC."""
         if not os.path.exists(vox_msg_file(n)):
@@ -5496,6 +5515,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.vox_dry_start = time.monotonic()
         self.vox_dry_player = subprocess.Popen(["paplay", vox_msg_file(n)])
+        self._vox_log(f"ESSAI VOX{n} : message lancé sur la sortie du PC")
         self.vox_dry_timer.start(50)
 
     def _vox_dry_check(self):
@@ -5510,6 +5530,9 @@ class MainWindow(QtWidgets.QMainWindow):
         start_delay = (self.vox_dry_start or end) - self.vox_dry_heard
         self._mot_vox_need()
         self._vox_msg_show()
+        self._vox_log(f"ESSAI VOX{n} terminé : départ {start_delay + 0.3:.1f} s après « VOX {n} », "
+                      f"message {end - (self.vox_dry_start or end):.1f} s, retour réception "
+                      f"(simulé), code paplay {p.returncode}")
         self.statusBar().showMessage(
             f"ESSAI VOX{n} terminé : départ {start_delay + 0.3:.1f} s après la fin de "
             f"« VOX {n} » (dont 0,3 s de silence pour la détecter), message "
@@ -7164,10 +7187,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if n is not None and n in (self.vox_msg_armed & self.vox_msg_dry_auto) \
                 and not self.tx_active and self.vox_msg_sending is None:
             self.vox_match_detail = f"texte entendu « {text} »"
+            self._vox_log(f"entendu « {text} » → VOX {n} reconnu")
             self._vox_msg_send(n)               # essai à blanc : reconnu par le texte
             return
         if self.vox_msg_armed:
             self.vox_match_detail = f"texte entendu « {text} »"
+            self._vox_log(f"entendu « {text} » (refusé, attendu VOX "
+                          f"{'/'.join(map(str, sorted(self.vox_msg_armed)))})")
         if n is not None or self.vox_msg_armed:
             return      # VOX n : décidé par la voix (on_mot_vox_segment), pas par le texte
         if self.vox_vocal_button.isChecked() and not self.vox_button.isChecked():
