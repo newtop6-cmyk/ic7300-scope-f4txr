@@ -333,3 +333,177 @@ class VintagePowerMeter(VintageSMeter):
         p.setBrush(shine)
         p.drawRoundedRect(QtCore.QRectF(13, 13, w - 26, h * 0.32), 7, 7)
         p.end()
+
+
+class SwrMicroGalva(QtWidgets.QWidget):
+    """Micro-galva ROS : même boîtier et même largeur que le galva POWER, cadran
+    bas en arc avec zones de couleur (vert ≤ 1,5, jaune ≤ 2, rouge au-delà),
+    aiguille amortie, et petite LED rouge qui clignote si le ROS dépasse 2."""
+
+    # (valeur brute de la radio, ROS) — même graduation que la barre de l'IC-7300
+    POINTS = [(0, 1.0), (48, 1.5), (80, 2.0), (120, 3.0), (255, 6.0)]
+    SPAN_DEG = 15                   # demi-ouverture de l'arc (plat : tient dans 46 px)
+
+    def __init__(self, width=300, height=62):
+        super().__init__()
+        self.setFixedSize(width, height)
+        self.value = self.target = 0.0
+        self.led_on = False
+        self.ratio = None               # ROS mesuré, affiché « 1:x » dans la loupe
+        self.setToolTip("ROS (rapport d'ondes stationnaires) en émission ; la loupe "
+                        "donne la valeur mesurée (1:x), la LED rouge clignote si le "
+                        "ROS dépasse 2")
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(30)
+
+    def setValue(self, raw):
+        self.target = max(0.0, min(255.0, float(raw)))
+
+    def reset(self):
+        self.target = 0.0
+        self.set_ratio(None)
+
+    def set_ratio(self, swr):
+        """Valeur réelle mesurée (None = pas d'émission)."""
+        if swr is not None:
+            swr = round(swr, 1)
+        if swr != self.ratio:
+            self.ratio = swr
+            self.update()
+
+    def set_led(self, on):
+        if on != self.led_on:
+            self.led_on = on
+            self.update()
+
+    def _tick(self):
+        speed = 0.5 if self.target > self.value else 0.2
+        new = self.value + (self.target - self.value) * speed
+        if abs(new - self.value) > 0.05 or (new != self.target and abs(new - self.target) < 0.05):
+            self.value = new if abs(new - self.target) >= 0.05 else self.target
+            self.update()
+
+    def _geom(self):
+        w, h = self.width(), self.height()
+        r = (w - 116) / 2 / math.sin(math.radians(self.SPAN_DEG))   # place : loupe | LED
+        cx, cy = w / 2, 21 + r                  # pivot sous le cadran : arc très plat
+        return cx, cy, r
+
+    def _pt(self, raw, radius):
+        cx, cy, _ = self._geom()
+        a = math.radians(-self.SPAN_DEG + 2 * self.SPAN_DEG * raw / 255)
+        return QtCore.QPointF(cx + radius * math.sin(a), cy - radius * math.cos(a))
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        # boîtier : même bois sombre et même verre que le galva POWER
+        p.setPen(QtCore.Qt.NoPen)
+        rim = QtGui.QLinearGradient(0, 0, 0, h)
+        rim.setColorAt(0, QtGui.QColor("#8a7058"))
+        rim.setColorAt(0.5, QtGui.QColor("#3e3024"))
+        rim.setColorAt(1, QtGui.QColor("#120c08"))
+        p.setBrush(rim)
+        p.drawRoundedRect(QtCore.QRectF(0, 0, w, h), 10, 10)
+        case = QtGui.QLinearGradient(0, 0, 0, h)
+        case.setColorAt(0, QtGui.QColor("#54422f"))
+        case.setColorAt(1, QtGui.QColor("#21170f"))
+        p.setBrush(case)
+        p.drawRoundedRect(QtCore.QRectF(3, 3, w - 6, h - 6), 8, 8)
+        face = QtCore.QRectF(7, 7, w - 14, h - 14)
+        glow = QtGui.QRadialGradient(w / 2, h, w * 0.7)
+        glow.setColorAt(0, QtGui.QColor("#fff3cf"))
+        glow.setColorAt(0.55, QtGui.QColor("#f1d999"))
+        glow.setColorAt(1, QtGui.QColor("#c49c55"))
+        p.setBrush(glow)
+        p.drawRoundedRect(face, 6, 6)
+        p.save()
+        p.setClipRect(face)
+        cx, cy, r = self._geom()
+        # zones de couleur sur l'arc
+        for lo, hi, col in ((0, 48, "#2e8b3a"), (48, 80, "#d8a300"), (80, 255, "#c62828")):
+            path = QtGui.QPainterPath()
+            n = 24
+            outer = [self._pt(lo + (hi - lo) * i / n, r) for i in range(n + 1)]
+            inner = [self._pt(hi - (hi - lo) * i / n, r - 6) for i in range(n + 1)]
+            path.moveTo(outer[0])
+            for q in outer[1:] + inner:
+                path.lineTo(q)
+            path.closeSubpath()
+            p.fillPath(path, QtGui.QColor(col))
+        # graduations et chiffres
+        f = QtGui.QFont("DejaVu Sans Condensed", 7, QtGui.QFont.Bold)
+        p.setFont(f)
+        for raw, label in ((0, "1"), (48, "1.5"), (80, "2"), (120, "3"), (255, "∞")):
+            p.setPen(QtGui.QPen(QtGui.QColor("#1a1208"), 1.4))
+            p.drawLine(self._pt(raw, r + 1), self._pt(raw, r - 9))
+            t = self._pt(raw, r + 9)
+            p.drawText(QtCore.QRectF(t.x() - 14, t.y() - 7, 28, 12), QtCore.Qt.AlignCenter, label)
+        for raw in (24, 64, 100, 180):
+            p.setPen(QtGui.QPen(QtGui.QColor("#3a2c18"), 0.9))
+            p.drawLine(self._pt(raw, r), self._pt(raw, r - 5))
+        # nom du cadran
+        p.setPen(QtGui.QColor("#2a1c0c"))
+        p.setFont(QtGui.QFont("DejaVu Serif", 8, QtGui.QFont.Bold))
+        p.drawText(QtCore.QRectF(w / 2 - 25, h - 21, 50, 13), QtCore.Qt.AlignCenter, "ROS")
+        # aiguille
+        tip, base = self._pt(self.value, r + 4), self._pt(self.value, r - 40)
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 70), 2.4))
+        p.drawLine(base + QtCore.QPointF(1.5, 1.5), tip + QtCore.QPointF(1.5, 1.5))
+        p.setPen(QtGui.QPen(QtGui.QColor("#b01010"), 1.6))
+        p.drawLine(base, tip)
+        p.restore()
+        # loupe ronde dans un anneau métallique, à gauche : ROS mesuré « 1:x »
+        lc, lr = QtCore.QPointF(29, h / 2), 15.5
+        g = QtGui.QConicalGradient(lc, 135)             # anneau chromé
+        for stop, col in ((0, "#ffffff"), (0.2, "#8a8f95"), (0.45, "#e8eaec"),
+                          (0.7, "#5c6167"), (1, "#ffffff")):
+            g.setColorAt(stop, QtGui.QColor(col))
+        p.setPen(QtGui.QPen(QtGui.QColor("#1a1c1e"), 0.8))
+        p.setBrush(g)
+        p.drawEllipse(lc, lr, lr)
+        glass = QtGui.QRadialGradient(lc + QtCore.QPointF(-3, -4), lr)
+        glass.setColorAt(0, QtGui.QColor("#fffdf2"))
+        glass.setColorAt(0.7, QtGui.QColor("#f3e7c4"))
+        glass.setColorAt(1, QtGui.QColor("#cdb684"))
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 120), 0.8))
+        p.setBrush(glass)
+        p.drawEllipse(lc, lr - 3, lr - 3)
+        if self.ratio is None:
+            text, col = "1:–", QtGui.QColor("#6a5a40")
+        else:
+            text = "1:∞" if self.ratio >= 6 else f"1:{self.ratio:.1f}"
+            col = QtGui.QColor("#b01010" if self.ratio > 2 else "#1a1208")
+        f = QtGui.QFont("DejaVu Sans Condensed", 8, QtGui.QFont.Bold)
+        while QtGui.QFontMetricsF(f).horizontalAdvance(text) > 2 * (lr - 4) and f.pointSizeF() > 5:
+            f.setPointSizeF(f.pointSizeF() - 0.25)  # grossi par la loupe, mais tient dedans
+        p.setFont(f)
+        p.setPen(col)
+        p.drawText(QtCore.QRectF(lc.x() - lr, lc.y() - 7, 2 * lr, 14), QtCore.Qt.AlignCenter, text)
+        shine = QtGui.QRadialGradient(lc + QtCore.QPointF(-5, -6), 7)    # reflet du verre
+        shine.setColorAt(0, QtGui.QColor(255, 255, 255, 170))
+        shine.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(shine)
+        p.drawEllipse(lc + QtCore.QPointF(-5, -6), 7, 5)
+        # LED d'alarme, à droite dans le cadran
+        c = QtCore.QPointF(w - 19, 15)
+        g = QtGui.QRadialGradient(c - QtCore.QPointF(1.5, 1.5), 7)
+        if self.led_on:
+            halo = QtGui.QRadialGradient(c, 13)
+            halo.setColorAt(0, QtGui.QColor(255, 40, 20, 170))
+            halo.setColorAt(1, QtGui.QColor(255, 40, 20, 0))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(halo)
+            p.drawEllipse(c, 13, 13)
+            g.setColorAt(0, QtGui.QColor("#ffd0c0"))
+            g.setColorAt(1, QtGui.QColor("#ff1a0a"))
+        else:
+            g.setColorAt(0, QtGui.QColor("#6a2a20"))
+            g.setColorAt(1, QtGui.QColor("#1e0604"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#111"), 1))
+        p.setBrush(g)
+        p.drawEllipse(c, 5.5, 5.5)
+        p.end()

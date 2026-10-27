@@ -13,12 +13,13 @@ ANGLES = (-64, -32, 0, 32, 64)          # degrés depuis la verticale
 class FunctionSelector(QtWidgets.QWidget):
     changed = QtCore.pyqtSignal(str)
 
-    def __init__(self, positions=("OFF", "ZOOM", "", "", "")):
+    def __init__(self, positions=("OFF", "ZOOM", "", "", ""), scale=1.0):
         super().__init__()
+        self.k = scale                  # échelle : dessin et clics prévus pour 150 × 172
         self.positions = list(positions)
         self.index = 0
         self.shown = float(ANGLES[0])   # angle affiché (animation du cran)
-        self.setFixedSize(150, 172)
+        self.setFixedSize(round(150 * scale), round(172 * scale))
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setToolTip("Sélecteur de fonction : clic sur une position, "
                         "ou molette / clic sur le bouton pour changer de cran")
@@ -33,7 +34,7 @@ class FunctionSelector(QtWidgets.QWidget):
 
     @property
     def center(self):
-        return QtCore.QPointF(self.width() / 2, 100)
+        return QtCore.QPointF(75, 100)          # coordonnées du dessin (avant échelle)
 
     def current(self):
         return self.positions[self.index]
@@ -82,24 +83,27 @@ class FunctionSelector(QtWidgets.QWidget):
         d = QtCore.QPointF(pos) - self.center
         return max(ANGLES[0] - 6, min(ANGLES[-1] + 6, math.degrees(math.atan2(d.x(), -d.y()))))
 
+    def _lp(self, event):
+        return QtCore.QPointF(event.pos()) / self.k
+
     def mousePressEvent(self, event):
-        pos = QtCore.QPointF(event.pos())
+        pos = self._lp(event)
         for i, a in enumerate(ANGLES):          # clic près d'une inscription
             if (pos - self._label_pos(a)).manhattanLength() < 22 and self.positions[i]:
                 self.set_index(i)
                 return
         # sur le bouton : on peut le tourner en glissant (doux) ; simple clic = cran suivant
-        self._drag = {"start": event.pos(), "moved": False}
+        self._drag = {"start": self._lp(event), "moved": False}
         self.timer.stop()
 
     def mouseMoveEvent(self, event):
         drag = getattr(self, "_drag", None)
         if not drag:
             return
-        if (event.pos() - drag["start"]).manhattanLength() > 4:
+        if (self._lp(event) - drag["start"]).manhattanLength() > 4:
             drag["moved"] = True
         if drag["moved"]:
-            self.shown = self._angle_at(event.pos())   # le bec suit la souris
+            self.shown = self._angle_at(self._lp(event))   # le bec suit la souris
             self.setCursor(QtCore.Qt.ClosedHandCursor)
             self.update()
 
@@ -166,7 +170,8 @@ class FunctionSelector(QtWidgets.QWidget):
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
-        w, h = self.width(), self.height()
+        p.scale(self.k, self.k)
+        w, h = 150, 172                         # dessin prévu à cette taille
         c = self.center
         # platine sombre en tôle peinte, bord biseauté, 2 vis
         plate = QtCore.QRectF(2, 2, w - 4, h - 4)

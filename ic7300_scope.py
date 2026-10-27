@@ -68,7 +68,7 @@ from drum_display import DrumClock, DrumDisplay
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
-from vintage_meter import VintageSMeter, VintagePowerMeter
+from vintage_meter import SwrMicroGalva, VintageSMeter, VintagePowerMeter
 from whistle import Whistle
 from qso_hunter import QsoHunter, find_signals
 from panel_frame import PanelFrame
@@ -287,6 +287,9 @@ PUSH_YELLOW_3D = (
     " stop:0.4 #e0b000, stop:1 #ffe04a); }")
 
 
+SWR_GALVA_PX = 46              # hauteur du micro-galva ROS (au-dessus du POWER)
+KNOB_POWER_PX = 128            # bouton de puissance (154 avant le micro-galva ROS)
+FUNC_SCALE = 0.84              # sélecteur FONCTION (1.0 avant le micro-galva ROS)
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
 FINE_MAX = 300                  # Hz : l'affinage par la voix reste à ± 300 Hz du kHz rond
 PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO BLU
@@ -2516,7 +2519,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.swr_led.setToolTip("Alarme ROS : clignote en rouge si le ROS dépasse 2")
         swr_row.addWidget(self.swr_led)
         swr_box.setFixedWidth(self.s_meter.width() + 16)
-        s_col.insertWidget(2, swr_box)
+        # (barre ROS sous le S-mètre retirée : micro-galva ROS au-dessus du POWER)
+        self.swr_galva = SwrMicroGalva(height=SWR_GALVA_PX)
         self.swr_alarm = False
         self.swr_blink = False
         self.swr_timer = QtCore.QTimer(self)
@@ -2550,13 +2554,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # à droite : galva POWER, jumeau du S-mètre
         self.power_meter = VintagePowerMeter()
         power_col = QtWidgets.QVBoxLayout()
+        power_col.setSpacing(1)
+        self.swr_galva.setFixedWidth(self.power_meter.width())   # même largeur que POWER
+        power_col.addWidget(self.swr_galva)
         power_col.addWidget(self.power_meter)
         # sous le galva POWER : bouton argent de réglage de la puissance (W)
-        self.power_knob = PowerKnob(154)        # plaque POWER au-dessus : même hauteur
+        self.power_knob = PowerKnob(KNOB_POWER_PX)   # plus petit : place pour le micro-galva ROS
         self.power_knob.setEnabled(False)       # activé quand la radio répond
-        power_col.addSpacing(6)
+        power_col.addSpacing(0)
         # à droite du bouton de puissance : sélecteur rotatif FONCTION (OFF, ZOOM, …)
-        self.function_selector = FunctionSelector(("OFF", "ZOOM", "SSTV", "", ""))
+        self.function_selector = FunctionSelector(("OFF", "ZOOM", "SSTV", "", ""),
+                                                  scale=FUNC_SCALE)
         self.function_selector.changed.connect(self.on_function)
         self.function_screen = FunctionScreen()   # fonction enclenchée = plein écran
         self.function_screen.back.connect(lambda: self.function_selector.set_index(0))
@@ -6295,6 +6303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_active = False
         self.tx_galva.set_tx(False)
         self.power_meter.reset()
+        self.swr_galva.reset()
         self.swr_alarm = False
         self.tx_stopped_at = time.monotonic()
         # retour de l'écoute au casque (sauf si « Muet » est coché)
@@ -6399,6 +6408,8 @@ class MainWindow(QtWidgets.QMainWindow):
     SWR_ALARM = 2.0
 
     def _swr_led_paint(self, on):
+        if hasattr(self, "swr_galva"):
+            self.swr_galva.set_led(on)          # LED du micro-galva ROS
         top, edge = ("#ffb0a0", "#ff1a0a") if on else ("#4a1a14", "#1e0604")
         self.swr_led.setStyleSheet(
             "border-radius: 6px; border: 1px solid #111;"
@@ -6417,6 +6428,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._vox_silent():
             return                              # barres seulement sur la voix
         self.swr_meter.setValue(swr)
+        self.swr_galva.setValue(swr)
+        self.swr_galva.set_ratio(piecewise(swr, SWR_POINTS))
         self.swr_value.setText(f"{piecewise(swr, SWR_POINTS):.1f}")
         self.tx_galva.set_swr(piecewise(swr, SWR_POINTS))
         self.swr_alarm = piecewise(swr, SWR_POINTS) > self.SWR_ALARM      # strictement au-dessus de 2
