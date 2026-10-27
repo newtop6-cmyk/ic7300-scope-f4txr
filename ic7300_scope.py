@@ -2215,17 +2215,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rtty_close.clicked.connect(lambda: self.rtty_toggle.setDown(False))
         self.rtty_timer = QtCore.QTimer(self)
         self.rtty_timer.timeout.connect(self._rtty_tick)
-        # WATERFALL FR : waterfall plein écran + stations françaises (wf_france.py) ;
-        # cet écran regarde seulement : il ne touche jamais au VFO
+        # WATERFALL FR : waterfall plein écran + stations françaises (wf_france.py).
+        # Levier ON = veille : l'écran s'ouvre tout seul à chaque nouvelle station
+        # française ; RETOUR le réduit. Le VFO ne bouge que sur un clic dans l'écran.
         self.fr_screen = WaterfallFrance()
-        self.fr_screen.back.connect(lambda: self.fr_toggle.setDown(False))
+        self.fr_screen.back.connect(self._fr_reduce)
         self.fr_screen.span.connect(self._fr_span)
+        self.fr_screen.tune.connect(self._fr_tune)
+        self.fr_screen.found.connect(self._fr_found)
         self.fr_hidden = []
         self.fr_saved_span = None
         self.fr_toggle = ToggleSwitch(
-            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = waterfall plein écran "
-            "avec curseur, et les stations françaises de la bande en temps réel (RBN, "
-            "DX Summit, texte décodé) ; le VFO n'est jamais changé. En haut = retour.")
+            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = veille ; le waterfall "
+            "plein écran s'ouvre tout seul dès qu'une station française est trouvée sur la "
+            "bande (RBN, DX Summit, texte décodé, scan QSO FR par récepteur Internet). "
+            "Dans l'écran : clic sur un signal = la radio s'y cale. En haut = arrêt.")
         self.fr_toggle.toggled.connect(self._fr_toggled)
         self.fr_timer = QtCore.QTimer(self)
         self.fr_timer.timeout.connect(self._fr_tick)
@@ -5013,28 +5017,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _fr_toggled(self, on):
         if on:
-            if self.ft8_toggle.down:            # un seul écran plein à la fois
-                self.ft8_toggle.setDown(False)
-            if self.rtty_toggle.down:
-                self.rtty_toggle.setDown(False)
             self.fr_saved_span = self.span_combo.currentData()
-            screen = (self.windowHandle().screen() if self.windowHandle()
-                      else QtWidgets.QApplication.primaryScreen())
-            self.fr_screen.setGeometry(screen.geometry())
             self.fr_screen.set_span(self.fr_saved_span)
             self._fr_tick()
             self.fr_screen.start()
-            self.fr_screen.showFullScreen()
-            self.fr_screen.raise_()
             self.fr_timer.start(250)
-
-            def hide_others():
-                if self.fr_toggle.down:
-                    keep = {int(self.fr_screen.winId())}
-                    if self.console_button.isChecked():
-                        keep |= set(console.terminal_windows())
-                    self.fr_hidden = self._hide_windows(keep)
-            QtCore.QTimer.singleShot(400, hide_others)
+            if any(True for _ in self.fr_screen._band_stations()[1]):
+                self._fr_show()
+            else:
+                self.statusBar().showMessage(
+                    "WATERFALL FR en veille : l'écran s'ouvrira dès qu'une station "
+                    "française sera trouvée", 8000)
         else:
             self.fr_timer.stop()
             self.fr_screen.stop()
@@ -5044,6 +5037,55 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fr_saved_span = None
             self._restore_windows(self.fr_hidden)
             self.fr_hidden = []
+
+    def _fr_show(self):
+        """Écran WATERFALL FR au premier plan, plein écran (un seul écran plein)."""
+        if self.fr_screen.isVisible():
+            return
+        if self.ft8_toggle.down or self.rtty_toggle.down or self.tx_active \
+                or (self.cw_station is not None and self.cw_station.isVisible()):
+            return                              # pas par-dessus FT8, RTTY, CW ni l'émission
+        screen = (self.windowHandle().screen() if self.windowHandle()
+                  else QtWidgets.QApplication.primaryScreen())
+        self.fr_screen.setGeometry(screen.geometry())
+        self.fr_screen.showFullScreen()
+        self.fr_screen.raise_()
+        self.fr_screen.activateWindow()
+
+        def hide_others():
+            if self.fr_toggle.down and self.fr_screen.isVisible():
+                keep = {int(self.fr_screen.winId())}
+                if self.console_button.isChecked():
+                    keep |= set(console.terminal_windows())
+                self.fr_hidden = self._hide_windows(keep)
+        QtCore.QTimer.singleShot(400, hide_others)
+
+    def _fr_reduce(self):
+        """RETOUR : écran réduit, veille maintenue (il se rouvrira tout seul)."""
+        self.fr_screen.hide()
+        self._restore_windows(self.fr_hidden)
+        self.fr_hidden = []
+        self.statusBar().showMessage(
+            "WATERFALL FR réduit : il se rouvrira à la prochaine station française", 6000)
+
+    def _fr_found(self, s):
+        if not self.fr_toggle.down:
+            return
+        self.statusBar().showMessage(
+            f"Station française trouvée : {s['call']} sur {s['hz'] / 1000:.1f} kHz", 8000)
+        self._fr_show()
+
+    def _fr_tune(self, hz, mode):
+        """Clic dans l'écran WATERFALL FR : calage immédiat et précis."""
+        if not self.civ:
+            return
+        self._manual_tuning()
+        if mode and mode in MODE_NAMES and mode != self.mode_combo.currentText():
+            self.mode_combo.setCurrentText(mode)
+            self._sync_mode_buttons()
+            self.civ.set_mode(mode)
+            self._update_markers()
+        self.tune_to(hz)
 
     def _ft8_keep_map_below(self):
         """Quand WSJT-X est au premier plan, la carte doit être juste dessous

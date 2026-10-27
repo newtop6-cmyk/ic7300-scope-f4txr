@@ -2,8 +2,12 @@
 
 Le waterfall vient du scope de la radio (feed_scope). Curseur interactif :
 une ligne suit la souris avec la fréquence et la station la plus proche ;
-clic = la station est montrée dans la liste. Cet écran ne touche JAMAIS au
-VFO : il regarde seulement. Boutons de largeur du scope en bas.
+clic sur un signal (ou une station de la liste) = la radio s'y cale
+précisément (bord de la BLU, pointe de la CW). Rien d'autre ne bouge le VFO.
+
+SCAN QSO FR : un récepteur KiwiSDR sur Internet (kiwi_scan.py) parcourt le
+segment phonie de la bande et fait reconnaître la langue de chaque QSO ;
+bande de scan sous le waterfall (vert = français, gris = autre langue).
 
 Stations françaises (F, TM, TK, TO…, DOM-TOM) repérées en temps réel :
   - RBN en direct (telnet.reversebeacon.net:7000 CW/RTTY, :7001 FT8/FT4),
@@ -26,6 +30,7 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ball_button import BallButton
+from kiwi_scan import KiwiScan, PHONE as SCAN_PHONE
 
 MY_CALL = "F4TXR"
 HISTORY = 400                   # lignes du waterfall
@@ -33,6 +38,8 @@ KEEP_S = 15 * 60                # une station reste affichée 15 min après son 
 NEW_S = 20                      # « nouvelle » : clignote pendant 20 s
 SNAP_KHZ = 0.6                  # clic à moins de 0,6 kHz d'une station : on se cale sur elle
 BLEU, BLANC, ROUGE = "#3d7dff", "#f2f2f2", "#ff4040"
+VERT = "#3ddc84"                # QSO français trouvé par le scan
+SCAN_COLOR = "#ff4fd8"          # curseur du scan
 
 BANDS = [("160m", 1_810_000, 2_000_000), ("80m", 3_500_000, 3_800_000),
          ("60m", 5_351_500, 5_366_500), ("40m", 7_000_000, 7_200_000),
@@ -180,6 +187,8 @@ class FrenchSpots(QtCore.QObject):
 class WaterfallFrance(QtWidgets.QWidget):
     span = QtCore.pyqtSignal(int)           # largeur du scope demandée (Hz)
     back = QtCore.pyqtSignal()              # RETOUR
+    tune = QtCore.pyqtSignal(int, str)      # clic : se caler là (Hz, mode conseillé ou "")
+    found = QtCore.pyqtSignal(dict)         # nouvelle station française sur la bande
 
     def __init__(self):
         super().__init__()
@@ -198,10 +207,18 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.marks = []                     # objets graphiques des stations
         self.src_state = {}
         self.text_tail = ""
+        self.known = set()                  # stations déjà signalées (ouverture automatique)
+        self.scan_results = []              # résultats du scan (segment en cours)
+        self.scan_seg = None
         self.spots = FrenchSpots()
         self.spots.spot.connect(self.add_spot)
         self.spots.status.connect(self._source_status)
+        self.scan = KiwiScan()
         self._build()
+        self.scan.status.connect(self.scan_label.setText)
+        self.scan.testing.connect(self._scan_testing)
+        self.scan.result.connect(self._scan_result)
+        self.scan.segment.connect(self._scan_segment)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._refresh)
 
@@ -253,8 +270,26 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.img = pg.ImageItem()
         self.img.setLookupTable(pg.colormap.get("inferno").getLookupTable(nPts=256))
         self.wfp.addItem(self.img)
+        # bande de scan : tout le segment phonie, vu par le récepteur Internet
+        self.seg = self.graphics.addPlot(row=2, col=0)
+        self.seg.setMouseEnabled(x=False, y=False)
+        self.seg.hideButtons()
+        self.seg.hideAxis("left")
+        self.seg.setYRange(0, 1, padding=0)
+        self.seg.getAxis("bottom").setTextPen("#cfcfcf")
+        self.seg.setTitle("<span style='color:#ff9ff0'>SCAN QSO FR — segment phonie "
+                          "(récepteur Internet)</span>", size="10pt")
+        self.seg_points = pg.ScatterPlotItem(size=16, pxMode=True)
+        self.seg.addItem(self.seg_points)
+        self.seg_labels = []
+        self.seg_cursor = pg.InfiniteLine(angle=90, pen=pg.mkPen(SCAN_COLOR, width=3))
+        self.seg_cursor.setVisible(False)
+        self.seg.addItem(self.seg_cursor, ignoreBounds=True)
+        self.seg_tuned = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
+        self.seg.addItem(self.seg_tuned, ignoreBounds=True)
         self.graphics.ci.layout.setRowStretchFactor(0, 1)
         self.graphics.ci.layout.setRowStretchFactor(1, 5)
+        self.graphics.ci.layout.setRowMaximumHeight(2, 95)
         # fréquence de la radio (jaune) et curseur de la souris (blanc)
         self.tuned = [pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
                       for _ in range(2)]
@@ -266,6 +301,11 @@ class WaterfallFrance(QtWidgets.QWidget):
             plot.addItem(a, ignoreBounds=True)
             plot.addItem(b, ignoreBounds=True)
             b.setVisible(False)
+        self.scan_lines = [pg.InfiniteLine(angle=90, pen=pg.mkPen(
+            SCAN_COLOR, width=2, style=QtCore.Qt.DashLine)) for _ in range(2)]
+        for plot, line in zip((self.spec, self.wfp), self.scan_lines):
+            line.setVisible(False)
+            plot.addItem(line, ignoreBounds=True)
         self.cursor_text = pg.TextItem("", color="#ffffff", anchor=(0, 0),
                                        fill=pg.mkBrush(0, 0, 0, 190))
         self.cursor_text.setZValue(50)
@@ -288,8 +328,9 @@ class WaterfallFrance(QtWidgets.QWidget):
             "QListWidget { font: bold 13pt monospace; background: #0a0e14; "
             "border: 1px solid #2a3340; } QListWidget::item { padding: 3px; } "
             "QListWidget::item:hover { background: #1c2a3c; }")
-        self.listw.setToolTip("Stations françaises de la bande (le VFO n'est jamais changé)")
+        self.listw.setToolTip("Clic sur une station : la radio se cale dessus")
         self.listw.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.listw.itemClicked.connect(self._list_clicked)
         side.addWidget(self.listw, stretch=1)
         self.src_label = QtWidgets.QLabel("")
         self.src_label.setStyleSheet("font: 10pt sans-serif; color: #a0a0a0;")
@@ -298,19 +339,42 @@ class WaterfallFrance(QtWidgets.QWidget):
         legend = QtWidgets.QLabel(
             f"<span style='color:{BLEU}'>■</span> RBN (skimmers)  "
             f"<span style='color:{BLANC}'>■</span> DX Summit  "
-            f"<span style='color:{ROUGE}'>■</span> décodé ici")
+            f"<span style='color:{ROUGE}'>■</span> décodé ici  "
+            f"<span style='color:{VERT}'>■</span> QSO FR (scan)")
         legend.setStyleSheet("font: 10pt sans-serif;")
         side.addWidget(legend)
         middle.addLayout(side)
         root.addLayout(middle, stretch=1)
 
         bottom = QtWidgets.QHBoxLayout()
-        help_ = QtWidgets.QLabel("Souris : curseur · Clic : montrer la station (le VFO ne bouge pas)")
-        help_.setStyleSheet("font: 11pt sans-serif; color: #a0a0a0;")
-        bottom.addWidget(help_)
+        left = QtWidgets.QVBoxLayout()
+        scan_row = QtWidgets.QHBoxLayout()
+        self.scan_button = QtWidgets.QPushButton("SCAN QSO FR")
+        self.scan_button.setCheckable(True)
+        self.scan_button.setChecked(True)
+        self.scan_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.scan_button.setToolTip("Marche/arrêt du scan par le récepteur Internet "
+                                    "(votre radio ne bouge pas ; 3 h par jour au plus)")
+        self.scan_button.setStyleSheet(
+            "QPushButton { font: bold 12pt sans-serif; color: #ddd; background: #222a33; "
+            "border: 2px solid #556; border-radius: 8px; padding: 6px 14px; } "
+            f"QPushButton:checked {{ background: {SCAN_COLOR}; color: #000; }}")
+        self.scan_button.toggled.connect(self._scan_toggled)
+        scan_row.addWidget(self.scan_button)
+        self.scan_label = QtWidgets.QLabel("")
+        self.scan_label.setStyleSheet("font: 11pt sans-serif; color: #ff9ff0;")
+        scan_row.addWidget(self.scan_label)
+        scan_row.addStretch()
+        left.addLayout(scan_row)
+        self.tune_label = QtWidgets.QLabel(
+            "Clic sur un signal : la radio s'y cale (BLU : bord du signal, CW : pointe)")
+        self.tune_label.setStyleSheet("font: 11pt sans-serif; color: #a0a0a0;")
+        left.addWidget(self.tune_label)
+        bottom.addLayout(left)
         bottom.addStretch()
         self.back_button = BallButton("RETOUR", diameter=84)
-        self.back_button.setToolTip("Ferme cet écran, les fenêtres reviennent")
+        self.back_button.setToolTip("Réduit cet écran (il se rouvre tout seul à la "
+                                    "prochaine station française trouvée)")
         self.back_button.clicked.connect(self.back.emit)
         bottom.addWidget(self.back_button)
         bottom.addStretch()
@@ -335,19 +399,100 @@ class WaterfallFrance(QtWidgets.QWidget):
     def start(self):
         self.spots.start()
         self.timer.start(1000)
+        self._scan_toggled(self.scan_button.isChecked())
         self._refresh()
 
     def stop(self):
         self.timer.stop()
         self.spots.stop()
+        self.scan.stop()
         self.hide()
 
+    # --- scan par le récepteur Internet --------------------------------------
+    def _scan_band(self):
+        band = band_of(self.freq_hz) if self.freq_hz else None
+        return band[0] if band else None
+
+    def _scan_toggled(self, on):
+        if not self.timer.isActive():
+            return                              # écran arrêté : le scan partira avec start()
+        if on:
+            band = self._scan_band()
+            if band in SCAN_PHONE:
+                self.scan.start(band)
+            else:
+                self.scan_label.setText(f"Scan : pas de segment phonie sur "
+                                        f"{band or 'cette fréquence'}")
+        else:
+            self.scan.stop()
+
+    def _scan_segment(self, lo, hi):
+        if self.scan_seg != (lo, hi):
+            self.scan_seg = (lo, hi)
+            self.scan_results = [r for r in self.scan_results if lo <= r["hz"] <= hi]
+            self.seg.setXRange(lo / 1000, hi / 1000, padding=0.01)
+            self._draw_scan()
+
+    def _scan_testing(self, hz):
+        for line in self.scan_lines:
+            line.setVisible(bool(hz))
+            if hz:
+                line.setPos(hz / 1000)
+        self.seg_cursor.setVisible(bool(hz))
+        if hz:
+            self.seg_cursor.setPos(hz / 1000)
+            self.scan_label.setText(f"Scan : écoute de {fmt_khz(hz / 1000)} kHz…")
+
+    def _scan_result(self, r):
+        self.scan_results = [x for x in self.scan_results if abs(x["hz"] - r["hz"]) > 1500]
+        self.scan_results.append(r)
+        lang = (r["lang"] or "?").upper()
+        self.scan_label.setText(
+            f"Scan : {fmt_khz(r['hz'] / 1000)} kHz → "
+            + (f"QSO FRANÇAIS ({round(r['prob'] * 100)} %)" if r["fr"]
+               else f"{lang} ({round(r['prob'] * 100)} %)"))
+        if r["fr"]:
+            self.add_spot({"call": f"QSO FR {round(r['hz'] / 1000)}", "hz": r["hz"],
+                           "mode": r["mode"], "snr": None, "src": "SCAN", "t": r["t"],
+                           "info": (r.get("text") or "")[:80], "by": "KiwiSDR"})
+        self._draw_scan()
+
+    def _draw_scan(self):
+        now = time.time()
+        spots = []
+        for r in self.scan_results:
+            fresh = now - r["t"] < 600
+            color = VERT if r["fr"] else "#8a8f98"
+            spots.append({"pos": (r["hz"] / 1000, 0.45), "brush": pg.mkBrush(color),
+                          "pen": pg.mkPen("#000"), "symbol": "o" if r["fr"] else "s",
+                          "size": 18 if r["fr"] else 11, "data": r["hz"]})
+            if not fresh:
+                spots[-1]["brush"] = pg.mkBrush(color + "60")
+        self.seg_points.setData(spots)
+        for item in self.seg_labels:
+            self.seg.removeItem(item)
+        self.seg_labels = []
+        for r in self.scan_results:
+            text = "FR" if r["fr"] else (r["lang"] or "?").upper()
+            label = pg.TextItem(text, color=VERT if r["fr"] else "#a0a4aa", anchor=(0.5, 1.1))
+            label.setPos(r["hz"] / 1000, 0.45)
+            self.seg.addItem(label, ignoreBounds=True)
+            self.seg_labels.append(label)
     # --- entrées venant du Scope ---------------------------------------------
     def set_frequency(self, hz, mode=""):
         if hz and hz != self.freq_hz:
+            old_band = self._scan_band()
             self.freq_hz = hz
             for line in self.tuned:
                 line.setPos(hz / 1000)
+            self.seg_tuned.setPos(hz / 1000)
+            band = self._scan_band()
+            if band != old_band and self.timer.isActive() and self.scan_button.isChecked():
+                if band in SCAN_PHONE:
+                    self.scan.start(band)
+                    self.scan.set_band(band)
+                else:
+                    self.scan.stop()
         self.mode = mode
         if hz:
             self.freq_label.setText(f"{fmt_khz(hz / 1000)} kHz  {mode}")
@@ -414,6 +559,12 @@ class WaterfallFrance(QtWidgets.QWidget):
         if old and not s["mode"]:
             s["mode"] = old["mode"]
         self.stations[s["call"]] = s
+        # nouvelle station française sur la bande écoutée : on le signale (ouverture auto)
+        band = band_of(self.freq_hz) if self.freq_hz else None
+        if s["call"] not in self.known and band and band[1] <= s["hz"] <= band[2] \
+                and time.time() - s["t"] < KEEP_S:
+            self.known.add(s["call"])
+            self.found.emit(s)
 
     def _source_status(self, name, ok):
         self.src_state[name] = ok
@@ -430,7 +581,7 @@ class WaterfallFrance(QtWidgets.QWidget):
                             key=lambda s: s["hz"])
 
     def _color(self, s):
-        return {"RBN": BLEU, "DXS": BLANC, "ICI": ROUGE}.get(s["src"], BLANC)
+        return {"RBN": BLEU, "DXS": BLANC, "ICI": ROUGE, "SCAN": VERT}.get(s["src"], BLANC)
 
     def _refresh(self):
         band, stations = self._band_stations()
@@ -461,7 +612,7 @@ class WaterfallFrance(QtWidgets.QWidget):
             if s["call"] == self.selected:
                 self.listw.scrollToItem(item)
         if not stations:
-            item = QtWidgets.QListWidgetItem("  en attente de spots…")
+            item = QtWidgets.QListWidgetItem("  en attente de stations françaises…")
             item.setForeground(QtGui.QColor("#777"))
             item.setFlags(QtCore.Qt.NoItemFlags)
             self.listw.addItem(item)
@@ -552,20 +703,91 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.cursor_text.setVisible(True)
 
     def _mouse_clicked(self, event):
-        """Clic : la station sous la souris est surlignée dans la liste.
-        Aucune action sur le VFO."""
+        """Clic : la radio se cale sur le signal visé (station repérée, bord de la
+        BLU ou pointe de la CW). C'est la seule action de cet écran sur le VFO."""
         if event.button() != QtCore.Qt.LeftButton:
             return
-        khz, _ = self._khz_at(event.scenePos())
+        pos = event.scenePos()
+        if self.seg.sceneBoundingRect().contains(pos):          # bande de scan
+            khz = self.seg.vb.mapSceneToView(pos).x()
+            near = [r for r in self.scan_results if abs(r["hz"] / 1000 - khz) < 3]
+            if near:
+                r = min(near, key=lambda r: abs(r["hz"] / 1000 - khz))
+                self._tune(r["hz"], r["mode"], "QSO FR" if r["fr"] else "signal du scan")
+            return
+        khz, _ = self._khz_at(pos)
         if khz is None:
             return
         s = self._nearest(khz)
-        self.selected = s["call"] if s else None
-        self._refresh()
+        if s:
+            self.selected = s["call"]
+            self._tune_station(s)
+            return
+        hz, mode, what = self._snap(khz)
+        self._tune(hz, mode, what)
+
+    def _snap(self, khz):
+        """Signal sous le clic, d'après le spectre de la radio → (Hz, mode, quoi)."""
+        hz = int(round(khz * 100)) * 10
+        if self.avg is None or self.edges is None:
+            return hz, "", "fréquence"
+        lo, hi = self.edges
+        n = len(self.avg)
+        step = (hi - lo) / n
+        i = int((khz * 1000 - lo) / step)
+        if not 0 <= i < n:
+            return hz, "", "fréquence"
+        spec = np.asarray(self.avg, float)
+        noise = float(np.median(spec))
+        above = spec > noise + 6
+        reach = max(1, int(1500 / step))            # le signal doit toucher le clic à ±1,5 kHz
+        near = [k for k in range(max(0, i - reach), min(n, i + reach + 1)) if above[k]]
+        if not near:
+            return hz, "", "fréquence"
+        k = min(near, key=lambda k: abs(k - i))
+        gap = max(1, int(400 / step))
+        a = b = k
+        while a > 0 and any(above[max(0, a - gap):a]):
+            a -= 1
+        while a < k and not above[a]:
+            a += 1
+        while b < n - 1 and any(above[b + 1:min(n, b + 1 + gap)]):
+            b += 1
+        while b > k and not above[b]:
+            b -= 1
+        f_lo, f_hi = lo + a * step, lo + (b + 1) * step
+        width = f_hi - f_lo
+        if width <= max(600, 3 * step):              # étroit : CW, sur la pointe
+            idx = np.arange(a, b + 1)
+            w = 10 ** (spec[a:b + 1] / 10)
+            peak = lo + (float((idx * w).sum() / w.sum()) + 0.5) * step
+            return int(round(peak / 10) * 10), "CW", "pointe CW"
+        if 1000 <= width <= 4500:                   # BLU : la porteuse est au bord
+            lsb = (self.freq_hz or f_lo) < 10_000_000
+            carrier = f_hi + 200 if lsb else f_lo - 200
+            return int(round(carrier / 10) * 10), "LSB" if lsb else "USB", "signal BLU"
+        return hz, "", "fréquence"
+
+    def _tune_station(self, s):
+        mode = (s.get("mode") or "").upper()
+        mode = {"CW": "CW", "LSB": "LSB", "USB": "USB", "FT8": "USB-D", "FT4": "USB-D",
+                "RTTY": "RTTY"}.get(mode, "")
+        self._tune(s["hz"], mode, s["call"])
+
+    def _tune(self, hz, mode, what):
+        self.tune.emit(int(hz), mode)
+        self.tune_label.setText(f"Calé sur {fmt_khz(hz / 1000)} kHz {mode} ({what})")
+
+    def _list_clicked(self, item):
+        s = self.stations.get(item.data(QtCore.Qt.UserRole))
+        if s:
+            self.selected = s["call"]
+            self._tune_station(s)
+            self._refresh()
 
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.Wheel:
-            return True                         # molette sans effet : le VFO ne bouge pas
+            return True                         # molette sans effet sur le VFO
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
