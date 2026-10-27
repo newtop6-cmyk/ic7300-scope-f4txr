@@ -53,6 +53,7 @@ from vox_pc import VoxMonitor
 from mot_vox import MotVox, vox_number
 from voix_vox import LEARN_COUNT, VoiceCommands, features
 from dictee import Dictee, paste_into, split_send
+import timbre_qso
 from voice_scope import VoiceScope
 from power_knob import MODE as KNOB_MODE, NamePlate, PowerKnob, VintageKnob, ScaleBakelite
 from band_keys import BandKey
@@ -5340,7 +5341,9 @@ class MainWindow(QtWidgets.QMainWindow):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
             proc = subprocess.Popen(
-                ["parec", "-d", self.eq_engine.monitor_for(source), "--file-format=wav",
+                # micro brut : pas de porte anti-souffle ni de retard ; le timbre
+                # QSO est appliqué à la fin (timbre_qso.py)
+                ["parec", "-d", source, "--file-format=wav",
                  "--rate=48000", "--channels=1", f"--client-name=IC-7300 VOX{n}",
                  path + ".brut.wav"], stderr=subprocess.DEVNULL)
         except OSError as e:
@@ -5375,18 +5378,16 @@ class MainWindow(QtWidgets.QMainWindow):
             box.close()
             self.vox_msg_box = None
         path = vox_msg_file(n)
-        trim = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15,"
-                "areverse,"
-                "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.25,"
-                "areverse")
         tmp = path + ".net.wav"
-        done = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path + ".brut.wav",
-                               "-af", trim, "-ar", "48000", "-ac", "1", tmp],
-                              capture_output=True, text=True)
-        length = self._wav_seconds(tmp)
+        self.statusBar().showMessage(f"VOX{n} : mise au timbre QSO…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            length = timbre_qso.apply(path + ".brut.wav", tmp)
+        except Exception:
+            length = 0.0
         self._mot_vox_need()
         self._vox_msg_show()
-        if done.returncode != 0 or length < 0.3:
+        if length < 0.3:
             self.statusBar().showMessage(f"VOX{n} : rien d'enregistré (micro muet ?) — "
                                          "message précédent gardé s'il existe", 8000)
             return
