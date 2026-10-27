@@ -2331,18 +2331,27 @@ class MainWindow(QtWidgets.QMainWindow):
                   (self.ft8_toggle, "FT8"),
                   (self.rtty_toggle, "DÉCODEUR RTTY"),
                   (self.fr_toggle, "WATERFALL FR"),
-                  (self.demo_toggle, "DÉMO"),
-                  (self.rec_bf_toggle, "REC BF"),
-                  (self.vdo_toggle, "VDO+BF"))
+                  (self.demo_toggle, "DÉMO"))
+        # 2e ligne d'interrupteurs, sous la première : les nouveaux s'ajoutent ici
+        others2 = ((self.rec_bf_toggle, "REC BF"),
+                   (self.vdo_toggle, "VDO+BF"))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
-        # 72 px par bouton (au lieu de 88) : la rangée tient dans la largeur de l'écran
-        col_px = 72
-        for bar, items in ((self.audio_bar, audio), (self.knob_bar, others)):
+        # 80 px par bouton (au lieu de 88) : la rangée tient dans la largeur de l'écran
+        col_px = 80
+        SWITCH_PX = 60
+        self.switch_row1 = QtWidgets.QHBoxLayout()
+        self.switch_row1.setSpacing(8)
+        self.switch_row2 = QtWidgets.QHBoxLayout()
+        self.switch_row2.setSpacing(8)
+        for bar, items in ((self.audio_bar, audio), (self.switch_row1, others),
+                           (self.switch_row2, others2)):
             for knob, name in items:
                 if knob.width() > col_px:
                     knob.setFixedSize(col_px, round(knob.height() * col_px / knob.width()))
+                if bar is not self.audio_bar:   # 2 lignes d'interrupteurs : leviers plus petits
+                    knob.setFixedSize(SWITCH_PX, SWITCH_PX)
                 col = QtWidgets.QVBoxLayout()
                 col.setSpacing(1)
                 col.addWidget(NamePlate(name, col_px), 0, QtCore.Qt.AlignHCenter)
@@ -2352,7 +2361,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.audio_frame = SilverFrame(self.audio_bar, "RÉGLAGES AUDIO")
                 self.knob_bar.addWidget(self.audio_frame)
                 self.knob_bar.addSpacing(6)
-        self.knob_bar.addStretch()              # futurs boutons : knob_bar.insertWidget(4, …)
+        self.switch_row1.addStretch()
+        self.switch_row2.addStretch()
+        switch_rows = QtWidgets.QVBoxLayout()
+        switch_rows.setSpacing(2)
+        switch_rows.addLayout(self.switch_row1)
+        switch_rows.addLayout(self.switch_row2)
+        self.knob_bar.addLayout(switch_rows, stretch=1)
         s_col.addStretch()
         meters.addLayout(s_col)
         self.s_col = s_col                      # le texte décodé s'y place (sous le S-mètre)
