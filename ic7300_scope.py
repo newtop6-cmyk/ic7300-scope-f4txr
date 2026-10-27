@@ -2312,6 +2312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vox_msg_dry = self._vox_dry_load()
         self.vox_msg_dry_auto = set()       # voix pas apprise : essai à blanc d'office
         self.vox_match_detail = ""          # dernier résultat de reconnaissance
+        self.vox_rx_muted = False           # réception coupée pour entendre « VOX n »
         self.vox_seg_time = 0.0
         self.vox_dry_player = None
         self.vox_dry_timer = QtCore.QTimer(self)
@@ -5521,7 +5522,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"ESSAI VOX{n} : message introuvable", 6000)
             return
         self.vox_msg_sending = n
-        self.vox_dry_heard = getattr(self, "vox_seg_time", time.monotonic())
+        now = time.monotonic()
+        self.vox_dry_heard = self.vox_seg_time if now - self.vox_seg_time < 10 else now
         self.vox_dry_len = self._wav_seconds(vox_msg_file(n))
         self._mot_vox_need()
         self._vox_msg_show()
@@ -7151,9 +7153,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mot_vox_need()
             self.statusBar().showMessage("VOX VOCAL arrêté", 4000)
 
+    def _vox_rx_quiet(self):
+        """Réception coupée pendant l'apprentissage, l'attente de « VOX n » et le
+        message : le haut-parleur ne doit pas brouiller le micro. Rétablie après."""
+        want = (self.vox_learn is not None or bool(self.vox_msg_armed)
+                or self.vox_msg_sending is not None)
+        if want == self.vox_rx_muted:
+            return
+        self.vox_rx_muted = want
+        if want:
+            self._pactl_stream("set-sink-input-mute", "1")
+            self._vox_log("réception coupée (micro au calme)")
+        elif not self.tx_active:
+            self._pactl_stream("set-sink-input-mute",
+                               "1" if self.mute_check.isChecked() else "0")
+            self._vox_log("réception rétablie")
+
     def _mot_vox_need(self):
         """Écoute des mots au micro : en marche si VOX VOCAL est allumé ou si un
         message VOX n attend d'être dit (et pas pendant l'enregistrement d'un message)."""
+        self._vox_rx_quiet()
         need = (self.vox_vocal_button.isChecked() or bool(self.vox_msg_armed)
                 or self.vox_learn is not None) and self.vox_msg_rec is None
         # Whisper seulement pour VOX VOCAL ; VOX n : ta voix comparée aux exemples
