@@ -1,0 +1,107 @@
+{
+  "Métallique F4TXR": {
+    "hp": 400,
+    "lp": 3000,
+    "gain": 0,
+    "q": 1.6,
+    "bands": [
+      -12,
+      -12,
+      -8,
+      -4,
+      0,
+      6,
+      10,
+      12,
+      8
+    ],
+    "comp_on": true,
+    "thr": -36,
+    "ratio": 8,
+    "makeup": 16
+  },
+  "Percutant (avant métallique)": {
+    "hp": 300.0,
+    "lp": 2900.0,
+    "gain": -4.0,
+    "q": 1.2,
+    "bands": [
+      -12.0,
+      -8.0,
+      -4.0,
+      -2.0,
+      1.0,
+      4.0,
+      6.0,
+      5.0,
+      2.0
+    ],
+    "comp_on": true,
+    "thr": -28.0,
+    "ratio": 4.0,
+    "makeup": 10.0
+  },
+  "Percutant + compression": {
+    "hp": 300,
+    "lp": 2900,
+    "gain": -4,
+    "q": 1.2,
+    "bands": [
+      -12,
+      -8,
+      -4,
+      -2,
+      1,
+      4,
+      6,
+      5,
+      2
+    ],
+    "comp_on": true,
+    "thr": -32,
+    "ratio": 5,
+    "makeup": 13
+  },
+  "Mon réglage F4TXR": {
+    "hp": 300.0,
+    "lp": 2900.0,
+    "gain": -4.0,
+    "q": 1.2,
+    "bands": [
+      -12.0,
+      -8.0,
+      -4.0,
+      -2.0,
+      1.0,
+      4.0,
+      6.0,
+      5.0,
+      2.0
+    ],
+    "comp_on": true,
+    "thr": -32.0,
+    "ratio": 6.5,
+    "makeup": 13.0
+  },
+  "Mon réglage F4TXR boosté BLU": {
+    "hp": 300.0,
+    "lp": 2900.0,
+    "gain": 6,
+    "q": 1.2,
+    "bands": [
+      -12.0,
+      -8.0,
+      -4.0,
+      -2.0,
+      1.0,
+      4.0,
+      6.0,
+      5.0,
+      2.0
+    ],
+    "comp_on": true,
+    "thr": -32.0,
+    "ratio": 6.5,
+    "makeup": 13.0
+  }
+}

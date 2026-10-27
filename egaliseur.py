@@ -31,6 +31,31 @@ MY_PRESETS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 MINE = "★ "                     # repère des réglages enregistrés par l'utilisateur
 BANDS = (100, 200, 400, 700, 1000, 1500, 2000, 2500, 3000)
 ENV = {**os.environ, "LC_ALL": "C"}
+CEILING = 10 ** (-1 / 20)       # limiteur : crêtes tenues à -1 dBFS
+LIM_RELEASE_MS = 60
+
+COMP_TEXT = """
+[compresseur]
+# Compresseur : remonte les passages faibles de la voix et retient les
+# pointes → modulation plus dense, plus « dynamique », plus présente.
+# oui = en service ; non = coupé
+actif = {on}
+# seuil en dB (-40 à 0) : au-dessus, la voix est compressée. Plus bas = plus de compression.
+seuil_db = {thr:g}
+# taux (1 à 10) : 1 = rien, 3-4 = naturel et punchy, 6-10 = très serré
+taux = {ratio:g}
+# rattrapage en dB (0 à 20) : remonte le tout après compression
+rattrapage_db = {makeup:g}
+# attaque (ms) : vitesse de réaction aux pointes (2 à 30)
+attaque_ms = {attack:g}
+# relâchement (ms) : retour après une pointe (50 à 500). Court = plus agressif.
+relachement_ms = {release:g}
+# porte anti-souffle (dB, -70 à -30) : sous ce niveau le rattrapage s'efface,
+# pour ne pas remonter le bruit de fond entre les phrases. Plus haut = plus de silence.
+porte_db = {gate:g}
+"""
+COMP_DEFAULT = dict(comp_on=True, thr=-28.0, ratio=4.0, makeup=10.0, attack=5.0, release=150.0,
+                    gate=-50.0)
 
 DEFAULT_TEXT = """\
 # ============================================================
@@ -70,7 +95,7 @@ largeur_q = 1.2
 2000 = 6
 2500 = 5
 3000 = 2
-"""
+""" + COMP_TEXT.format(on="oui", thr=-28, ratio=4, makeup=10, attack=5, release=150, gate=-50)
 
 PRESETS = {
     "Plat": dict(hp=0, lp=0, gain=0, bands=[0] * 9),
@@ -110,7 +135,17 @@ def load_settings():
         hp=max(0.0, num("general", "passe_haut_hz", 0)),
         lp=max(0.0, num("general", "passe_bas_hz", 0)),
         q=max(0.3, min(5.0, num("general", "largeur_q", 1.2))),
-        bands=[max(-12.0, min(12.0, num("bandes", str(b), 0))) for b in BANDS])
+        bands=[max(-12.0, min(12.0, num("bandes", str(b), 0))) for b in BANDS],
+        comp_on=cp.get("compresseur", "actif", fallback="oui").strip().lower() in (
+            "oui", "yes", "1", "on", "vrai", "true"),
+        thr=max(-40.0, min(0.0, num("compresseur", "seuil_db", COMP_DEFAULT["thr"]))),
+        ratio=max(1.0, min(10.0, num("compresseur", "taux", COMP_DEFAULT["ratio"]))),
+        makeup=max(0.0, min(20.0, num("compresseur", "rattrapage_db",
+                                      COMP_DEFAULT["makeup"]))),
+        attack=max(1.0, min(50.0, num("compresseur", "attaque_ms", COMP_DEFAULT["attack"]))),
+        release=max(20.0, min(1000.0, num("compresseur", "relachement_ms",
+                                          COMP_DEFAULT["release"]))),
+        gate=max(-70.0, min(-30.0, num("compresseur", "porte_db", COMP_DEFAULT["gate"]))))
 
 
 def save_settings(s):
@@ -121,14 +156,30 @@ def save_settings(s):
               "gain_general_db": f"{s['gain']:g}", "passe_haut_hz": f"{s['hp']:g}",
               "passe_bas_hz": f"{s['lp']:g}", "largeur_q": f"{s['q']:g}"}
     values.update({str(b): f"{v:g}" for b, v in zip(BANDS, s["bands"])})
+    comp = {"actif": "oui" if s["comp_on"] else "non", "seuil_db": f"{s['thr']:g}",
+            "taux": f"{s['ratio']:g}", "rattrapage_db": f"{s['makeup']:g}",
+            "attaque_ms": f"{s['attack']:g}", "relachement_ms": f"{s['release']:g}",
+            "porte_db": f"{s.get('gate', -50):g}"}
     out = []
+    section = ""
+    found_comp = False
     with open(CONFIG) as f:
         for line in f:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1]
+                found_comp = found_comp or section == "compresseur"
             key = line.split("=", 1)[0].strip()
-            if "=" in line and not line.lstrip().startswith("#") and key in values:
-                out.append(f"{key} = {values.pop(key)}\n")
+            table = comp if section == "compresseur" else values
+            if "=" in line and not line.lstrip().startswith("#") and key in table:
+                out.append(f"{key} = {table.pop(key)}\n")
             else:
                 out.append(line)
+    if not found_comp:              # ancien fichier : on ajoute la section
+        out.append(COMP_TEXT.format(on="oui" if s["comp_on"] else "non", thr=s["thr"],
+                                    ratio=s["ratio"], makeup=s["makeup"],
+                                    attack=s["attack"], release=s["release"],
+                                    gate=s.get("gate", -50)))
     tmp = CONFIG + ".tmp"
     with open(tmp, "w") as f:
         f.writelines(out)
@@ -201,6 +252,11 @@ class EqEngine:
         self.module = None
         self.listen_module = None
         self.level = 0.0                # crête de sortie (0..1) pour le vu-mètre
+        self.env_db = -90.0             # enveloppe du compresseur
+        self.last_gain = 0.0            # dernier gain appliqué (dB), pour lisser
+        self.reduction = 0.0            # compression en cours (dB) pour l'affichage
+        self.lim_gain = 1.0             # gain du limiteur (1 = rien)
+        self.lim_hits = 0.0             # part du temps où le limiteur agit (0..1)
 
     @staticmethod
     def _mtime():
@@ -295,13 +351,69 @@ class EqEngine:
                         if self.zi is None or self.zi.shape[0] != sos.shape[0]:
                             self.zi = signal.sosfilt_zi(sos) * 0
                         x, self.zi = signal.sosfilt(sos, x, zi=self.zi)
+                    if s["comp_on"]:
+                        x = self._compress(x, s)
+                    else:
+                        self.reduction = 0.0
                     x = x * 10 ** (s["gain"] / 20)
-                    x = np.tanh(x * 1.2) / 1.2 if np.max(np.abs(x)) > 0.8 else x
+                    x = self._limit(x)
             self.level = max(self.level * 0.8, float(np.max(np.abs(x))) if len(x) else 0)
             try:
                 play.stdin.write((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
             except (BrokenPipeError, OSError, ValueError):
                 break
+
+    def _limit(self, x, sub=24):
+        """Limiteur de crêtes : réaction immédiate, retour en 60 ms ; la voix monte
+        au plus près du maximum sans écrêter (l'enveloppe BLU est remplie)."""
+        n = len(x) // sub
+        if n == 0:
+            return np.clip(x, -CEILING, CEILING)
+        peaks = np.max(np.abs(x[:n * sub].reshape(n, sub)), axis=1)
+        rel = np.exp(-sub / (RATE * LIM_RELEASE_MS / 1000))
+        g = self.lim_gain
+        gains = np.empty(n)
+        for i in range(n):
+            need = CEILING / peaks[i] if peaks[i] > CEILING else 1.0
+            g = need if need < g else min(1.0, rel * g + (1 - rel) * 1.0)
+            gains[i] = g
+        self.lim_hits = 0.9 * self.lim_hits + 0.1 * float(np.mean(gains < 0.99))
+        # gain constant sur chaque tranche (jamais en retard sur une crête)
+        y = x[:n * sub].reshape(n, sub) * gains[:, None]
+        y = np.concatenate([y.ravel(), x[n * sub:] * g])
+        self.lim_gain = g
+        return np.clip(y, -CEILING, CEILING)
+
+    def _compress(self, x, s, sub=48):
+        """Compresseur : enveloppe par tranches de 1 ms, gain lissé échantillon par
+        échantillon. Sous -50 dB (silence, souffle) le rattrapage s'efface, pour ne
+        pas remonter le bruit de fond."""
+        n = len(x) // sub
+        if n == 0:
+            return x
+        a_att = np.exp(-1.0 / s["attack"])
+        a_rel = np.exp(-1.0 / s["release"])
+        rms = np.sqrt(np.mean(x[:n * sub].reshape(n, sub) ** 2, axis=1) + 1e-12)
+        lvl = 20 * np.log10(rms)
+        gains = np.empty(n)
+        env = self.env_db
+        slope = 1 - 1 / s["ratio"]
+        red = 0.0
+        for i in range(n):
+            a = a_att if lvl[i] > env else a_rel
+            env = a * env + (1 - a) * lvl[i]
+            over = env - s["thr"]
+            g = -over * slope if over > 0 else 0.0
+            red = min(red, g)
+            gate = min(1.0, max(0.0, (env - s.get("gate", -50) + 10) / 10))
+            gains[i] = g + s["makeup"] * gate
+        self.env_db = env
+        self.reduction = 0.7 * self.reduction + 0.3 * red
+        centers = (np.arange(n) + 0.5) * sub
+        g_db = np.interp(np.arange(len(x)), np.concatenate([[0], centers]),
+                         np.concatenate([[self.last_gain], gains]))
+        self.last_gain = gains[-1]
+        return x * 10 ** (g_db / 20)
 
     # enregistrement de comparaison : voix brute et voix égalisée en même temps
     REC_DIR = "/tmp"
@@ -358,6 +470,16 @@ QSlider::add-page:vertical { background: #ff9d3a; border-radius: 4px; }
 """
 
 
+HSLIDER_STYLE = """
+QSlider::groove:horizontal { background: #1a1410; height: 10px; border-radius: 5px;
+                             border: 1px solid #5a4630; }
+QSlider::handle:horizontal { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+    stop:0 #ffffff, stop:0.5 #d0d0d0, stop:1 #8a8a8a);
+    width: 26px; margin: -10px 0; border-radius: 6px; border: 1px solid #333; }
+QSlider::sub-page:horizontal { background: #ff9d3a; border-radius: 5px; }
+"""
+
+
 class Curve(QtWidgets.QWidget):
     """Courbe de réponse de l'égaliseur, de 50 à 4000 Hz."""
 
@@ -410,8 +532,8 @@ class EqWindow(QtWidgets.QWidget):
 
     def __init__(self, engine, parent=None):
         super().__init__(parent)
-        if parent is not None:          # fenêtre à part, mais rattachée au Scope
-            self.setWindowFlags(QtCore.Qt.Window)
+        if parent is not None:          # fenêtre à part, rattachée au Scope, au premier plan
+            self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
         self.engine = engine
         self.setWindowTitle("Égaliseur de la voix d'émission")
         self.setStyleSheet("EqWindow { background: #14100c; } "
@@ -534,6 +656,43 @@ class EqWindow(QtWidgets.QWidget):
         bottom.addWidget(edit)
         lay.addLayout(bottom)
 
+        # COMPRESSEUR : plus de dynamique dans la modulation
+        comp = QtWidgets.QHBoxLayout()
+        self.comp_box = QtWidgets.QCheckBox("COMPRESSEUR (dynamique)")
+        self.comp_box.setToolTip("Remonte les passages faibles, retient les pointes : "
+                                 "voix plus dense et plus présente")
+        self.comp_box.toggled.connect(self._changed)
+        comp.addWidget(self.comp_box)
+        self.comp_sliders = {}
+        for key, name, lo, hi, step, unit in (("thr", "Seuil", -40, 0, 1, " dB"),
+                                              ("ratio", "Taux", 1, 10, 0.5, ":1"),
+                                              ("makeup", "Rattrapage", 0, 20, 1, " dB")):
+            comp.addSpacing(10)
+            comp.addWidget(QtWidgets.QLabel(name))
+            sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            sl.setRange(int(lo / step), int(hi / step))
+            sl.setMinimumWidth(170)
+            sl.setMinimumHeight(34)
+            sl.setStyleSheet(HSLIDER_STYLE)
+            sl.setToolTip(f"{name} : glisser la poignée, ou molette dessus")
+            sl.step = step
+            sl.valueChanged.connect(self._changed)
+            val = QtWidgets.QLabel("")
+            val.setMinimumWidth(52)
+            comp.addWidget(sl, stretch=1)
+            comp.addWidget(val)
+            self.comp_sliders[key] = (sl, val, unit)
+        comp.addSpacing(10)
+        comp.addWidget(QtWidgets.QLabel("Compression"))
+        self.gr_meter = QtWidgets.QProgressBar()
+        self.gr_meter.setRange(0, 20)
+        self.gr_meter.setTextVisible(False)
+        self.gr_meter.setFixedWidth(100)
+        self.gr_meter.setToolTip("Compression en cours (dB). 6 à 12 dB en parlant : bien.")
+        self.gr_meter.setStyleSheet("QProgressBar::chunk { background: #ff9d3a; }")
+        comp.addWidget(self.gr_meter)
+        lay.addLayout(comp)
+
         # comparer : s'enregistrer, puis réécouter avant / après égaliseur
         cmp_row = QtWidgets.QHBoxLayout()
         big = ("QPushButton { font: bold 12pt sans-serif; color: #fff; background: %s; "
@@ -583,6 +742,7 @@ class EqWindow(QtWidgets.QWidget):
 
     def showEvent(self, e):
         self._load()
+        self._fill_presets()            # réglages nommés à jour à chaque ouverture
         self.timer.start(100)
         super().showEvent(e)
         if not e.spontaneous():
@@ -606,18 +766,31 @@ class EqWindow(QtWidgets.QWidget):
         self.hp.setValue(int(s["hp"]))
         self.lp.setValue(int(s["lp"]))
         self.q.setValue(s["q"])
+        self.comp_box.setChecked(s["comp_on"])
+        for key, (sl, _, _) in self.comp_sliders.items():
+            sl.setValue(round(s[key] / sl.step))
+        self.comp_extra = dict(attack=s["attack"], release=s["release"], gate=s["gate"])
         self._loading = False
         self._refresh(s)
 
     def _current(self):
-        return dict(on=self.on_box.isChecked(), gain=self.gain.value() / 2,
-                    hp=self.hp.value(), lp=self.lp.value(), q=self.q.value(),
-                    bands=[sl.value() / 2 for sl in self.band_sliders])
+        s = dict(on=self.on_box.isChecked(), gain=self.gain.value() / 2,
+                 hp=self.hp.value(), lp=self.lp.value(), q=self.q.value(),
+                 bands=[sl.value() / 2 for sl in self.band_sliders],
+                 comp_on=self.comp_box.isChecked(),
+                 **getattr(self, "comp_extra", dict(attack=COMP_DEFAULT["attack"],
+                                                    release=COMP_DEFAULT["release"],
+                                                    gate=COMP_DEFAULT["gate"])))
+        for key, (sl, _, _) in self.comp_sliders.items():
+            s[key] = sl.value() * sl.step
+        return s
 
     def _refresh(self, s):
         for lab, v in zip(self.band_labels, s["bands"]):
             lab.setText(f"{v:+g} dB" if v else "0 dB")
         self.gain_label.setText(f"{s['gain']:+g} dB" if s["gain"] else "0 dB")
+        for key, (sl, val, unit) in self.comp_sliders.items():
+            val.setText(f"{s[key]:g}{unit}")
         self.curve.set_settings(s)
 
     def _changed(self, *_):
@@ -685,7 +858,8 @@ class EqWindow(QtWidgets.QWidget):
             return
         s = self._current()
         mine[name] = dict(hp=s["hp"], lp=s["lp"], gain=s["gain"], q=s["q"],
-                          bands=s["bands"])
+                          bands=s["bands"], comp_on=s["comp_on"], thr=s["thr"],
+                          ratio=s["ratio"], makeup=s["makeup"])
         save_my_presets(mine)
         self._fill_presets()
         self.rec_info.setText(f"★ « {name} » enregistré")
@@ -710,6 +884,10 @@ class EqWindow(QtWidgets.QWidget):
             if p:
                 self._loading = True
                 self.q.setValue(p.get("q", 1.2))
+                if "comp_on" in p:
+                    self.comp_box.setChecked(p["comp_on"])
+                    for key, (sl, _, _) in self.comp_sliders.items():
+                        sl.setValue(round(p[key] / sl.step))
                 self._loading = False
         else:
             p = PRESETS.get(name)
@@ -729,6 +907,7 @@ class EqWindow(QtWidgets.QWidget):
     def _tick(self):
         if EqEngine._mtime() != self.file_mtime:     # fichier modifié à la main
             self._load()
+        self.gr_meter.setValue(min(20, int(round(-self.engine.reduction))))
         lvl = min(100, int(self.engine.level * 100))
         self.meter.setValue(lvl)
         color = "#e53935" if lvl > 90 else ("#ffd54a" if lvl > 70 else "#3ddc84")

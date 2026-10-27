@@ -198,18 +198,19 @@ class VintagePowerMeter(VintageSMeter):
         self.watts_peak = 0.0
 
     def frac(self, watts):
-        # échelle très dilatée en bas : la moindre puissance réelle fait bouger l'aiguille
-        return (max(0.0, min(self.PO_MAX, watts)) / self.PO_MAX) ** 0.4
+        # échelle linéaire, comme la barre Po de l'IC-7300 : même lecture que la radio
+        return max(0.0, min(self.PO_MAX, watts)) / self.PO_MAX
 
     def _tick(self):
-        # galva de puissance très vif : monte presque d'un coup, retombe vite
-        speed = 0.8 if self.target > self.value else 0.3
+        # comme la barre Po de la radio : monte vite, redescend un peu moins vite
+        speed = 0.6 if self.target > self.value else 0.25
         self.value += (self.target - self.value) * speed
         self.update()
 
     def setValue(self, watts):
         """Reçoit des watts ; l'aiguille travaille en « brut » 0–241 comme le S-mètre."""
-        self.watts_peak = max(self.watts_peak * 0.98, watts)
+        # valeur du moment (pas de maintien de la pointe) : retombe de moitié en ~0,2 s
+        self.watts_peak = max(self.watts_peak * 0.85, watts)
         self.target = self.frac(watts) * S9_PLUS_60
 
     def reset(self):
@@ -290,7 +291,7 @@ class VintagePowerMeter(VintageSMeter):
         arc(r_in, 0, 1, ink, 1)
         for watts in (0, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100):
             f = self.frac(watts)
-            big = watts in (0, 2, 5, 10, 20, 30, 50, 70, 100)
+            big = watts in (0, 10, 20, 30, 50, 70, 100)
             color = red if watts >= 80 else ink
             p.setPen(QtGui.QPen(color, 1.4 if big else 1))
             p.drawLine(point(f, r_out), point(f, r_out + (9 if big else 5)))

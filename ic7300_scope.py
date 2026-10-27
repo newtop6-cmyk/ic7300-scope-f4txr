@@ -5510,8 +5510,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_galva.set_po(watts)
         self.power_meter.setValue(watts)
         now = time.monotonic()
-        if watts >= self.po_peak_w or now - self.po_peak_t > 4.0:
-            self.po_peak_w, self.po_peak_t = watts, now
+        # puissance du moment, comme l'écran de la radio (plus de pointe tenue 4 s)
+        self.po_peak_w, self.po_peak_t = max(watts, self.po_peak_w * 0.85), now
         self.po_value.setText(f"{self.po_peak_w:.0f} W" if self.po_peak_w >= 1 else "")
 
     def on_drain(self, raw):
