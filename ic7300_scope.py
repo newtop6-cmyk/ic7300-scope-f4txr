@@ -2228,11 +2228,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fr_full = False                    # WATERFALL FR : bande entière (mode fixe)
         self.fr_full_band = None
         self.fr_toggle = ToggleSwitch(
-            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = waterfall plein écran "
-            "tout de suite ; RETOUR le réduit en veille, il se rouvre tout seul dès qu'une "
-            "station française est trouvée sur la bande (RBN, DX Summit, texte décodé, scan QSO FR par récepteur Internet). "
-            "Dans l'écran : clic sur un signal = la radio s'y cale. En haut = arrêt. "
-            "Clic droit : ouvrir l'écran tout de suite.")
+            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = waterfall plein écran avec "
+            "les stations françaises de la bande (RBN, DX Summit, texte décodé, scan QSO FR "
+            "par récepteur Internet) ; RETOUR le réduit (la recherche continue, les nouvelles "
+            "stations sont signalées en bas du Scope). Dans l'écran : le curseur se colle sur "
+            "les signaux, clic = la radio s'y cale. En haut = arrêt. "
+            "Clic droit : rouvrir l'écran.")
         self.fr_toggle.toggled.connect(self._fr_toggled)
         self.fr_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.fr_toggle.customContextMenuRequested.connect(self._fr_open_now)
@@ -5126,19 +5127,22 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(400, hide_others)
 
     def _fr_reduce(self):
-        """RETOUR : écran réduit, veille maintenue (il se rouvrira tout seul)."""
+        """RETOUR : écran réduit, la recherche continue (clic droit sur
+        l'interrupteur pour le rouvrir)."""
         self.fr_screen.hide()
         self._restore_windows(self.fr_hidden)
         self.fr_hidden = []
         self.statusBar().showMessage(
-            "WATERFALL FR réduit : il se rouvrira à la prochaine station française", 6000)
+            "WATERFALL FR réduit : clic droit sur l'interrupteur pour le rouvrir", 6000)
 
     def _fr_found(self, s):
+        """Nouvelle station française : seulement signalée (l'écran ne s'ouvre
+        plus tout seul, à la demande de l'utilisateur le 27/10)."""
         if not self.fr_toggle.down:
             return
         self.statusBar().showMessage(
-            f"Station française trouvée : {s['call']} sur {s['hz'] / 1000:.1f} kHz", 8000)
-        self._fr_show()
+            f"Station française trouvée : {s['call']} sur {s['hz'] / 1000:.1f} kHz "
+            "(clic droit sur WATERFALL FR pour voir)", 10000)
 
     def _fr_tune(self, hz, mode):
         """Clic dans l'écran WATERFALL FR : calage immédiat et précis."""

@@ -41,8 +41,13 @@ NEW_S = 20                      # « nouvelle » : clignote pendant 20 s
 SNAP_KHZ = 0.6                  # clic à moins de 0,6 kHz d'une station : on se cale sur elle
 BLEU, BLANC, ROUGE = "#3d7dff", "#f2f2f2", "#ff4040"
 VERT = "#3ddc84"                # QSO français trouvé par le scan
+TX_ON, TX_OFF = "#ff3030", "#5a1414"    # indicatif de l'émetteur : rouge clignotant
+RX_COLOR = "#ffd54a"                    # indicatif de la station qui reçoit : jaune
+QSO_PAIR = re.compile(r"\b([A-Z0-9]{1,3}[0-9][A-Z]{1,4})\s+(?:DE|DU|DEL)\s+"
+                      r"([A-Z0-9]{1,3}[0-9][A-Z]{1,4})\b")
 SCAN_COLOR = "#ff4fd8"          # curseur du scan
-DAY_DIR = os.path.expanduser("~/.config/ic7300-scope")     # scan-AAAAMMJJ.jsonl : le jour
+DAY_DIR = os.path.expanduser("~/.config/ic7300-scope")
+SHOT_DIR = os.path.expanduser("~/Images/Waterfall FR")     # captures d'écran     # scan-AAAAMMJJ.jsonl : le jour
 
 BANDS = [("160m", 1_810_000, 2_000_000), ("80m", 3_500_000, 3_800_000),
          ("60m", 5_351_500, 5_366_500), ("40m", 7_000_000, 7_200_000),
@@ -210,6 +215,9 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.mouse_khz = None
         self.selected = None                # indicatif choisi d'un clic (surligné)
         self.marks = []                     # objets graphiques des stations
+        self.mark_labels = []               # étiquettes du waterfall (clignotement)
+        self.list_labels = []               # lignes de la liste (clignotement)
+        self.blink_on = True
         self.src_state = {}
         self.text_tail = ""
         self.known = set()                  # stations déjà signalées (ouverture automatique)
@@ -230,6 +238,9 @@ class WaterfallFrance(QtWidgets.QWidget):
         # fond radar animé (balai, traînée, cercles), comme le fond FT8
         self.radar_timer = QtCore.QTimer(self)
         self.radar_timer.timeout.connect(self.update)
+        # émetteurs en rouge clignotant (2 fois par seconde)
+        self.blink_timer = QtCore.QTimer(self)
+        self.blink_timer.timeout.connect(self._blink)
 
     # --- construction --------------------------------------------------------
     def _build(self):
@@ -328,6 +339,16 @@ class WaterfallFrance(QtWidgets.QWidget):
             plot.addItem(a, ignoreBounds=True)
             plot.addItem(b, ignoreBounds=True)
             b.setVisible(False)
+        # bande du signal sous le curseur aimanté (vert pâle)
+        self._snap_band = None
+        self.snap_bands = []
+        for plot in (self.spec, self.wfp):
+            band = pg.LinearRegionItem(movable=False, brush=(61, 220, 132, 55),
+                                       pen=pg.mkPen(VERT))
+            band.setZValue(30)
+            band.setVisible(False)
+            plot.addItem(band, ignoreBounds=True)
+            self.snap_bands.append(band)
         self.scan_lines = [pg.InfiniteLine(angle=90, pen=pg.mkPen(
             SCAN_COLOR, width=2, style=QtCore.Qt.DashLine)) for _ in range(2)]
         for plot, line in zip((self.spec, self.wfp), self.scan_lines):
@@ -367,7 +388,9 @@ class WaterfallFrance(QtWidgets.QWidget):
             f"<span style='color:{BLEU}'>■</span> RBN (skimmers)  "
             f"<span style='color:{BLANC}'>■</span> DX Summit  "
             f"<span style='color:{ROUGE}'>■</span> décodé ici  "
-            f"<span style='color:{VERT}'>■</span> QSO FR (scan)")
+            f"<span style='color:{VERT}'>■</span> QSO FR (scan)<br>"
+            f"<b><span style='color:{TX_ON}'>ÉMETTEUR</span></b> (clignote) ← "
+            f"<b><span style='color:{RX_COLOR}'>station qui reçoit</span></b>")
         legend.setStyleSheet("font: 10pt sans-serif;")
         side.addWidget(legend)
         middle.addLayout(side)
@@ -396,6 +419,8 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.tune_label = QtWidgets.QLabel(
             "Clic sur un signal : la radio s'y cale (BLU : bord du signal, CW : pointe)")
         self.tune_label.setStyleSheet("font: 11pt sans-serif; color: #a0a0a0;")
+        for label in (self.tune_label, self.scan_label):      # un long texte n'élargit pas l'écran
+            label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         left.addWidget(self.tune_label)
         bottom.addLayout(left)
         bottom.addStretch()
@@ -404,6 +429,11 @@ class WaterfallFrance(QtWidgets.QWidget):
                                     "prochaine station française trouvée)")
         self.back_button.clicked.connect(self.back.emit)
         bottom.addWidget(self.back_button)
+        bottom.addSpacing(6)
+        self.shot_button = BallButton("CAPTURE", diameter=84)
+        self.shot_button.setToolTip(f"Capture de cet écran (image PNG) dans {SHOT_DIR}")
+        self.shot_button.clicked.connect(self.capture)
+        bottom.addWidget(self.shot_button)
         bottom.addStretch()
         self.span_buttons = QtWidgets.QButtonGroup(self)
         lab = QtWidgets.QLabel("Affichage")
@@ -563,9 +593,16 @@ class WaterfallFrance(QtWidgets.QWidget):
             + (f"QSO FRANÇAIS ({round(r['prob'] * 100)} %)" if r["fr"]
                else f"{lang} ({round(r['prob'] * 100)} %)"))
         if r["fr"]:
+            # « F5ABC de F4XYZ » entendu : F4XYZ émet, F5ABC reçoit
+            spoken = (r.get("text") or "").upper()
+            pair = QSO_PAIR.search(spoken)
+            calls = TEXT_CALL.findall(spoken)
+            tx = pair.group(2) if pair else (calls[-1] if calls else None)
+            rx = pair.group(1) if pair else None
             self.add_spot({"call": f"QSO FR {round(r['hz'] / 1000)}", "hz": r["hz"],
                            "mode": r["mode"], "snr": None, "src": "SCAN", "t": r["t"],
-                           "info": (r.get("text") or "")[:80], "by": "KiwiSDR"})
+                           "info": (r.get("text") or "")[:80], "by": "KiwiSDR",
+                           "tx": tx or "QSO FR", "rx": rx or "?"})
         self._draw_scan()
 
     def _draw_scan(self):
@@ -707,17 +744,19 @@ class WaterfallFrance(QtWidgets.QWidget):
         else:
             self.count_label.setText("hors bande radioamateur")
         self.listw.clear()
+        self.list_labels = []
         for s in stations:
-            age = int((now - s["t"]) // 60)
-            age_txt = "à l'instant" if age < 1 else f"{age} min"
-            mode = s["mode"] or "?"
-            snr = f"{s['snr']:>3} dB" if s["snr"] is not None else "      "
-            item = QtWidgets.QListWidgetItem(
-                f"{fmt_khz(s['hz'] / 1000):>10}  {s['call']:<10} {mode:<5}{snr}  {age_txt}")
+            tx, rx = self._who(s)
+            item = QtWidgets.QListWidgetItem()
             item.setData(QtCore.Qt.UserRole, s["call"])
-            item.setForeground(QtGui.QColor(self._color(s)))
-            item.setToolTip(f"{s['call']} — {s['src']}, {s['n']} spot(s), "
-                            f"dernier par {s['by']} {s['info']}")
+            item.setToolTip(f"Émetteur {tx} (rouge) — reçu par {rx} (jaune) — {s['src']}, "
+                            f"{s['n']} spot(s) {s['info']}")
+            label = QtWidgets.QLabel(self._row_html(s, self.blink_on))
+            label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+            label.setStyleSheet("font: bold 12pt monospace; background: transparent; "
+                                "padding: 2px 4px;")
+            item.setSizeHint(QtCore.QSize(10, label.sizeHint().height() + 2))
+            self.list_labels.append((label, s))
             if now - s["first"] < NEW_S and int(now) % 2:
                 item.setBackground(QtGui.QColor("#4a3a00"))     # nouvelle : clignote
             if self.freq_hz and abs(s["hz"] - self.freq_hz) < 500:
@@ -725,6 +764,7 @@ class WaterfallFrance(QtWidgets.QWidget):
             if s["call"] == self.selected:
                 item.setBackground(QtGui.QColor("#1f4f8f"))     # choisie d'un clic
             self.listw.addItem(item)
+            self.listw.setItemWidget(item, label)
             if s["call"] == self.selected:
                 self.listw.scrollToItem(item)
         if not stations:
@@ -742,6 +782,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         for plot, item in self.marks:
             plot.removeItem(item)
         self.marks = []
+        self.mark_labels = []
         if self.edges is None:
             return
         if stations is None:
@@ -769,15 +810,56 @@ class WaterfallFrance(QtWidgets.QWidget):
                 line.setOpacity(0.85 if fresh else 0.45)
                 plot.addItem(line, ignoreBounds=True)
                 self.marks.append((plot, line))
-            calls = [s["call"] for s in sorted(group, key=lambda s: -s["t"])]
-            text = "\n".join(calls[:4]) + (f"\n+{len(calls) - 4}" if len(calls) > 4 else "")
-            label = pg.TextItem(text, color=color, anchor=(0.5, 0),
-                                fill=pg.mkBrush(0, 0, 0, 170))
+            group = sorted(group, key=lambda s: -s["t"])
+            label = pg.TextItem(html=self._mark_html(group, self.blink_on), anchor=(0.5, 0),
+                                fill=pg.mkBrush(0, 0, 0, 185))
             label.setFont(font)
             label.setPos(khz, 4 + (i % 3) * 24)      # en quinconce : pas de chevauchement
             label.setZValue(20)
             self.wfp.addItem(label, ignoreBounds=True)
             self.marks.append((self.wfp, label))
+            self.mark_labels.append((label, group))
+
+    # --- émetteur (rouge clignotant) et récepteur (jaune) ---------------------
+    def _who(self, s):
+        """(émetteur, récepteur) d'une station entendue."""
+        tx = s.get("tx") or (s["call"] if not s["call"].startswith("QSO FR") else "?")
+        rx = s.get("rx") or s.get("by") or "?"
+        return tx, rx
+
+    def _tx_color(self, on):
+        return TX_ON if on else TX_OFF
+
+    def _mark_html(self, group, on):
+        rows = []
+        for s in group[:4]:
+            tx, rx = self._who(s)
+            rows.append(f"<span style='color:{self._tx_color(on)}'>{tx}</span>"
+                        f"<span style='color:#8a8f98'> ← </span>"
+                        f"<span style='color:{RX_COLOR}; font-size:10pt'>{rx}</span>")
+        if len(group) > 4:
+            rows.append(f"<span style='color:#cfcfcf'>+{len(group) - 4}</span>")
+        return "<div style='text-align:center; font-weight:bold'>" + "<br>".join(rows) + "</div>"
+
+    def _row_html(self, s, on):
+        tx, rx = self._who(s)
+        age = int((time.time() - s["t"]) // 60)
+        age_txt = "à l'instant" if age < 1 else f"{age} min"
+        snr = f" {s['snr']} dB" if s["snr"] is not None else ""
+        return (f"<span style='color:#cfcfcf'>{fmt_khz(s['hz'] / 1000)}</span>&nbsp; "
+                f"<span style='color:{self._tx_color(on)}'>{tx}</span>"
+                f"<span style='color:#8a8f98'> ← </span>"
+                f"<span style='color:{RX_COLOR}'>{rx}</span>&nbsp; "
+                f"<span style='color:{self._color(s)}; font-size:10pt'>"
+                f"{s['mode'] or ''}{snr} · {age_txt}</span>")
+
+    def _blink(self):
+        """Clignotement des émetteurs (rouge) : 2 fois par seconde."""
+        self.blink_on = not self.blink_on
+        for label, group in self.mark_labels:
+            label.setHtml(self._mark_html(group, self.blink_on))
+        for label, s in self.list_labels:
+            label.setText(self._row_html(s, self.blink_on))
 
     def _nearest(self, khz):
         best = None
@@ -821,17 +903,34 @@ class WaterfallFrance(QtWidgets.QWidget):
         if khz is None or self.edges is None:
             for c in self.cursor:
                 c.setVisible(False)
+            for band in self.snap_bands:
+                band.setVisible(False)
             self.cursor_text.setVisible(False)
             self.mouse_khz = None
             return
         self.mouse_khz = khz
+        # curseur aimanté : dans la largeur d'un signal, il se colle sur sa
+        # fréquence de calage (bord BLU, pointe CW) et la bande du signal s'éclaire
+        hz, mode, what = self._snap(khz)
+        snapped = what in ("signal BLU", "pointe CW")
+        at = hz / 1000 if snapped else khz
         for c in self.cursor:
-            c.setPos(khz)
+            c.setPos(at)
+            c.setPen(pg.mkPen(VERT if snapped else "#ffffffc0", width=2 if snapped else 1,
+                              style=QtCore.Qt.SolidLine if snapped else QtCore.Qt.DashLine))
             c.setVisible(True)
+        for band in self.snap_bands:
+            if snapped and self._snap_band:
+                band.setRegion((self._snap_band[0] / 1000, self._snap_band[1] / 1000))
+            band.setVisible(bool(snapped and self._snap_band))
         s = self._nearest(khz)
-        text = f" {fmt_khz(khz)} kHz "
+        if snapped:
+            text = f" ▶ {mode} {fmt_khz(hz / 1000)} kHz \n clic : se caler ({what}) "
+        else:
+            text = f" {fmt_khz(khz)} kHz "
         if s:
             text += f"\n {s['call']}  {s['mode'] or ''}  ({s['src']}) "
+        khz = at
         self.cursor_text.setText(text)
         y = self.wfp.vb.mapSceneToView(pos).y() if in_wf else HISTORY * 0.3
         lo, hi = self.edges
@@ -872,6 +971,7 @@ class WaterfallFrance(QtWidgets.QWidget):
     def _snap(self, khz):
         """Signal sous le clic, d'après le spectre de la radio → (Hz, mode, quoi)."""
         hz = int(round(khz * 100)) * 10
+        self._snap_band = None
         if self.avg is None or self.edges is None:
             return hz, "", "fréquence"
         lo, hi = self.edges
@@ -900,6 +1000,7 @@ class WaterfallFrance(QtWidgets.QWidget):
             b -= 1
         f_lo, f_hi = lo + a * step, lo + (b + 1) * step
         width = f_hi - f_lo
+        self._snap_band = (f_lo, f_hi)
         if width <= max(600, 3 * step):              # étroit : CW, sur la pointe
             idx = np.arange(a, b + 1)
             w = 10 ** (spec[a:b + 1] / 10)
@@ -933,15 +1034,45 @@ class WaterfallFrance(QtWidgets.QWidget):
             return True                         # molette sans effet sur le VFO
         return super().eventFilter(obj, event)
 
+    # --- capture d'écran -------------------------------------------------------
+    def capture(self):
+        """Image de tout l'écran WATERFALL FR, puis flash blanc de confirmation."""
+        image = self.grab()
+        path = os.path.join(SHOT_DIR, time.strftime("waterfall-fr-%Y%m%d-%H%M%S.png"))
+        try:
+            os.makedirs(SHOT_DIR, exist_ok=True)
+            ok = image.save(path, "PNG")
+        except OSError:
+            ok = False
+        self.tune_label.setText(f"Capture enregistrée : Images/Waterfall FR/{os.path.basename(path)}"
+                                if ok
+                                else "Capture impossible (dossier Images ?)")
+        if ok:
+            flash = QtWidgets.QWidget(self)
+            flash.setStyleSheet("background: white;")
+            flash.setGeometry(self.rect())
+            effect = QtWidgets.QGraphicsOpacityEffect(flash)
+            flash.setGraphicsEffect(effect)
+            flash.show()
+            anim = QtCore.QPropertyAnimation(effect, b"opacity", flash)
+            anim.setDuration(450)
+            anim.setStartValue(0.85)
+            anim.setEndValue(0.0)
+            anim.finished.connect(flash.deleteLater)
+            anim.start()
+        return path if ok else None
+
     # --- fond radar ------------------------------------------------------------
     SWEEP_S = 5.0                           # un balayage gauche → droite
 
     def showEvent(self, event):
         self.radar_timer.start(50)
+        self.blink_timer.start(500)
         super().showEvent(event)
 
     def hideEvent(self, event):
         self.radar_timer.stop()
+        self.blink_timer.stop()
         super().hideEvent(event)
 
     def paintEvent(self, _):
