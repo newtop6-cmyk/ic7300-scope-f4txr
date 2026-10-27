@@ -42,10 +42,10 @@ def vox_number(text):
     words = re.findall(r"[a-z0-9àâéèêëîïôöùûüç]+", text.lower())
     if len(words) == 1:
         m = re.fullmatch(r"([a-z]+)(\d)", words[0])
-        if m and m.group(1) in VOX_WORDS:
+        if m and (m.group(1) in VOX_WORDS or m.group(1) == "voix"):
             return int(m.group(2))
         return None
-    if len(words) == 2 and words[0] in VOX_WORDS:
+    if len(words) == 2 and (words[0] in VOX_WORDS or words[0] == "voix"):
         return NUM_WORDS.get(words[1])
     return None
 

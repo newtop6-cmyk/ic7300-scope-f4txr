@@ -7119,8 +7119,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if need and not self.mot_vox.running:
             mic = self._vox_mic()
             if mic:
+                self.mot_vox.start(mic)         # d'abord démarrer : sinon « micro perdu »
                 self._mot_vox_tick()
-                self.mot_vox.start(mic)
                 self.mot_vox_timer.start(100)
         elif not need and self.mot_vox.running:
             self.mot_vox_timer.stop()
