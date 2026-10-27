@@ -6652,7 +6652,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rtty_toggle.setDown(False)
         if self.fr_toggle.down:
             self.fr_toggle.setDown(False)
-        self.screen_rec.stop()              # vidéo en cours : refermée proprement
+        self.screen_rec.stop(wait=True)     # vidéo en cours : refermée et assemblée
         self.loupe.stop()
         self.loupe.close()
         self.demo_finger.stop()             # la flèche de la souris revient
