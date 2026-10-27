@@ -5156,8 +5156,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sync_mode_buttons()
             self.civ.set_mode(mode)
             self._update_markers()
-        self.tune_to(hz)
+        self._fr_set(hz)
         self._fr_voice_calage()
+
+    def _fr_set(self, hz):
+        """Fréquence choisie dans WATERFALL FR : elle devient la référence du calage
+        voix (pas de retour forcé au kHz rond : la station peut être à 14 131,48)."""
+        self.ssb_target = hz                    # notre propre réglage, pas « à la main »
+        self.ssb_anchor = hz
+        self.tune_to(hz)
 
     def _fr_fine(self, hz):
         """Glisser / molette dans WATERFALL FR : la radio suit, au hertz près."""
@@ -5166,15 +5173,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if not getattr(self, "_fr_fine_on", False):
             self._fr_fine_on = True
             self._manual_tuning()               # une fois par réglage : recherches arrêtées
-        self.tune_to(hz)
+        self._fr_set(hz)
 
     def _fr_voice_calage(self):
         """Fin du réglage : en BLU, le CALAGE AUTO BLU écoute la voix et ajuste
-        la fréquence au plus juste (voix naturelle)."""
+        la fréquence au plus juste (voix naturelle), jusqu'à ± PULL_MAX autour
+        de la fréquence choisie."""
         self._fr_fine_on = False
         if base_mode(self.mode_combo.currentText()) in ("LSB", "USB") \
                 and self.ssb_auto.isChecked():
-            QtCore.QTimer.singleShot(300, lambda: self._start_pull(True))
+            def pull():
+                self._start_pull(True)
+                self.ssb_anchor = self.freq_hz  # référence : la fréquence choisie
+            QtCore.QTimer.singleShot(300, pull)
 
     def _ft8_keep_map_below(self):
         """Quand WSJT-X est au premier plan, la carte doit être juste dessous
