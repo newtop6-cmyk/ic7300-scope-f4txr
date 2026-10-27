@@ -2307,7 +2307,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda pos, n=n: self._vox_msg_menu(n, pos))
             self.vox_msg_buttons[n] = button
         self.vox_msg_armed = set()          # messages en attente de « VOX n »
-        self.vox_msg_dry = False            # ESSAI : tout comme en vrai, sans émettre
+        # ESSAI : tout comme en vrai, sans émettre ; gardé d'une session à l'autre,
+        # actif par défaut (on l'enlève exprès pour émettre pour de vrai)
+        self.vox_msg_dry = self._vox_dry_load()
         self.vox_msg_dry_auto = set()       # voix pas apprise : essai à blanc d'office
         self.vox_match_detail = ""          # dernier résultat de reconnaissance
         self.vox_seg_time = 0.0
@@ -5286,6 +5288,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if chosen is dry:
             self.vox_msg_dry = dry.isChecked()
+            self._vox_dry_save()
             self._vox_msg_show()
             self.statusBar().showMessage(
                 "Mode ESSAI : rien n'est émis, le message est joué dans le casque ; "
@@ -5339,6 +5342,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         kept = self.voice_cmds.save(n, clips)
         limit = self.voice_cmds.limit.get(n, 0)
+        self._vox_log(f"apprentissage VOX {n} terminé : {kept} exemples, tolérance {limit:.1f}")
         QtWidgets.QMessageBox.information(
             self, f"« VOX {n} » appris",
             f"Ta voix pour « VOX {n} » est apprise ({kept} exemples, tolérance "
@@ -5353,6 +5357,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._vox_learn_text("(trop court, recommence)")
                 return
             clips.append(clip)
+            self._vox_log(f"apprentissage VOX {n} : exemple {len(clips)}/{LEARN_COUNT} "
+                          f"({len(clip) / 32000:.1f} s)")
             if len(clips) >= LEARN_COUNT:
                 self._vox_learn_end()
             else:
@@ -5482,6 +5488,21 @@ class MainWindow(QtWidgets.QMainWindow):
                                      f"({length:.1f} s)")
         self._vox_msg_show()
         QtCore.QTimer.singleShot(300, lambda: self._vox_msg_play(n))  # radio en émission d'abord
+
+    VOX_DRY_FILE = os.path.join(os.path.dirname(STATE_FILE), "vox-essai.json")
+
+    def _vox_dry_load(self):
+        try:
+            return bool(json.load(open(self.VOX_DRY_FILE)).get("essai", True))
+        except (OSError, ValueError):
+            return True
+
+    def _vox_dry_save(self):
+        try:
+            with open(self.VOX_DRY_FILE, "w") as f:
+                json.dump({"essai": self.vox_msg_dry}, f)
+        except OSError:
+            pass
 
     VOX_LOG = os.path.expanduser("~/.cache/ic7300-scope/vox-essais.log")
 
