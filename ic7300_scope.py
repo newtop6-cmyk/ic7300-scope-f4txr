@@ -124,7 +124,7 @@ MESSAGE_FILE = os.path.join(os.path.dirname(STATE_FILE), "message-cw.txt")
 DEFAULT_MESSAGE = "CQ CQ CQ DE F4TXR F4TXR K"
 # VOX1, VOX2… : messages vocaux enregistrés au micro. Le poussoir met le message
 # en attente ; il part seulement quand on dit « VOX 1 » (« VOX 2 »…) au micro.
-VOX_MSG_NUMBERS = (1,)          # VOX2 plus tard : (1, 2)
+VOX_MSG_NUMBERS = (1, 2, 3, 4)  # un poussoir par message (VOX5 : ajouter 5)
 VOX_MSG_MAX_S = 120             # enregistrement arrêté tout seul au-delà
 
 
@@ -263,6 +263,26 @@ PUSH_3D = (
     " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0d6b16,"
     " stop:0.4 #1fae2c, stop:0.8 #3ddc4a, stop:1 #8dff8d); }")
 PUSH_3D_MODE = PUSH_3D          # bande / mode choisis : vert aussi
+
+# poussoirs VOX1… : jaunes en relief (reflet en haut, ombre en bas) ; enfoncé = creusé
+PUSH_YELLOW_3D = (
+    "QPushButton { color: #2a1c00; font-weight: bold; font-size: 9pt; border-radius: 9px;"
+    " border-style: solid; border-width: 2px 3px 6px 3px;"
+    " border-top-color: #fff6b0; border-left-color: #f5d94a;"
+    " border-bottom-color: #6b4e00; border-right-color: #9a7400;"
+    " padding: 1px 2px;"
+    " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fffbe0,"
+    " stop:0.12 #ffe95c, stop:0.5 #ffd21a, stop:0.85 #e0a800, stop:1 #b88600); }"
+    "QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+    " stop:0 #ffffff, stop:0.12 #fff07a, stop:0.5 #ffdc3a, stop:0.85 #ebb612,"
+    " stop:1 #c49400); }"
+    "QPushButton:pressed, QPushButton:checked {"
+    " border-width: 6px 3px 2px 3px;"
+    " border-top-color: #5a4100; border-left-color: #7a5a00;"
+    " border-bottom-color: #fff2a0; border-right-color: #f0d040;"
+    " padding: 3px 2px 0px 2px;"
+    " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #a87c00,"
+    " stop:0.4 #e0b000, stop:1 #ffe04a); }")
 
 
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
@@ -5147,21 +5167,26 @@ class MainWindow(QtWidgets.QMainWindow):
         """Poussoirs : orange clignotant = en attente de « VOX n », rouge = émission."""
         self.vox_msg_blink = not self.vox_msg_blink
         for n, button in self.vox_msg_buttons.items():
+            # « :checked » aussi : sinon le fond du bouton enfoncé masquerait la couleur
+            over = "QPushButton, QPushButton:checked, QPushButton:hover { %s }"
             if self.vox_msg_sending == n:
-                style = "QPushButton { background: #c62828; color: white; }"
+                style = over % "background: #c62828; color: white;"
                 text = "ÉMET"
             elif n in self.vox_msg_armed:
-                style = ("QPushButton { background: %s; color: #151515; }"
-                         % ("#ff9a1f" if self.vox_msg_blink else "#7a4a10"))
+                style = over % ("background: %s; color: #151515; font-size: 8pt;"
+                                % ("#ff8a00" if self.vox_msg_blink else "#8a5200"))
                 text = f"DIS\nVOX {n}"
             elif self.vox_msg_rec and self.vox_msg_rec[0] == n:
-                style = "QPushButton { background: #8a0000; color: white; }"
+                style = over % "background: #8a0000; color: white;"
                 text = "🎙 REC"
+            elif self.vox_learn is not None and self.vox_learn[0] == n:
+                style = over % "background: #1e6fd0; color: white; font-size: 8pt;"
+                text = "🗣\nAPPREND"
             else:
                 style, text = "", f"VOX{n}"
             if button.text() != text:
                 button.setText(text)
-            full = PUSH_3D + "QPushButton { font-size: 8pt; }" + style
+            full = PUSH_YELLOW_3D + style
             if button.styleSheet() != full:
                 button.setStyleSheet(full)
             if button.isChecked() != (n in self.vox_msg_armed):
