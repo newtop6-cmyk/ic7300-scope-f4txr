@@ -12,6 +12,12 @@ class BallButton(QtWidgets.QAbstractButton):
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self._hover = False
+        self.red = False                # boule rouge (ex. REC pendant l'enregistrement)
+
+    def setRed(self, red):
+        if red != self.red:
+            self.red = red
+            self.update()
 
     def enterEvent(self, e):
         self._hover = True
@@ -40,11 +46,18 @@ class BallButton(QtWidgets.QAbstractButton):
         # corps de la boule : dégradé bleu, lumière en haut à gauche
         body = QtGui.QRadialGradient(QtCore.QPointF(c.x() - d * 0.18, c.y() - d * 0.22),
                                      d * 0.75)
-        light = "#7fc4ff" if self._hover else "#5fb0ff"
-        body.setColorAt(0.0, QtGui.QColor(light))
-        body.setColorAt(0.35, QtGui.QColor("#1e6fe0" if not down else "#1a5fc4"))
-        body.setColorAt(0.8, QtGui.QColor("#0a2f86"))
-        body.setColorAt(1.0, QtGui.QColor("#04143d"))
+        if self.red:
+            light = "#ffa0a0" if self._hover else "#ff7a7a"
+            body.setColorAt(0.0, QtGui.QColor(light))
+            body.setColorAt(0.35, QtGui.QColor("#e02a2a" if not down else "#c41f1f"))
+            body.setColorAt(0.8, QtGui.QColor("#861010"))
+            body.setColorAt(1.0, QtGui.QColor("#3d0404"))
+        else:
+            light = "#7fc4ff" if self._hover else "#5fb0ff"
+            body.setColorAt(0.0, QtGui.QColor(light))
+            body.setColorAt(0.35, QtGui.QColor("#1e6fe0" if not down else "#1a5fc4"))
+            body.setColorAt(0.8, QtGui.QColor("#0a2f86"))
+            body.setColorAt(1.0, QtGui.QColor("#04143d"))
         p.setBrush(body)
         p.setPen(QtGui.QPen(QtGui.QColor(2, 10, 35, 200), 1.2))
         p.drawEllipse(ball)

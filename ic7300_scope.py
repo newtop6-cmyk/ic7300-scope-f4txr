@@ -35,6 +35,7 @@ from demo_finger import DemoFinger, SIZES as DEMO_SIZES
 from ball_button import BallButton
 from rtty_screen import RttyScreen
 from wf_france import WaterfallFrance
+from screen_rec import ScreenRecorder
 from sstv_window import SstvWindow
 import sstv as sstv_modes
 from sstv_watch import SstvWatch
@@ -2220,6 +2221,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # française ; RETOUR le réduit. Le VFO ne bouge que sur un clic dans l'écran.
         self.fr_screen = WaterfallFrance()
         self.fr_screen.set_audio_source(args.source)    # indicatif dit à la voix
+        # REC : vidéo de l'écran + son du trafic (micro, réception, émission)
+        self.screen_rec = ScreenRecorder()
+        self.screen_rec.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
+        self.fr_screen.set_recorder(self.screen_rec)
         self.fr_screen.back.connect(self._fr_reduce)
         self.fr_screen.span.connect(self._fr_span)
         self.fr_screen.tune.connect(self._fr_tune)
@@ -6647,6 +6652,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rtty_toggle.setDown(False)
         if self.fr_toggle.down:
             self.fr_toggle.setDown(False)
+        self.screen_rec.stop()              # vidéo en cours : refermée proprement
         self.loupe.stop()
         self.loupe.close()
         self.demo_finger.stop()             # la flèche de la souris revient

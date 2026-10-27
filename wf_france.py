@@ -283,6 +283,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.voice = VoiceCall()
         self.voice.heard.connect(self._voice_heard)
         self.audio_source = None
+        self.recorder = None                # enregistreur vidéo (REC), donné par le Scope
         self.scan = KiwiScan()
         self._build()
         self.scan.status.connect(self.scan_label.setText)
@@ -515,6 +516,18 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.shot_button.setToolTip(f"Capture de cet écran (image PNG) dans {SHOT_DIR}")
         self.shot_button.clicked.connect(self.capture)
         bottom.addWidget(self.shot_button)
+        bottom.addSpacing(6)
+        # REC : vidéo de l'écran + son du trafic (micro, réception, émission)
+        self.rec_button = BallButton("REC", diameter=84)
+        self.rec_button.setToolTip("Enregistrement vidéo de l'écran avec le son du trafic "
+                                   "(micro + réception + émission) dans ~/MUSARDE-date.mkv ; "
+                                   "rouge = en cours, nouveau clic = arrêt")
+        self.rec_button.clicked.connect(lambda: self.recorder and self.recorder.toggle())
+        bottom.addWidget(self.rec_button)
+        self.rec_label = QtWidgets.QLabel("")
+        self.rec_label.setFixedWidth(110)
+        self.rec_label.setStyleSheet("font: bold 13pt monospace; color: #ff4040;")
+        bottom.addWidget(self.rec_label)
         bottom.addStretch()
         self.span_buttons = QtWidgets.QButtonGroup(self)
         lab = QtWidgets.QLabel("Affichage")
@@ -822,6 +835,25 @@ class WaterfallFrance(QtWidgets.QWidget):
         """Son reçu de la radio (pour l'indicatif dit à la voix)."""
         self.audio_source = source
 
+    def set_recorder(self, recorder):
+        """Enregistreur vidéo partagé avec le Scope (bouton REC)."""
+        self.recorder = recorder
+        recorder.changed.connect(self._rec_changed)
+
+    def _rec_changed(self, on, message):
+        self.rec_button.setRed(on)
+        self.tune_label.setText(message)
+        self._rec_show()
+
+    def _rec_show(self):
+        r = self.recorder
+        if r and r.recording:
+            s = int(r.elapsed())
+            dot = "●" if self.blink_on else " "
+            self.rec_label.setText(f"{dot} {s // 60:02d}:{s % 60:02d}")
+        else:
+            self.rec_label.setText("")
+
     def _any_spot(self, s):
         band = band_of(self.freq_hz) if self.freq_hz else None
         if band and band[1] <= s["hz"] <= band[2]:
@@ -1025,6 +1057,7 @@ class WaterfallFrance(QtWidgets.QWidget):
     def _blink(self):
         """Clignotement des émetteurs (rouge) : 2 fois par seconde."""
         self.blink_on = not self.blink_on
+        self._rec_show()
         if self.heard:
             self.heard_label.setText(self._heard_html(self.blink_on))
         for label, group in self.mark_labels:
