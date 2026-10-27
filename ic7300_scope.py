@@ -5226,7 +5226,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.setChecked(n in self.vox_msg_armed)
 
     def _vox_msg_arm(self, n, on):
-        """Appui sur VOX n : message en attente (aucune émission), ou annulé."""
+        """Appui sur VOX n : message en attente (aucune émission), ou annulé.
+        Pas encore de message : l'appui lance l'enregistrement, un 2e appui l'arrête."""
+        if self.vox_msg_rec is not None and self.vox_msg_rec[0] == n:
+            self._vox_log(f"VOX{n} : 2e appui → fin de l'enregistrement du message")
+            self._vox_msg_rec_stop()
+            return
+        if on and not os.path.exists(vox_msg_file(n)) and self.vox_msg_rec is None \
+                and not self.tx_active:
+            self._vox_log(f"VOX{n} : pas de message → enregistrement (2e appui = fin)")
+            self._vox_msg_rec_start(n)
+            self.statusBar().showMessage(f"VOX{n} : enregistrement du message — parle, puis "
+                                         f"appuie de nouveau sur VOX{n} (ou Terminer)")
+            return
         if self.vox_msg_sending == n and self.vox_dry_player is not None:
             self.vox_dry_player.terminate()     # ESSAI : arrêt du message
             return
@@ -7161,7 +7173,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Réception coupée pendant l'apprentissage, l'attente de « VOX n » et le
         message : le haut-parleur ne doit pas brouiller le micro. Rétablie après."""
         want = (self.vox_learn is not None or bool(self.vox_msg_armed)
-                or self.vox_msg_sending is not None)
+                or self.vox_msg_sending is not None or self.vox_msg_rec is not None)
         if want == self.vox_rx_muted:
             return
         self.vox_rx_muted = want
