@@ -1,0 +1,10 @@
+# Corrections appliquées après la DICTÉE : « mal compris => bon texte » (une par ligne).
+# Ajouter une ligne chaque fois qu'un mot revient mal écrit.
+Fox Road => Fox-trot
+Fox trot => Fox-trot
+Faux trot => Fox-trot
+Voix 1 => VOX 1
+Vox 1 => VOX 1
+Vocs => VOX
+rec BF => REC BF
+comité et pousse => comite et pousse

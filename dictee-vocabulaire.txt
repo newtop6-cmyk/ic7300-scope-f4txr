@@ -1,0 +1,8 @@
+# Vocabulaire qui guide la DICTÉE (une ou plusieurs lignes, en phrases naturelles).
+# Ajouter ici les mots, indicatifs et noms souvent mal compris. Relu à chaque dictée.
+Dictée de Marco, F4TXR, radioamateur. Indicatif F4TXR, Fox-trot 4 Tango X-Ray Roméo.
+Break de F4TXR, les Alpins, bonjour à tous, QSO, QRZ, QSL, QRM, QSB, QRP, 73, 88, report 5 sur 9.
+IC-7300, Scope, Raspberry Pi, NAS Synology, GitHub, Whisper, Tailscale, VLC, waterfall.
+VOX, VOX 1, VOX VOCAL, REC BF, VDO+BF, WATERFALL FR, DÉMO, LOUPE, FT8, RTTY, SSTV, CW, BLU, LSB, USB, AM, FM.
+40 mètres, 80 mètres, 20 mètres, égaliseur, compresseur, préampli BF, ALC, TUNE, émission, réception.
+Comite et pousse ic7300, ouvre le dossier, relance le Scope, enregistrement, interrupteur, poussoir.

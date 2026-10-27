@@ -35,6 +35,22 @@ def terminal_windows():
     return wids
 
 
+def claude_terminal():
+    """Le terminal où tourne Claude (titre avec « Claude »), sinon le premier."""
+    try:
+        out = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True,
+                             text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    wids = terminal_windows()
+    for line in out.splitlines():
+        if TERMINAL_CLASS in line and "claude" in line.lower():
+            m = re.search(r"(0x[0-9a-f]+) ", line)
+            if m and int(m.group(1), 16) in wids:
+                return int(m.group(1), 16)
+    return wids[0] if wids else None
+
+
 def _send(wids, atom_name, data_fn):
     try:
         xlib = ctypes.cdll.LoadLibrary("libX11.so.6")

@@ -52,6 +52,7 @@ from pot_knob import PotKnob, ScaleKnob
 from vox_pc import VoxMonitor
 from mot_vox import MotVox, vox_number
 from voix_vox import LEARN_COUNT, VoiceCommands, features
+from dictee import Dictee, paste_into, split_send
 from voice_scope import VoiceScope
 from power_knob import MODE as KNOB_MODE, NamePlate, PowerKnob, VintageKnob, ScaleBakelite
 from band_keys import BandKey
@@ -2314,6 +2315,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vox_msg_blink_timer = QtCore.QTimer(self)
         self.vox_msg_blink_timer.timeout.connect(self._vox_msg_show)
         self.vox_msg_blink_timer.start(60)     # rythmes calculés sur l'heure
+        # DICTÉE : ce qui est dit au micro s'écrit dans le terminal (Claude)
+        self.dictee = Dictee()
+        self.dictee_state = ""
+        self.dictee.state.connect(self._dictee_state)
+        self.dictee.done.connect(self._dictee_done)
+        self.dictee_button = QtWidgets.QPushButton("DICTÉE")
+        self.dictee_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.dictee_button.setStyleSheet(PUSH_YELLOW_3D)
+        self.dictee_button.setToolTip(
+            "DICTÉE : appuie, parle, puis tais-toi 1,5 s : ta phrase s'écrit dans le "
+            "terminal (Claude). Finis par « envoie » pour la valider en plus (Entrée). "
+            "Nouvel appui pendant l'écoute = fin tout de suite. Mots mal compris : "
+            "dictee-corrections.txt ; vocabulaire : dictee-vocabulaire.txt.")
+        self.dictee_button.clicked.connect(self._dictee_click)
         # REC BF : son seul (réception + émission + micro) ; VDO+BF : écran + son
         self.rec_bf = ScreenRecorder(audio_only=True)
         self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
@@ -2391,7 +2406,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 2e ligne d'interrupteurs, sous la première : les nouveaux s'ajoutent ici
         others2 = ((self.rec_bf_toggle, "REC BF"),
                    (self.vdo_toggle, "VDO+BF"),
-                   *((self.vox_msg_buttons[n], f"VOX{n}") for n in VOX_MSG_NUMBERS))
+                   *((self.vox_msg_buttons[n], f"VOX{n}") for n in VOX_MSG_NUMBERS),
+                   (self.dictee_button, "DICTÉE"))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
@@ -5427,6 +5443,53 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tx_player = subprocess.Popen(
                 ["paplay", f"--device={self.radio_sink}", vox_msg_file(n)])
 
+    # --- DICTÉE vers le terminal --------------------------------------------
+    def _dictee_click(self):
+        if self.dictee.active:
+            self.dictee.stop()                  # fin de la parole tout de suite
+            return
+        mic = self._vox_mic()
+        if not mic:
+            self.statusBar().showMessage("DICTÉE : pas de micro", 5000)
+            return
+        self.dictee.start(mic)
+        self._dictee_state("prépare")
+
+    def _dictee_state(self, state):
+        self.dictee_state = state
+        look = {"prépare": ("…", "#8a6d00", "white"),
+                "écoute": ("PARLE", "#ff8a00", "#151515"),
+                "parle": ("J'ÉCOUTE", "#c62828", "white"),
+                "texte": ("ÉCRIT…", "#1e6fd0", "white")}.get(state)
+        if look:
+            text, bg, fg = look
+            self.dictee_button.setText(text)
+            self.dictee_button.setStyleSheet(
+                PUSH_YELLOW_3D + "QPushButton, QPushButton:hover { background: %s;"
+                " color: %s; font-size: 8pt; }" % (bg, fg))
+        else:
+            self.dictee_button.setText("DICTÉE")
+            self.dictee_button.setStyleSheet(PUSH_YELLOW_3D)
+        if state == "écoute":
+            self.statusBar().showMessage("DICTÉE : parle, puis tais-toi 1,5 s "
+                                         "(finis par « envoie » pour valider)", 8000)
+
+    def _dictee_done(self, text, err):
+        self._dictee_state("")
+        if err or not text:
+            self.statusBar().showMessage(f"DICTÉE : {err or 'rien compris'}", 6000)
+            return
+        text, send = split_send(text)
+        if not text:
+            return
+        QtWidgets.QApplication.clipboard().setText(text)
+        wid = console.claude_terminal()
+        if wid is None or not paste_into(wid, send):
+            self.statusBar().showMessage(f"DICTÉE (copiée, à coller) : « {text} »", 10000)
+            return
+        self.statusBar().showMessage(f"DICTÉE {'envoyée' if send else 'écrite'} : "
+                                     f"« {text} »", 10000)
+
     def _rec_switch(self, rec, switch, down):
         """Interrupteurs REC BF et VDO+BF : levier en bas = départ, en haut = arrêt."""
         if down and not rec.recording:
@@ -6985,7 +7048,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _mot_vox_tick(self):
         # pas d'écoute du mot pendant le VOX ou l'émission ; même seuil que le VOX
-        self.mot_vox.paused = self.vox_button.isChecked() or self.tx_active
+        self.mot_vox.paused = self.vox_button.isChecked() or self.tx_active \
+            or self.dictee.active             # pas de « VOX n » pendant une dictée
         self.mot_vox.threshold = self._vox_threshold()
         if not self.mot_vox.running:                        # micro perdu
             if self.vox_vocal_button.isChecked():
@@ -7146,6 +7210,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fr_toggle.setDown(False)
         self.screen_rec.stop(wait=True)     # vidéo en cours : refermée et assemblée
         self.rec_bf.stop(wait=True)         # son REC BF en cours : fichier fermé
+        self.dictee.shutdown()
         self.loupe.stop()
         self.loupe.close()
         self.demo_finger.stop()             # la flèche de la souris revient
