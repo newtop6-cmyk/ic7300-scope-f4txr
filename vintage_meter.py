@@ -385,7 +385,7 @@ class SwrMicroGalva(QtWidgets.QWidget):
             self.update()
 
     def _geom(self):
-        w, h = self.width(), self.height()
+        w = self.width()
         r = (w - 116) / 2 / math.sin(math.radians(self.SPAN_DEG))   # place : loupe | LED
         cx, cy = w / 2, 21 + r                  # pivot sous le cadran : arc très plat
         return cx, cy, r
@@ -399,13 +399,21 @@ class SwrMicroGalva(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        # boîtier : même bois sombre et même verre que le galva POWER
+        # boîtier : même bois sombre que le galva POWER, bombé vers soi
         p.setPen(QtCore.Qt.NoPen)
         rim = QtGui.QLinearGradient(0, 0, 0, h)
-        rim.setColorAt(0, QtGui.QColor("#8a7058"))
-        rim.setColorAt(0.5, QtGui.QColor("#3e3024"))
-        rim.setColorAt(1, QtGui.QColor("#120c08"))
+        rim.setColorAt(0, QtGui.QColor("#c4a888"))         # arête haute éclairée
+        rim.setColorAt(0.18, QtGui.QColor("#8a7058"))
+        rim.setColorAt(0.55, QtGui.QColor("#3e3024"))
+        rim.setColorAt(1, QtGui.QColor("#0a0604"))         # dessous dans l'ombre
         p.setBrush(rim)
+        p.drawRoundedRect(QtCore.QRectF(0, 0, w, h), 10, 10)
+        side = QtGui.QLinearGradient(0, 0, w, 0)            # côtés qui fuient
+        side.setColorAt(0, QtGui.QColor(0, 0, 0, 110))
+        side.setColorAt(0.08, QtGui.QColor(0, 0, 0, 0))
+        side.setColorAt(0.92, QtGui.QColor(0, 0, 0, 0))
+        side.setColorAt(1, QtGui.QColor(0, 0, 0, 110))
+        p.setBrush(side)
         p.drawRoundedRect(QtCore.QRectF(0, 0, w, h), 10, 10)
         case = QtGui.QLinearGradient(0, 0, 0, h)
         case.setColorAt(0, QtGui.QColor("#54422f"))
@@ -454,6 +462,18 @@ class SwrMicroGalva(QtWidgets.QWidget):
         p.drawLine(base + QtCore.QPointF(1.5, 1.5), tip + QtCore.QPointF(1.5, 1.5))
         p.setPen(QtGui.QPen(QtGui.QColor("#b01010"), 1.6))
         p.drawLine(base, tip)
+        # surface bombée : haut éclairé, bas et bords dans l'ombre
+        cyl = QtGui.QLinearGradient(0, face.top(), 0, face.bottom())
+        cyl.setColorAt(0, QtGui.QColor(255, 255, 255, 60))
+        cyl.setColorAt(0.3, QtGui.QColor(255, 255, 255, 0))
+        cyl.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
+        cyl.setColorAt(1, QtGui.QColor(0, 0, 0, 150))
+        p.fillRect(face, cyl)
+        vig = QtGui.QRadialGradient(w / 2, face.top() + face.height() * 0.3, w * 0.55)
+        vig.setColorAt(0, QtGui.QColor(0, 0, 0, 0))
+        vig.setColorAt(0.62, QtGui.QColor(0, 0, 0, 0))
+        vig.setColorAt(1, QtGui.QColor(0, 0, 0, 140))
+        p.fillRect(face, vig)
         p.restore()
         # loupe ronde dans un anneau métallique, à gauche : ROS mesuré « 1:x »
         lc, lr = QtCore.QPointF(29, h / 2), 15.5
@@ -506,4 +526,38 @@ class SwrMicroGalva(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(QtGui.QColor("#111"), 1))
         p.setBrush(g)
         p.drawEllipse(c, 5.5, 5.5)
+        # verre bombé : reflet courbe en haut et liseré lumineux
+        face = QtCore.QRectF(7, 7, w - 14, h - 14)
+        p.save()
+        clip = QtGui.QPainterPath()
+        clip.addRoundedRect(face, 6, 6)
+        p.setClipPath(clip)
+        sheen = QtGui.QPainterPath()
+        sheen.moveTo(face.left() + 6, face.top() + 2)
+        sheen.cubicTo(face.left() + w * 0.25, face.top() + face.height() * 0.42,
+                      face.right() - w * 0.25, face.top() + face.height() * 0.42,
+                      face.right() - 6, face.top() + 2)
+        sheen.lineTo(face.right() - 6, face.top())
+        sheen.lineTo(face.left() + 6, face.top())
+        sheen.closeSubpath()
+        sg = QtGui.QLinearGradient(0, face.top(), 0, face.top() + face.height() * 0.4)
+        sg.setColorAt(0, QtGui.QColor(255, 255, 255, 95))
+        sg.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(sg)
+        p.drawPath(sheen)
+        p.restore()
+        p.setBrush(QtCore.Qt.NoBrush)
+        lip = QtGui.QLinearGradient(0, face.bottom() - 7, 0, face.bottom())
+        lip.setColorAt(0, QtGui.QColor(0, 0, 0, 0))
+        lip.setColorAt(1, QtGui.QColor(0, 0, 0, 110))
+        p.save()
+        p.setClipPath(clip)
+        p.fillRect(QtCore.QRectF(face.left(), face.bottom() - 7, face.width(), 7), lip)
+        p.restore()
+        edge = QtGui.QLinearGradient(0, face.top(), 0, face.bottom())
+        edge.setColorAt(0, QtGui.QColor(255, 255, 255, 150))
+        edge.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtGui.QPen(QtGui.QBrush(edge), 1.2))
+        p.drawRoundedRect(face.adjusted(0.6, 0.6, -0.6, -0.6), 6, 6)
         p.end()
