@@ -41,6 +41,43 @@ NEW_S = 20                      # « nouvelle » : clignote pendant 20 s
 SNAP_KHZ = 0.6                  # clic à moins de 0,6 kHz d'une station : on se cale sur elle
 BLEU, BLANC, ROUGE = "#3d7dff", "#f2f2f2", "#ff4040"
 VERT = "#3ddc84"                # QSO français trouvé par le scan
+# reconnaissance du mode au calage : fréquences de base FT8 / FT4 (Hz, le signal
+# est dans les 3 kHz au-dessus), portions RTTY et CW de chaque bande
+DIGI_DIALS = (1_840_000, 3_573_000, 5_357_000, 7_074_000, 10_136_000, 14_074_000,
+              18_100_000, 21_074_000, 24_915_000, 28_074_000, 50_313_000,       # FT8
+              3_575_000, 7_047_500, 10_140_000, 14_080_000, 18_104_000,
+              21_140_000, 24_919_000, 28_180_000, 50_318_000)                   # FT4
+RTTY_PARTS = ((3_580_000, 3_600_000), (7_040_000, 7_050_000), (10_140_000, 10_150_000),
+              (14_080_000, 14_099_000), (18_095_000, 18_109_000),
+              (21_080_000, 21_120_000), (24_915_000, 24_929_000), (28_050_000, 28_150_000))
+CW_PARTS = ((1_810_000, 1_838_000), (3_500_000, 3_570_000), (7_000_000, 7_040_000),
+            (10_100_000, 10_130_000), (14_000_000, 14_070_000), (18_068_000, 18_095_000),
+            (21_000_000, 21_070_000), (24_890_000, 24_915_000), (28_000_000, 28_070_000),
+            (50_000_000, 50_100_000))
+
+
+def phone_side(hz):
+    """Bande latérale d'usage : LSB sous 10 MHz (sauf 60 m), USB au-dessus."""
+    return "USB" if hz >= 10_000_000 or 5_250_000 <= hz <= 5_450_000 else "LSB"
+
+
+def digi_dial(hz):
+    """Fréquence de base FT8/FT4 si `hz` tombe dans sa fenêtre de 3 kHz."""
+    return next((d for d in DIGI_DIALS if d - 200 <= hz <= d + 3200), None)
+
+
+def mode_by_frequency(hz):
+    """Mode probable d'une station d'après sa place dans la bande → (Hz, mode)."""
+    dial = digi_dial(hz)
+    if dial:
+        return dial, "USB-D"
+    if any(lo <= hz <= hi for lo, hi in RTTY_PARTS):
+        return hz, "RTTY"
+    if any(lo <= hz <= hi for lo, hi in CW_PARTS):
+        return hz, "CW"
+    return hz, phone_side(hz)
+
+
 TX_ON, TX_OFF = "#ff3030", "#5a1414"    # indicatif de l'émetteur : rouge clignotant
 RX_COLOR = "#ffd54a"                    # indicatif de la station qui reçoit : jaune
 QSO_PAIR = re.compile(r"\b([A-Z0-9]{1,3}[0-9][A-Z]{1,4})\s+(?:DE|DU|DEL)\s+"
@@ -912,7 +949,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         # curseur aimanté : dans la largeur d'un signal, il se colle sur sa
         # fréquence de calage (bord BLU, pointe CW) et la bande du signal s'éclaire
         hz, mode, what = self._snap(khz)
-        snapped = what in ("signal BLU", "pointe CW")
+        snapped = what != "fréquence"              # tout signal reconnu (BLU, CW, FT8, RTTY, AM, FM)
         at = hz / 1000 if snapped else khz
         for c in self.cursor:
             c.setPos(at)
@@ -1001,22 +1038,46 @@ class WaterfallFrance(QtWidgets.QWidget):
         f_lo, f_hi = lo + a * step, lo + (b + 1) * step
         width = f_hi - f_lo
         self._snap_band = (f_lo, f_hi)
-        if width <= max(600, 3 * step):              # étroit : CW, sur la pointe
-            idx = np.arange(a, b + 1)
-            w = 10 ** (spec[a:b + 1] / 10)
-            peak = lo + (float((idx * w).sum() / w.sum()) + 0.5) * step
-            return int(round(peak / 10) * 10), "CW", "pointe CW"
+        centre = (f_lo + f_hi) / 2
+        idx = np.arange(a, b + 1)
+        w = 10 ** (spec[a:b + 1] / 10)
+        peak = lo + (float((idx * w).sum() / w.sum()) + 0.5) * step
+        r10 = lambda f: int(round(f / 10) * 10)
+        dial = digi_dial(centre)
+        if dial and width <= 3500:                  # FT8 / FT4 : base de la fenêtre
+            return dial, "USB-D", "FT8/FT4"
+        narrow = width <= max(600, 3 * step)
+        if narrow and any(x <= centre <= y for x, y in RTTY_PARTS) and width >= 150:
+            return r10(centre), "RTTY", "RTTY"
+        if narrow:                                  # CW : sur la pointe
+            return r10(peak), "CW", "pointe CW"
         if 1000 <= width <= 4500:                   # BLU : la porteuse est au bord
-            lsb = (self.freq_hz or f_lo) < 10_000_000
-            carrier = f_hi + 200 if lsb else f_lo - 200
-            return int(round(carrier / 10) * 10), "LSB" if lsb else "USB", "signal BLU"
+            side = phone_side(centre)
+            if len(w) >= 6:                         # la voix est plus forte côté porteuse
+                third = len(w) // 3
+                tilt = 10 * math.log10(w[:third].mean() / max(w[-third:].mean(), 1e-12))
+                if tilt > 3:
+                    side = "USB"
+                elif tilt < -3:
+                    side = "LSB"
+            carrier = f_hi + 200 if side == "LSB" else f_lo - 200
+            return r10(carrier), side, f"signal BLU {side}"
+        if 5000 <= width <= 10000:                  # AM : porteuse au centre
+            return r10(peak), "AM", "signal AM"
+        if 10000 < width <= 20000:                  # FM (10 m, 6 m)
+            return r10(centre), "FM", "signal FM"
         return hz, "", "fréquence"
 
     def _tune_station(self, s):
         mode = (s.get("mode") or "").upper()
         mode = {"CW": "CW", "LSB": "LSB", "USB": "USB", "FT8": "USB-D", "FT4": "USB-D",
-                "RTTY": "RTTY"}.get(mode, "")
-        self._tune(s["hz"], mode, s["call"])
+                "RTTY": "RTTY", "PSK31": "USB-D", "AM": "AM", "FM": "FM"}.get(mode, "")
+        hz = s["hz"]
+        if mode == "USB-D":
+            hz = digi_dial(hz) or hz                # FT8/FT4 : fréquence de base
+        elif not mode:                              # mode inconnu (DX Summit) : d'après la bande
+            hz, mode = mode_by_frequency(hz)
+        self._tune(hz, mode, s["call"])
 
     def _tune(self, hz, mode, what):
         self.tune.emit(int(hz), mode)
