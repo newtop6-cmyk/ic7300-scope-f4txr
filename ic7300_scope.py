@@ -68,6 +68,7 @@ from drum_display import DrumClock, DrumDisplay
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
+from emergency_button import EmergencyButton
 from vintage_meter import SwrMicroGalva, SwrTitle, VintageSMeter, VintagePowerMeter
 from whistle import Whistle
 from qso_hunter import QsoHunter, find_signals
@@ -290,6 +291,8 @@ PUSH_YELLOW_3D = (
 SWR_GALVA_PX = 44              # hauteur du micro-galva ROS (au-dessus du POWER)
 KNOB_POWER_PX = 120            # bouton de puissance (154 avant le micro-galva ROS)
 FUNC_SCALE = 0.77              # sélecteur FONCTION (1.0 avant le micro-galva ROS)
+EMERGENCY_PX = 78              # bouton d'arrêt d'urgence (champignon)
+EMERGENCY_GAP = 2
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
 FINE_MAX = 300                  # Hz : l'affinage par la voix reste à ± 300 Hz du kHz rond
 PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO BLU
@@ -2519,7 +2522,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.swr_led.setToolTip("Alarme ROS : clignote en rouge si le ROS dépasse 2")
         swr_row.addWidget(self.swr_led)
         swr_box.setFixedWidth(self.s_meter.width() + 16)
-        # (barre ROS sous le S-mètre retirée : micro-galva ROS au-dessus du POWER)
+        # (barre ROS sous le S-mètre retirée : micro-galva ROS au-dessus du POWER).
+        # Gardée en mémoire, invisible : sinon Qt la détruit (et swr_meter avec)
+        self.swr_box = swr_box
+        swr_box.hide()
         self.swr_galva = SwrMicroGalva(height=SWR_GALVA_PX)
         self.swr_alarm = False
         self.swr_blink = False
@@ -2809,7 +2815,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_plate.clicked.connect(self.on_tune)
         tune_col = QtWidgets.QVBoxLayout()          # descendu : dans l'axe de FONCTION
         tune_col.setContentsMargins(0, 0, 0, 0)
-        tune_col.addSpacing(60)                     # (115 avant : trop haut pour l'écran)
+        # arrêt d'urgence : champignon rouge juste sous le gros bouton vert
+        self.emergency_button = EmergencyButton(EMERGENCY_PX)
+        self.emergency_button.pressed.connect(self.on_emergency)
+        tune_col.addSpacing(EMERGENCY_GAP)
+        tune_col.addWidget(self.emergency_button, 0, QtCore.Qt.AlignHCenter)
+        tune_col.addSpacing(EMERGENCY_GAP)
         tune_col.addWidget(self.tune_plate, 0, QtCore.Qt.AlignHCenter)
         self.tune_col = tune_col                    # le bouton EMISSION s'y ajoute plus bas
         modes.addLayout(tune_col, rows + 2, 0, 1, 2, QtCore.Qt.AlignHCenter)
@@ -6492,6 +6503,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.comp_meter.setValue(db)
         self.tx_galva.set_comp(db)
         self.comp_value.setText(f"{db:.0f}")
+
+    def on_emergency(self):
+        """ARRÊT D'URGENCE : coupe tout ce qui peut émettre, tout de suite."""
+        acknowledge = self.emergency_button.flashing   # appui pendant les flashs : fin
+        if acknowledge:
+            self.emergency_button.set_flashing(False)
+        try:
+            self.message_timer.stop()               # message / saisie CW
+            self.message_chunks = []
+            self.message_toggle.setDown(False, emit=False)
+            if self.vox_button.isChecked():         # VOX désarmé
+                self.vox_button.setChecked(False)
+            self.vox_msg_armed.clear()              # VOX1… : plus rien en attente
+            self.vox_msg_dry_auto.clear()
+            if self.vox_dry_player is not None:
+                self.vox_dry_player.terminate()
+        except Exception:
+            pass
+        if self.civ:
+            self.civ.stop_cw()
+            self.civ.set_ptt(False)
+            self.civ._commands.put((0x1C, 0x00, 0x00))      # TX OFF direct (accord compris)
+        self.stop_tx("⛔ ARRÊT D'URGENCE : émission coupée")
+        if self.civ:                                # redit plus tard : rien ne repart
+            for ms in (300, 1000):
+                QtCore.QTimer.singleShot(ms, lambda: self.civ and self.civ.set_ptt(False))
+        self.tune_plate.set_lit(False)
+        self.red_button.set_alert(False)
+        self._mot_vox_need()
+        self._vox_msg_show()
+        self._vox_log("ARRÊT D'URGENCE")
+        self.emergency_at = time.monotonic()
+        if not acknowledge:
+            QtCore.QTimer.singleShot(5000, self._emergency_flash)
+
+    def _emergency_flash(self):
+        """5 s après l'arrêt d'urgence : flashs par séries de 3 (nouvel appui = fin)."""
+        if time.monotonic() - getattr(self, "emergency_at", 0) >= 4.9:
+            self.emergency_button.set_flashing(True)
 
     def on_tune(self):
         if self.civ:
