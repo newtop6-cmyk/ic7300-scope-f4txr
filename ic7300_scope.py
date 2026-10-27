@@ -5603,6 +5603,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tx_active and self.vox_msg_sending == n:
             self.tx_player = subprocess.Popen(
                 ["paplay", f"--device={self.radio_sink}", vox_msg_file(n)])
+            # retour BF : le même message sur la sortie du PC, en même temps
+            self.vox_monitor_player = subprocess.Popen(
+                ["paplay", "--client-name=IC-7300 retour BF", vox_msg_file(n)])
+            self._vox_log(f"VOX{n} : émission réelle du message, retour BF sur le PC")
 
     # --- DICTÉE vers le terminal --------------------------------------------
     def _dictee_click(self):
@@ -6302,6 +6306,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def stop_tx(self, reason=None):
         self._backlight_tx(False)           # rétro-éclairage : retour au calme
+        mon = getattr(self, "vox_monitor_player", None)
+        if mon is not None and mon.poll() is None:
+            mon.terminate()                     # retour BF coupé avec l'émission
+        self.vox_monitor_player = None
         if getattr(self, "vox_msg_sending", None):
             self.vox_msg_sending = None
             self._mot_vox_need()
