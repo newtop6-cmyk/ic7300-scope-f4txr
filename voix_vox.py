@@ -18,6 +18,7 @@ VOICE_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser
                          "ic7300-scope", "voix")
 LEARN_COUNT = 6                 # exemples demandés par commande
 MARGIN = 1.35                   # tolérance au-delà de l'écart entre tes exemples
+TOLERANCE = 1.2                 # marge en plus à la reconnaissance (voix du soir, micro…)
 WIN, HOP, NFFT, NMEL, NCEP = 400, 160, 512, 26, 13
 
 
@@ -151,14 +152,17 @@ class VoiceCommands:
                 scores[n] = float(np.mean(d[:3]))       # les 3 exemples les plus proches
         if not scores:
             return None, 0.0, "voix pas encore apprise"
-        best = min(scores, key=scores.get)
+        # seulement la (les) commande(s) mise(s) en attente par l'appui : le bouton
+        # dit déjà laquelle ; la voix doit juste ressembler à TES exemples de celle-ci
+        cands = [n for n in candidates if n in scores]
+        if not cands:
+            best = min(scores, key=scores.get)
+            return None, scores[best], f"VOX {best} à {scores[best]:.1f} — pas en attente"
+        best = min(cands, key=scores.get)
         d = scores[best]
-        others = [v for k, v in scores.items() if k != best]
-        detail = f"VOX {best} à {d:.1f} (limite {self.limit.get(best, 0):.1f})"
-        if best not in candidates:
-            return None, d, detail + " — pas en attente"
-        if d > self.limit.get(best, 0):
+        limit = self.limit.get(best, 0) * TOLERANCE
+        others = ", ".join(f"VOX {k} à {v:.1f}" for k, v in sorted(scores.items()) if k != best)
+        detail = f"VOX {best} à {d:.1f} (limite {limit:.1f})" + (f" ; {others}" if others else "")
+        if d > limit:
             return None, d, detail + " — voix ou mot trop différents"
-        if others and d > 0.9 * min(others):
-            return None, d, detail + " — trop proche d'une autre commande"
         return best, d, detail
