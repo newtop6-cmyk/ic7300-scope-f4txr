@@ -50,7 +50,8 @@ from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
 from pot_knob import PotKnob, ScaleKnob
 from vox_pc import VoxMonitor
-from mot_vox import MotVox
+from mot_vox import MotVox, vox_number
+from voix_vox import LEARN_COUNT, VoiceCommands, features
 from voice_scope import VoiceScope
 from power_knob import MODE as KNOB_MODE, NamePlate, PowerKnob, VintageKnob, ScaleBakelite
 from band_keys import BandKey
@@ -121,9 +122,14 @@ STATE_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME")
 BANDS_FILE = os.path.join(os.path.dirname(STATE_FILE), "bandes.json")
 MESSAGE_FILE = os.path.join(os.path.dirname(STATE_FILE), "message-cw.txt")
 DEFAULT_MESSAGE = "CQ CQ CQ DE F4TXR F4TXR K"
-# VOX1 : message vocal enregistré au micro, émis d'un coup de levier
-VOX1_FILE = os.path.join(os.path.dirname(STATE_FILE), "vox1.wav")
-VOX1_MAX_S = 120                # enregistrement arrêté tout seul au-delà
+# VOX1, VOX2… : messages vocaux enregistrés au micro. Le poussoir met le message
+# en attente ; il part seulement quand on dit « VOX 1 » (« VOX 2 »…) au micro.
+VOX_MSG_NUMBERS = (1,)          # VOX2 plus tard : (1, 2)
+VOX_MSG_MAX_S = 120             # enregistrement arrêté tout seul au-delà
+
+
+def vox_msg_file(n):
+    return os.path.join(os.path.dirname(STATE_FILE), f"vox{n}.wav")
 # bandes émission de l'IC-7300 : nom, limites (Hz), fréquence et mode de départ
 BANDS = [("160m", 1_810_000, 2_000_000, 1_850_000, "LSB"),
          ("80m", 3_500_000, 3_800_000, 3_700_000, "LSB"),
@@ -2261,20 +2267,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demo_toggle.toggled.connect(self._demo_toggled)
         self.demo_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.demo_toggle.customContextMenuRequested.connect(self._demo_menu)
-        # VOX1 : message vocal préparé (clic droit = l'enregistrer au micro)
-        self.vox1_toggle = ToggleSwitch(
-            "OFF", "ON", tooltip="VOX1 : levier en bas = la radio passe en émission, "
-            "envoie ton message vocal enregistré, puis repasse tout de suite en réception "
-            "(le levier revient sur OFF) ; en haut = arrêt. "
-            "Clic droit : enregistrer le message au micro, ou l'écouter.")
-        self.vox1_toggle.toggled.connect(self._vox1_toggled)
-        self.vox1_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.vox1_toggle.customContextMenuRequested.connect(self._vox1_menu)
-        self.vox1_sending = False
-        self.vox1_rec = None                # parec pendant l'enregistrement du message
-        self.vox1_rec_timer = QtCore.QTimer(self)
-        self.vox1_rec_timer.setSingleShot(True)
-        self.vox1_rec_timer.timeout.connect(self._vox1_rec_stop)
+        # VOX1, VOX2… : poussoirs ; appui = message en attente de « VOX n » dit au micro
+        self.vox_msg_buttons = {}
+        for n in VOX_MSG_NUMBERS:
+            button = QtWidgets.QPushButton(f"VOX{n}")
+            button.setCheckable(True)
+            button.setFocusPolicy(QtCore.Qt.NoFocus)
+            button.setToolTip(
+                f"VOX{n} : appui = ton message vocal n° {n} se met en attente (bouton "
+                f"orange clignotant), sans émettre. Il part seulement quand tu dis "
+                f"« VOX {n} » au micro : émission du message puis retour immédiat en "
+                f"réception. Nouvel appui = annuler. "
+                f"Clic droit : enregistrer le message au micro, ou l'écouter.")
+            button.clicked.connect(lambda on, n=n: self._vox_msg_arm(n, on))
+            button.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, n=n: self._vox_msg_menu(n, pos))
+            self.vox_msg_buttons[n] = button
+        self.vox_msg_armed = set()          # messages en attente de « VOX n »
+        self.vox_msg_sending = None         # n° du message en cours d'émission
+        self.vox_msg_rec = None             # (n, parec) pendant l'enregistrement
+        self.vox_msg_rec_timer = QtCore.QTimer(self)
+        self.vox_msg_rec_timer.setSingleShot(True)
+        self.vox_msg_rec_timer.timeout.connect(self._vox_msg_rec_stop)
+        self.vox_msg_blink = False
+        self.vox_msg_blink_timer = QtCore.QTimer(self)
+        self.vox_msg_blink_timer.timeout.connect(self._vox_msg_show)
+        self.vox_msg_blink_timer.start(400)
         # REC BF : son seul (réception + émission + micro) ; VDO+BF : écran + son
         self.rec_bf = ScreenRecorder(audio_only=True)
         self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
@@ -2352,7 +2371,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 2e ligne d'interrupteurs, sous la première : les nouveaux s'ajoutent ici
         others2 = ((self.rec_bf_toggle, "REC BF"),
                    (self.vdo_toggle, "VDO+BF"),
-                   (self.vox1_toggle, "VOX1"))
+                   *((self.vox_msg_buttons[n], f"VOX{n}") for n in VOX_MSG_NUMBERS))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
@@ -3000,6 +3019,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mot_vox = MotVox()
         self.mot_vox.word.connect(self.on_mot_vox)
         self.mot_vox.heard.connect(self.on_mot_vox_heard)
+        self.mot_vox.segment.connect(self.on_mot_vox_segment)
+        self.voice_cmds = VoiceCommands()   # ta voix pour « VOX 1 », « VOX 2 »…
+        self.vox_learn = None               # apprentissage en cours : (n, exemples, fenêtre)
         self.vox_by_voice = False       # VOX armé par le mot « VOX »
         self.mot_vox_timer = QtCore.QTimer(self)
         self.mot_vox_timer.timeout.connect(self._mot_vox_tick)
@@ -5120,112 +5142,244 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tune_to(hz)
 
     # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
-    # --- VOX1 : message vocal préparé -------------------------------------
-    def _vox1_menu(self, pos):
+    # --- VOX1, VOX2… : messages vocaux déclenchés par la parole ------------
+    def _vox_msg_show(self):
+        """Poussoirs : orange clignotant = en attente de « VOX n », rouge = émission."""
+        self.vox_msg_blink = not self.vox_msg_blink
+        for n, button in self.vox_msg_buttons.items():
+            if self.vox_msg_sending == n:
+                style = "QPushButton { background: #c62828; color: white; }"
+                text = "ÉMET"
+            elif n in self.vox_msg_armed:
+                style = ("QPushButton { background: %s; color: #151515; }"
+                         % ("#ff9a1f" if self.vox_msg_blink else "#7a4a10"))
+                text = f"DIS\nVOX {n}"
+            elif self.vox_msg_rec and self.vox_msg_rec[0] == n:
+                style = "QPushButton { background: #8a0000; color: white; }"
+                text = "🎙 REC"
+            else:
+                style, text = "", f"VOX{n}"
+            if button.text() != text:
+                button.setText(text)
+            full = PUSH_3D + "QPushButton { font-size: 8pt; }" + style
+            if button.styleSheet() != full:
+                button.setStyleSheet(full)
+            if button.isChecked() != (n in self.vox_msg_armed):
+                button.setChecked(n in self.vox_msg_armed)
+
+    def _vox_msg_arm(self, n, on):
+        """Appui sur VOX n : message en attente (aucune émission), ou annulé."""
+        if not on:
+            self.vox_msg_armed.discard(n)
+            self.statusBar().showMessage(f"VOX{n} : attente annulée", 4000)
+        else:
+            problem = None
+            if not os.path.exists(vox_msg_file(n)):
+                problem = f"VOX{n} : pas encore de message (clic droit sur VOX{n} → Enregistrer)"
+            elif not self.voice_cmds.learned(n):
+                problem = (f"VOX{n} : apprends d'abord ta voix (clic droit sur VOX{n} → "
+                           f"Apprendre ma voix)")
+            elif self.vox_msg_rec is not None:
+                problem = "Termine d'abord l'enregistrement du message"
+            elif not self._vox_mic():
+                problem = f"VOX{n} : pas de micro pour entendre « VOX {n} »"
+            if problem:
+                self.statusBar().showMessage(problem, 6000)
+            else:
+                self.vox_msg_armed.add(n)
+                self.statusBar().showMessage(
+                    f"VOX{n} en attente : dis « VOX {n} » au micro pour l'émettre "
+                    "(seule ta voix est acceptée)", 8000)
+        self._mot_vox_need()
+        self._vox_msg_show()
+
+    def _vox_msg_menu(self, n, pos):
         menu = QtWidgets.QMenu(self)
-        if self.vox1_rec is None:
-            record = menu.addAction("🎙 Enregistrer le message (micro)")
+        recording = self.vox_msg_rec is not None
+        if not recording:
+            record = menu.addAction(f"🎙 Enregistrer le message VOX{n} (micro)")
         else:
             record = menu.addAction("⏹ Terminer l'enregistrement")
-        listen = menu.addAction("🔊 Écouter le message (sur le PC)")
-        listen.setEnabled(os.path.exists(VOX1_FILE) and self.vox1_rec is None)
-        chosen = menu.exec_(self.vox1_toggle.mapToGlobal(pos))
+        listen = menu.addAction(f"🔊 Écouter le message VOX{n} (sur le PC)")
+        listen.setEnabled(os.path.exists(vox_msg_file(n)) and not recording)
+        menu.addSeparator()
+        learn = menu.addAction(f"🗣 Apprendre ma voix pour « VOX {n} »"
+                               + (" (déjà appris : refaire)" if self.voice_cmds.learned(n)
+                                  else ""))
+        learn.setEnabled(not recording and self.vox_learn is None and not self.tx_active)
+        chosen = menu.exec_(self.vox_msg_buttons[n].mapToGlobal(pos))
+        if chosen is learn:
+            self._vox_learn_start(n)
+            return
         if chosen is record:
-            if self.vox1_rec is None:
-                self._vox1_rec_start()
+            if recording:
+                self._vox_msg_rec_stop()
             else:
-                self._vox1_rec_stop()
+                self._vox_msg_rec_start(n)
         elif chosen is listen:
-            subprocess.Popen(["paplay", VOX1_FILE])
-            self.statusBar().showMessage("VOX1 : écoute du message sur le PC", 4000)
+            subprocess.Popen(["paplay", vox_msg_file(n)])
+            self.statusBar().showMessage(f"VOX{n} : écoute du message sur le PC", 4000)
 
-    def _vox1_rec_start(self):
-        if self.tx_active:
-            self.statusBar().showMessage("VOX1 : pas d'enregistrement pendant l'émission", 5000)
+    def _vox_learn_start(self, n):
+        """Apprentissage : « VOX n » dit LEARN_COUNT fois, ta voix seulement."""
+        if not self._vox_mic():
+            self.statusBar().showMessage("Pas de micro", 5000)
             return
-        source = self.tx_source.currentData()
-        if not source or source == "file":
-            source = "@DEFAULT_SOURCE@"
-        os.makedirs(os.path.dirname(VOX1_FILE), exist_ok=True)
-        self.vox1_tmp = VOX1_FILE + ".brut.wav"
-        try:
-            self.vox1_rec = subprocess.Popen(
-                ["parec", "-d", self.eq_engine.monitor_for(source), "--file-format=wav",
-                 "--rate=48000", "--channels=1", "--client-name=IC-7300 VOX1",
-                 self.vox1_tmp], stderr=subprocess.DEVNULL)
-        except OSError as e:
-            self.statusBar().showMessage(f"VOX1 : enregistrement impossible ({e})", 6000)
-            return
-        self.vox1_rec_timer.start(VOX1_MAX_S * 1000)
+        self.vox_msg_armed.discard(n)
         box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle("VOX1")
-        box.setText("🎙 Enregistrement du message VOX1…\n\nParle dans le micro, "
+        box.setWindowTitle(f"Apprendre « VOX {n} »")
+        box.addButton("Annuler", QtWidgets.QMessageBox.RejectRole)
+        box.setModal(False)
+        box.buttonClicked.connect(lambda *_: self._vox_learn_end(cancel=True))
+        self.vox_learn = (n, [], box)
+        self._vox_learn_text()
+        box.show()
+        self._mot_vox_need()
+        self._vox_msg_show()
+
+    def _vox_learn_text(self, note=""):
+        n, clips, box = self.vox_learn
+        box.setText(f"🗣 Dis « VOX {n} » au micro, normalement, comme en trafic.\n"
+                    f"Attends une seconde entre chaque fois.\n\n"
+                    f"Exemple {len(clips) + 1} sur {LEARN_COUNT}"
+                    + ("  " + "✔" * len(clips)) + (f"\n\n{note}" if note else ""))
+
+    def _vox_learn_end(self, cancel=False):
+        if self.vox_learn is None:
+            return
+        n, clips, box = self.vox_learn
+        self.vox_learn = None
+        box.close()
+        self._mot_vox_need()
+        self._vox_msg_show()
+        if cancel:
+            self.statusBar().showMessage(f"Apprentissage de « VOX {n} » annulé "
+                                         "(l'ancien est gardé s'il existe)", 6000)
+            return
+        kept = self.voice_cmds.save(n, clips)
+        limit = self.voice_cmds.limit.get(n, 0)
+        QtWidgets.QMessageBox.information(
+            self, f"« VOX {n} » appris",
+            f"Ta voix pour « VOX {n} » est apprise ({kept} exemples, tolérance "
+            f"{limit:.1f}).\n\nAppuie sur VOX{n}, puis dis « VOX {n} » : le message "
+            "part seulement si c'est toi qui le dis.")
+
+    def on_mot_vox_segment(self, clip):
+        """Parole courte entendue au micro : exemple d'apprentissage, ou commande."""
+        if self.vox_learn is not None:
+            n, clips, box = self.vox_learn
+            if features(clip) is None:
+                self._vox_learn_text("(trop court, recommence)")
+                return
+            clips.append(clip)
+            if len(clips) >= LEARN_COUNT:
+                self._vox_learn_end()
+            else:
+                self._vox_learn_text()
+            return
+        if not self.vox_msg_armed or self.tx_active:
+            return
+        n, dist, detail = self.voice_cmds.match(clip, self.vox_msg_armed)
+        if n is not None:
+            self.statusBar().showMessage(f"Ta voix reconnue : {detail}", 6000)
+            self._vox_msg_send(n)
+        else:
+            self.statusBar().showMessage(f"Pas reconnu : {detail}", 5000)
+
+    def _vox_msg_rec_start(self, n):
+        if self.tx_active:
+            self.statusBar().showMessage("Pas d'enregistrement pendant l'émission", 5000)
+            return
+        self.vox_msg_armed.discard(n)
+        source = self._vox_mic() or "@DEFAULT_SOURCE@"
+        path = vox_msg_file(n)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            proc = subprocess.Popen(
+                ["parec", "-d", self.eq_engine.monitor_for(source), "--file-format=wav",
+                 "--rate=48000", "--channels=1", f"--client-name=IC-7300 VOX{n}",
+                 path + ".brut.wav"], stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self.statusBar().showMessage(f"VOX{n} : enregistrement impossible ({e})", 6000)
+            return
+        self.vox_msg_rec = (n, proc)
+        self._mot_vox_need()                # pas d'écoute de « VOX n » pendant ce temps
+        self.vox_msg_rec_timer.start(VOX_MSG_MAX_S * 1000)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(f"VOX{n}")
+        box.setText(f"🎙 Enregistrement du message VOX{n}…\n\nParle dans le micro, "
                     "puis clique sur « Terminer ».")
         box.addButton("Terminer", QtWidgets.QMessageBox.AcceptRole)
         box.setModal(False)
-        box.buttonClicked.connect(lambda *_: self._vox1_rec_stop())
-        self.vox1_box = box
+        box.buttonClicked.connect(lambda *_: self._vox_msg_rec_stop())
+        self.vox_msg_box = box
         box.show()
+        self._vox_msg_show()
 
-    def _vox1_rec_stop(self):
+    def _vox_msg_rec_stop(self):
         """Fin de l'enregistrement : silences du début et de la fin enlevés
         (retour en réception dès le dernier mot)."""
-        if self.vox1_rec is None:
+        if self.vox_msg_rec is None:
             return
-        self.vox1_rec_timer.stop()
-        self.vox1_rec.terminate()
-        self.vox1_rec.wait(timeout=5)
-        self.vox1_rec = None
-        box = getattr(self, "vox1_box", None)
+        n, proc = self.vox_msg_rec
+        self.vox_msg_rec = None
+        self.vox_msg_rec_timer.stop()
+        proc.terminate()
+        proc.wait(timeout=5)
+        box = getattr(self, "vox_msg_box", None)
         if box is not None:
             box.close()
-            self.vox1_box = None
+            self.vox_msg_box = None
+        path = vox_msg_file(n)
         trim = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15,"
                 "areverse,"
                 "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.25,"
                 "areverse")
-        done = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", self.vox1_tmp,
-                               "-af", trim, "-ar", "48000", "-ac", "1", VOX1_FILE],
+        tmp = path + ".net.wav"
+        done = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path + ".brut.wav",
+                               "-af", trim, "-ar", "48000", "-ac", "1", tmp],
                               capture_output=True, text=True)
-        try:
-            with wave.open(VOX1_FILE) as w:
-                length = w.getnframes() / w.getframerate()
-        except (OSError, wave.Error, EOFError):
-            length = 0
+        length = self._wav_seconds(tmp)
+        self._mot_vox_need()
+        self._vox_msg_show()
         if done.returncode != 0 or length < 0.3:
-            self.statusBar().showMessage("VOX1 : rien d'enregistré (micro muet ?) — "
+            self.statusBar().showMessage(f"VOX{n} : rien d'enregistré (micro muet ?) — "
                                          "message précédent gardé s'il existe", 8000)
             return
-        os.remove(self.vox1_tmp)
-        self.statusBar().showMessage(f"VOX1 : message enregistré ({length:.1f} s). "
-                                     "Levier VOX1 en bas pour l'émettre", 8000)
+        os.replace(tmp, path)
+        os.remove(path + ".brut.wav")
+        self.statusBar().showMessage(f"VOX{n} : message enregistré ({length:.1f} s). "
+                                     f"Appuie sur VOX{n}, puis dis « VOX {n} » "
+                                     "pour l'émettre", 8000)
 
-    def _vox1_toggled(self, on):
-        if not on:
-            if self.vox1_sending and self.tx_active:
-                self.stop_tx("VOX1 arrêté")
-            return
+    @staticmethod
+    def _wav_seconds(path):
+        try:
+            with wave.open(path) as w:
+                return w.getnframes() / w.getframerate()
+        except (OSError, wave.Error, EOFError):
+            return 0.0
+
+    def _vox_msg_send(self, n):
+        """« VOX n » entendu : émission du message, puis réception dès la fin."""
+        self.vox_msg_armed.discard(n)       # une seule émission par appui
         problem = None
         if not self.civ:
-            problem = "VOX1 : émission impossible sans CAT"
+            problem = "émission impossible sans CAT"
         elif self.tx_active:
-            problem = "VOX1 : déjà en émission"
-        elif self.vox1_rec is not None:
-            problem = "VOX1 : termine d'abord l'enregistrement du message"
-        elif not os.path.exists(VOX1_FILE):
-            problem = "VOX1 : pas encore de message (clic droit sur VOX1 → Enregistrer)"
+            problem = "déjà en émission"
         elif base_mode(self.mode_combo.currentText()) not in ("LSB", "USB", "AM", "FM"):
-            problem = "VOX1 : seulement en phonie (LSB, USB, AM, FM)"
+            problem = "seulement en phonie (LSB, USB, AM, FM)"
+        elif not os.path.exists(vox_msg_file(n)):
+            problem = "message introuvable"
         if problem:
-            self.statusBar().showMessage(problem, 6000)
-            self.vox1_toggle.setDown(False, emit=False)
+            self.statusBar().showMessage(f"« VOX {n} » entendu, mais {problem} : "
+                                         "rien d'émis", 8000)
+            self._mot_vox_need()
+            self._vox_msg_show()
             return
-        try:
-            with wave.open(VOX1_FILE) as w:
-                length = w.getnframes() / w.getframerate()
-        except (OSError, wave.Error, EOFError):
-            length = 0
-        self.vox1_sending = True
+        length = self._wav_seconds(vox_msg_file(n))
+        self.vox_msg_sending = n
         self.civ.set_ptt(True)
         self.tx_limit = max(TX_TIMEOUT, length + 15)
         self.tx_active = True
@@ -5235,13 +5389,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_started = time.monotonic()
         self.tx_timer.start()
         self._set_ptt_button(True)
-        self.statusBar().showMessage(f"VOX1 : émission du message ({length:.1f} s)")
-        QtCore.QTimer.singleShot(300, self._vox1_play)   # la radio passe d'abord en émission
+        self.statusBar().showMessage(f"« VOX {n} » entendu : émission du message "
+                                     f"({length:.1f} s)")
+        self._vox_msg_show()
+        QtCore.QTimer.singleShot(300, lambda: self._vox_msg_play(n))  # radio en émission d'abord
 
-    def _vox1_play(self):
-        if self.tx_active and self.vox1_sending:
+    def _vox_msg_play(self, n):
+        if self.tx_active and self.vox_msg_sending == n:
             self.tx_player = subprocess.Popen(
-                ["paplay", f"--device={self.radio_sink}", VOX1_FILE])
+                ["paplay", f"--device={self.radio_sink}", vox_msg_file(n)])
 
     def _rec_switch(self, rec, switch, down):
         """Interrupteurs REC BF et VDO+BF : levier en bas = départ, en haut = arrêt."""
@@ -5894,9 +6050,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def stop_tx(self, reason=None):
         self._backlight_tx(False)           # rétro-éclairage : retour au calme
-        if getattr(self, "vox1_sending", False):
-            self.vox1_sending = False
-            self.vox1_toggle.setDown(False, emit=False)
+        if getattr(self, "vox_msg_sending", None):
+            self.vox_msg_sending = None
+            self._mot_vox_need()
+            self._vox_msg_show()
         if self.tx_player:
             self.tx_player.terminate()
             self.tx_player = None
@@ -5952,7 +6109,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if elapsed > self.tx_limit:
             self.stop_tx(f"Émission coupée au bout de {elapsed / 60:.0f} min")
         elif self.tx_player and self.tx_player.poll() is not None:
-            self.stop_tx("VOX1 : message émis, retour en réception" if self.vox1_sending
+            n = self.vox_msg_sending
+            self.stop_tx(f"VOX{n} : message émis, retour en réception" if n
                          else "Fichier émis en entier")
 
     def _cw_scope_update(self):
@@ -6772,23 +6930,42 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("VOX VOCAL : pas de micro", 5000)
                 self.vox_vocal_button.setChecked(False)
                 return
-            self._mot_vox_tick()
-            self.mot_vox.start(mic)
-            self.mot_vox_timer.start(100)
+            self._mot_vox_need()
             self.statusBar().showMessage(
                 "VOX VOCAL en marche : dis « VOX » au micro pour armer le VOX "
                 "(chargement de la reconnaissance, quelques secondes)", 8000)
         else:
+            self._mot_vox_need()
+            self.statusBar().showMessage("VOX VOCAL arrêté", 4000)
+
+    def _mot_vox_need(self):
+        """Écoute des mots au micro : en marche si VOX VOCAL est allumé ou si un
+        message VOX n attend d'être dit (et pas pendant l'enregistrement d'un message)."""
+        need = (self.vox_vocal_button.isChecked() or bool(self.vox_msg_armed)
+                or self.vox_learn is not None) and self.vox_msg_rec is None
+        # Whisper seulement pour VOX VOCAL ; VOX n : ta voix comparée aux exemples
+        self.mot_vox.transcribe = self.vox_vocal_button.isChecked() and self.vox_learn is None
+        if need and not self.mot_vox.running:
+            mic = self._vox_mic()
+            if mic:
+                self._mot_vox_tick()
+                self.mot_vox.start(mic)
+                self.mot_vox_timer.start(100)
+        elif not need and self.mot_vox.running:
             self.mot_vox_timer.stop()
             self.mot_vox.stop()
-            self.statusBar().showMessage("VOX VOCAL arrêté", 4000)
 
     def _mot_vox_tick(self):
         # pas d'écoute du mot pendant le VOX ou l'émission ; même seuil que le VOX
         self.mot_vox.paused = self.vox_button.isChecked() or self.tx_active
         self.mot_vox.threshold = self._vox_threshold()
-        if self.vox_vocal_button.isChecked() and not self.mot_vox.running:
-            self.vox_vocal_button.setChecked(False)         # micro perdu
+        if not self.mot_vox.running:                        # micro perdu
+            if self.vox_vocal_button.isChecked():
+                self.vox_vocal_button.setChecked(False)
+            if self.vox_msg_armed:
+                self.vox_msg_armed.clear()
+                self._vox_msg_show()
+                self.statusBar().showMessage("VOX n : micro perdu, attente annulée", 8000)
 
     def on_mot_vox(self):
         if not self.vox_vocal_button.isChecked() or self.vox_button.isChecked() \
@@ -6801,6 +6978,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                          "coupure 1 s après la fin de ta parole", 8000)
 
     def on_mot_vox_heard(self, text):
+        n = vox_number(text)
+        if n is not None or self.vox_msg_armed:
+            return      # VOX n : décidé par la voix (on_mot_vox_segment), pas par le texte
         if self.vox_vocal_button.isChecked() and not self.vox_button.isChecked():
             self.statusBar().showMessage(f"VOX VOCAL a entendu : « {text} »", 3000)
 

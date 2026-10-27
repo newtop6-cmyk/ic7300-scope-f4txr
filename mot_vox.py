@@ -29,6 +29,27 @@ MIN_BLOCKS, MAX_BLOCKS = 7, 50              # 0,2 s à 1,5 s
 VOX_WORDS = {"vox", "voxe", "box", "boxe", "fox", "vocs", "voks", "vax", "wox"}
 
 
+# ce que Whisper écrit pour le numéro qui suit « vox » (VOX 1, VOX 2…)
+NUM_WORDS = {"1": 1, "un": 1, "une": 1, "hein": 1, "one": 1, "1er": 1,
+             "2": 2, "deux": 2, "de": 2, "two": 2,
+             "3": 3, "trois": 3, "three": 3, "4": 4, "quatre": 4, "four": 4,
+             "5": 5, "cinq": 5, "6": 6, "six": 6, "7": 7, "sept": 7, "set": 7,
+             "8": 8, "huit": 8, "9": 9, "neuf": 9}
+
+
+def vox_number(text):
+    """« VOX 1 » → 1, « vox deux » → 2 ; None si ce n'est pas « VOX + numéro » seul."""
+    words = re.findall(r"[a-z0-9àâéèêëîïôöùûüç]+", text.lower())
+    if len(words) == 1:
+        m = re.fullmatch(r"([a-z]+)(\d)", words[0])
+        if m and m.group(1) in VOX_WORDS:
+            return int(m.group(2))
+        return None
+    if len(words) == 2 and words[0] in VOX_WORDS:
+        return NUM_WORDS.get(words[1])
+    return None
+
+
 def is_vox(text):
     words = re.findall(r"[a-zàâéèêëîïôöùûüç]+", text.lower())
     return len(words) == 1 and words[0] in VOX_WORDS
@@ -37,12 +58,14 @@ def is_vox(text):
 class MotVox(QtCore.QObject):
     heard = QtCore.pyqtSignal(str)
     word = QtCore.pyqtSignal()
+    segment = QtCore.pyqtSignal(bytes)      # chaque parole courte, son brut 16 kHz
 
     def __init__(self):
         super().__init__()
         self.source = None
         self.threshold = -40.0              # dBFS, suit le bouton de sensibilité du VOX
         self.paused = False
+        self.transcribe = True              # False : paroles envoyées sans Whisper
         self.running = False
         self.proc = None
         self.worker = None
@@ -67,7 +90,8 @@ class MotVox(QtCore.QObject):
                  f"--device={self.source}", "--latency-msec=30",
                  "--client-name=IC-7300 VOX VOCAL"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            self._start_worker()
+            if self.transcribe:
+                self._start_worker()            # sinon chargé au premier besoin
             pre = deque(maxlen=PRE_BLOCKS)
             speech, quiet = [], 0
             while self.running:
@@ -110,6 +134,9 @@ class MotVox(QtCore.QObject):
                     clip, speech = b"".join(speech), []
                     pre.clear()
                     if n >= MIN_BLOCKS and not self.paused:
+                        self.segment.emit(clip)
+                        if not self.transcribe:
+                            continue
                         text = self._transcribe(clip)
                         if text and self.running and not self.paused:
                             self.heard.emit(text)
