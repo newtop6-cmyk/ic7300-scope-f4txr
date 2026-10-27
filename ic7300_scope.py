@@ -50,6 +50,7 @@ from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
 from pot_knob import PotKnob, ScaleKnob
 from vox_pc import VoxMonitor
+from mot_vox import MotVox
 from voice_scope import VoiceScope
 from power_knob import MODE as KNOB_MODE, NamePlate, PowerKnob, VintageKnob, ScaleBakelite
 from band_keys import BandKey
@@ -2932,6 +2933,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_col.addWidget(self.emission_button, 0, QtCore.Qt.AlignHCenter)
         vox_row.addWidget(self.vox_knob)
         vox_row.addWidget(self.vox_label)
+        # VOX VOCAL : dire « VOX » au micro arme le VOX ; coupure 1 s après la parole
+        self.vox_vocal_button = QtWidgets.QPushButton("VOX\nVOCAL")
+        self.vox_vocal_button.setCheckable(True)
+        self.vox_vocal_button.setStyleSheet(PUSH_3D + "QPushButton { font-size: 8pt; }")
+        self.vox_vocal_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.vox_vocal_button.setToolTip(
+            "Commande à la voix : dis « VOX » seul au micro → le VOX se met en marche ; "
+            "parle, la radio émet ; 1 s après la fin de ta parole → retour en réception, "
+            "VOX coupé, et le Scope attend un nouveau « VOX ».")
+        self.vox_vocal_button.toggled.connect(self.on_vox_vocal_toggled)
+        self.mot_vox = MotVox()
+        self.mot_vox.word.connect(self.on_mot_vox)
+        self.mot_vox.heard.connect(self.on_mot_vox_heard)
+        self.vox_by_voice = False       # VOX armé par le mot « VOX »
+        self.mot_vox_timer = QtCore.QTimer(self)
+        self.mot_vox_timer.timeout.connect(self._mot_vox_tick)
+        vox_row.addWidget(self.vox_vocal_button)
         extras.addWidget(vox_box, 0, 7)
         # ÉGALISEUR : timbre de la voix d'émission (egaliseur.py, egaliseur-voix.ini)
         self.eq_engine = EqEngine()
@@ -6477,6 +6495,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- VOX sur le micro du PC : la parole fait passer la radio en émission ---
     VOX_VOICE_MODES = ("LSB", "USB", "AM", "FM")
     VOX_HANG_S = 2.0           # fin de modulation + 2 s → retour réception ET VOX coupé
+    VOX_VOCAL_HANG_S = 1.0     # VOX armé par le mot « VOX » : coupure 1 s après la parole
 
     def _vox_threshold(self):
         """Seuil en dBFS : sensibilité 0 % → -10 dB, 100 % → -60 dB."""
@@ -6508,6 +6527,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(
                 "VOX en marche : la radio ÉMET quand tu parles dans le micro du PC", 8000)
         else:
+            self.vox_by_voice = False
             if self.vox_monitor:
                 self.vox_monitor.stop()
                 self.vox_monitor = None
@@ -6543,10 +6563,54 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.vox_button.setStyleSheet(POWER_OFF)
                 else:
                     self.vox_tx = False
+        elif self.vox_tx and self.vox_by_voice and \
+                now - self.vox_last_voice > self.VOX_VOCAL_HANG_S:
+            self.vox_tx = False
+            self.stop_tx()
+            self._vox_disarm("VOX coupé : 1 s sans parole. Dis « VOX » pour le réarmer")
         elif self.vox_tx and now - self.vox_last_voice > self.VOX_HANG_S:
             self.vox_tx = False
             self.stop_tx()
             self._vox_disarm("VOX coupé : 2 s sans modulation. Rappuie sur VOX pour le réarmer")
+
+    def on_vox_vocal_toggled(self, on):
+        if on:
+            mic = self._vox_mic()
+            if not mic:
+                self.statusBar().showMessage("VOX VOCAL : pas de micro", 5000)
+                self.vox_vocal_button.setChecked(False)
+                return
+            self._mot_vox_tick()
+            self.mot_vox.start(mic)
+            self.mot_vox_timer.start(100)
+            self.statusBar().showMessage(
+                "VOX VOCAL en marche : dis « VOX » au micro pour armer le VOX "
+                "(chargement de la reconnaissance, quelques secondes)", 8000)
+        else:
+            self.mot_vox_timer.stop()
+            self.mot_vox.stop()
+            self.statusBar().showMessage("VOX VOCAL arrêté", 4000)
+
+    def _mot_vox_tick(self):
+        # pas d'écoute du mot pendant le VOX ou l'émission ; même seuil que le VOX
+        self.mot_vox.paused = self.vox_button.isChecked() or self.tx_active
+        self.mot_vox.threshold = self._vox_threshold()
+        if self.vox_vocal_button.isChecked() and not self.mot_vox.running:
+            self.vox_vocal_button.setChecked(False)         # micro perdu
+
+    def on_mot_vox(self):
+        if not self.vox_vocal_button.isChecked() or self.vox_button.isChecked() \
+                or self.tx_active:
+            return
+        self.vox_button.setChecked(True)
+        if self.vox_button.isChecked():
+            self.vox_by_voice = True
+            self.statusBar().showMessage("« VOX » entendu : VOX en marche, parle ; "
+                                         "coupure 1 s après la fin de ta parole", 8000)
+
+    def on_mot_vox_heard(self, text):
+        if self.vox_vocal_button.isChecked() and not self.vox_button.isChecked():
+            self.statusBar().showMessage(f"VOX VOCAL a entendu : « {text} »", 3000)
 
     def _vox_disarm(self, message):
         """Le VOX ne reste jamais armé après une émission : remise en marche manuelle."""
@@ -6671,6 +6735,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._remember_band()
+        self.mot_vox.stop()
         if self.cw_station is not None and self.cw_station.isVisible():
             self._cw_station_close()
         if self.ft8_toggle.down:
