@@ -19,6 +19,8 @@ SYNC_HZ, BLACK_HZ, WHITE_HZ, LEADER_HZ = 1200.0, 1500.0, 2300.0, 1900.0
 CENTER_HZ = 1700.0              # milieu de la bande utile (1100 à 2300 Hz)
 WORK_RATE = 12000               # fréquence de travail du décodeur (Hz)
 MS = WORK_RATE // 1000          # échantillons par milliseconde
+SMOOTH = 4                      # moyenne de la mesure de fréquence (0,33 ms) : moins de bruit
+FREQ_MIN, FREQ_MAX = 1000.0, 2600.0     # au-delà : parasite, ramené dans la bande
 
 
 class Mode:
@@ -224,6 +226,7 @@ class SstvDecoder:
         self._pending = np.zeros(0, np.float32)
         self._decim_count = 0
         self._prev = None
+        self._prod_tail = np.zeros(SMOOTH - 1, complex)
         self._lock = threading.Lock()
         self.finished = []          # (mode, image) terminées, à enregistrer
         self.tune_offset = 0.0      # Hz ajoutés (correspondant mal calé : tops ≠ 1200 Hz)
@@ -269,8 +272,16 @@ class SstvDecoder:
         else:
             z = np.concatenate([[z[0]], z])
         self._prev = z[-1]
+        # fréquence instantanée moins bruitée : produits z(k)·z*(k-1) moyennés sur
+        # SMOOTH échantillons avant l'angle (bien meilleur dans le bruit que l'angle
+        # de chaque produit), puis valeurs aberrantes (parasites) ramenées dans la bande
+        prod = z[1:] * np.conj(z[:-1])
+        prod = np.concatenate([self._prod_tail, prod])
+        smooth = np.convolve(prod, np.ones(SMOOTH), mode="valid")
+        self._prod_tail = prod[len(prod) - (SMOOTH - 1):]
         freq = (CENTER_HZ + self.tune_offset
-                + np.angle(z[1:] * np.conj(z[:-1])) * WORK_RATE / (2 * np.pi))
+                + np.angle(smooth) * WORK_RATE / (2 * np.pi))
+        freq = np.clip(freq, FREQ_MIN, FREQ_MAX)
         with self._lock:
             self._freq = np.concatenate([self._freq, freq.astype(np.float32)])
             if self.mode is None:
@@ -304,14 +315,16 @@ class SstvDecoder:
         last = blocks - 310           # il faut 300 ms après le bit de départ
         for b in range(first, last):
             # front 1900 → 1200 Hz : début du bit de départ
-            if abs(med(b, b + 25) - SYNC_HZ) > 50 or abs(med(b - 8, b) - LEADER_HZ) > 100:
+            # tolérances un peu larges : le bruit tire les fréquences mesurées vers
+            # le milieu de la bande ; parité et structure écartent les fausses alertes
+            if abs(med(b, b + 25) - SYNC_HZ) > 90 or abs(med(b - 8, b) - LEADER_HZ) > 150:
                 continue
-            if abs(med(b, b + 8) - SYNC_HZ) > 80:
+            if abs(med(b, b + 8) - SYNC_HZ) > 130:
                 continue                # b à quelques ms du front au plus
-            if abs(med(b - 150, b - 15) - LEADER_HZ) > 50:
+            if abs(med(b - 250, b - 15) - LEADER_HZ) > 90:
                 continue
             bits = [med(b + 30 * (k + 1) + 5, b + 30 * (k + 2) - 5) for k in range(8)]
-            if not all(1020 < f < 1380 for f in bits):
+            if not all(1000 <= f < 1420 for f in bits):
                 continue
             bits = [1 if f < SYNC_HZ else 0 for f in bits]
             if sum(bits[:7]) % 2 != bits[7]:
@@ -324,6 +337,7 @@ class SstvDecoder:
             around = range((b - 6) * MS, (b + 6) * MS)
             edge = max(around, key=lambda i: raw[i - 3 * MS:i].mean() - raw[i:i + 3 * MS].mean())
             self._begin(mode, self._base + edge + (300 + mode.first_sync) * MS)
+            self._vis_edge = self._base + edge  # pour revérifier le mode au rythme des tops
             return
         self._searched = self._base + max(last, first) * MS
 
@@ -367,6 +381,11 @@ class SstvDecoder:
         self._missed = 0
         self._uv = None
         self._previous_y = None
+        self._sync_hist = []                # (période, décalage) des tops bien reçus
+        self._drift = 0.0                   # dérive d'horloge apprise (échantillons/période)
+        self._good = 0                      # tops nets reçus
+        self._vis_edge = None               # front de l'en-tête VIS (si reçu)
+        self._checked = False               # mode revérifié au rythme des tops
 
     # -- lignes
 
@@ -382,9 +401,59 @@ class SstvDecoder:
             begin = self._start + self._offset + self.line * period
             self._decode_period(begin)
             self.line += 1
-            if self._missed > (40 if self.patient else 12) and self.line > 20:
+            if self.line == 8 and not self._checked and self._vis_edge is not None:
+                self._checked = True
+                if self._good < 5 and self._recheck_mode():
+                    return                      # autre mode : l'image repart du début
+                mode = self.mode
+            # en-tête reçu : mode et durée connus, on va jusqu'au bout sauf si le
+            # signal a vraiment disparu (60 tops manqués d'affilée)
+            if self._missed > (40 if self.patient else 60) and self.line > 20:
                 break                   # plus de synchro : fin du signal
         self._finish()
+
+    def _sync_cost(self, expected):
+        """Ressemblance à un top de synchro autour de `expected` (± 3 ms) : petit = net."""
+        mode_len = None
+        best = None
+        for shift in range(-3 * MS, 3 * MS + 1, 3):
+            a = self._at(expected + shift)
+            if a < 0 or a + 40 * MS >= len(self._freq):
+                return None
+            mode_len = self._cand_len
+            seg = self._freq[a:a + mode_len]
+            cost = float(np.mean(np.minimum(np.abs(seg - SYNC_HZ), 400)))
+            best = cost if best is None else min(best, cost)
+        return best
+
+    def _recheck_mode(self):
+        """En-tête VIS peut-être mal lu dans le bruit (un bit faux = autre mode) :
+        on essaie tous les modes au rythme réel des tops de synchro depuis l'en-tête,
+        et on reprend l'image avec le meilleur s'il colle nettement mieux."""
+        scores = []
+        for mode in MODES:
+            start = self._vis_edge + (300 + mode.first_sync) * MS
+            self._cand_len = max(int(mode.sync_length * MS), MS)
+            costs = []
+            for k in range(8):
+                c = self._sync_cost(int(round(start + k * mode.period * MS
+                                              + mode.sync_offset * MS)))
+                if c is None:
+                    break
+                costs.append(c)
+            if len(costs) >= 4:
+                scores.append((float(np.mean(costs)), mode, start))
+        if not scores:
+            return False
+        scores.sort(key=lambda s: s[0])
+        cost, mode, start = scores[0]
+        current = next((c for c, m, _ in scores if m is self.mode), None)
+        if mode is self.mode or cost > 200 or (current is not None and cost > 0.75 * current):
+            return False
+        edge = self._vis_edge
+        self._begin(mode, start)
+        self._vis_edge, self._checked = edge, True
+        return True
 
     def _resync(self, begin):
         """Cherche le top de synchro autour de sa place prévue (± 6 ms).
@@ -408,12 +477,24 @@ class SstvDecoder:
                     + np.mean(np.clip(BLACK_HZ - 50 - after, 0, 400)))
             if best_cost is None or cost < best_cost:
                 best, best_cost = shift, cost
-        if best_cost is not None and best_cost < 150:
+        # dans le bruit, un « top » loin de la place prévue est un faux : refusé
+        # (sauf s'il est très net) ; la 1re ligne cherche partout
+        plausible = self.line == 0 or abs(best) <= 2 * MS or (best_cost is not None and best_cost < 90)
+        if best_cost is not None and best_cost < 230 and plausible:
             # 1re ligne : on prend tout ; ensuite on lisse pour ne pas sauter
-            self._offset += best if self.line == 0 else 0.5 * best
-            self._missed = 0
+            # (top net : 0,5 ; top douteux dans le bruit : 0,2)
+            weight = 1.0 if self.line == 0 else (0.5 if best_cost < 150 else 0.2)
+            self._offset += weight * best
+            self._missed = 0 if best_cost < 150 else self._missed
+            self._good += best_cost < 150
+            self._sync_hist.append((self.line, self._offset))
+            self._sync_hist = self._sync_hist[-60:]
+            if len(self._sync_hist) >= 12:      # dérive d'horloge (pente) par moindres carrés
+                ls, os_ = np.array(self._sync_hist).T
+                self._drift = float(np.polyfit(ls, os_, 1)[0])
         else:
             self._missed += 1
+            self._offset += self._drift         # top manqué : on suit la dérive apprise
 
     def _scan(self, start_ms, ms, count, begin):
         """Moyenne de la fréquence sur `count` pixels d'un balayage."""
