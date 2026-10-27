@@ -33,6 +33,14 @@ class BandSelector(QtWidgets.QWidget):
         self.timer.timeout.connect(self._tick)
         self._drag = None
         self._wheel = 0
+        self.blink = True                   # la bande choisie clignote (bien visible)
+        self.blink_timer = QtCore.QTimer(self)
+        self.blink_timer.timeout.connect(self._blink)
+        self.blink_timer.start(260)
+
+    def _blink(self):
+        self.blink = not self.blink
+        self.update()
 
     # --- état -------------------------------------------------------------
     def set_band(self, name):
@@ -195,8 +203,19 @@ class BandSelector(QtWidgets.QWidget):
             p.setPen(QtGui.QPen(QtGui.QColor("#3a3020"), 1.4))
             p.drawLine(c + d * 49, c + d * 55)
             lp = self._label_pos(a)
-            self._led(p, c + d * 63, i == self.index)      # LED à côté de chaque bande
-            p.setPen(QtGui.QColor("#0d3c8c") if i == self.index else QtGui.QColor("#241c10"))
+            chosen = i == self.index
+            self._led(p, c + d * 63, chosen and self.blink)   # LED : clignote sur la bande
+            if chosen and self.blink:                         # nom de la bande : éclat
+                halo = QtGui.QRadialGradient(lp, 15)
+                halo.setColorAt(0, QtGui.QColor(80, 170, 255, 200))
+                halo.setColorAt(1, QtGui.QColor(30, 110, 255, 0))
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(halo)
+                p.drawEllipse(lp, 15, 15)
+            if chosen:
+                p.setPen(QtGui.QColor("#ffffff") if self.blink else QtGui.QColor("#0b4fd0"))
+            else:
+                p.setPen(QtGui.QColor("#241c10"))
             p.drawText(QtCore.QRectF(lp.x() - 14, lp.y() - 7, 28, 14), QtCore.Qt.AlignCenter, name)
         # bague chromée autour du bouton
         g = QtGui.QConicalGradient(c, 135)

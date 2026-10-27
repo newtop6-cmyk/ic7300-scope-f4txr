@@ -2559,14 +2559,10 @@ class MainWindow(QtWidgets.QMainWindow):
         meters.addStretch(1)                    # VFO entre les galvas et POWER
         self.vfo_slot = QtWidgets.QVBoxLayout()
         meters.addLayout(self.vfo_slot)
-        # à droite du VFO (décalé à gauche) : commutateur de bandes rotatif vintage
-        meters.addSpacing(BAND_SEL_GAP)
+        # à droite du VFO (décalé à gauche) : commutateur de bandes rotatif vintage,
+        # dans la grille du VFO (même axe horizontal que le centre du VFO)
         self.band_selector = BandSelector(BAND_SEL_PX)
         self.band_selector.changed.connect(self._band_selector_changed)
-        band_col = QtWidgets.QVBoxLayout()
-        band_col.addStretch()
-        band_col.addWidget(self.band_selector, 0, QtCore.Qt.AlignHCenter)
-        meters.addLayout(band_col)
         meters.addStretch(1)
         # à droite : galva POWER, jumeau du S-mètre
         self.power_meter = VintagePowerMeter()
@@ -2655,6 +2651,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
         vfo.addWidget(self.knob, 1, 0, 1, 4, QtCore.Qt.AlignCenter)
         vfo.addWidget(self.fine_plate, 1, 4, QtCore.Qt.AlignVCenter)   # à droite du VFO
+        vfo.setColumnMinimumWidth(5, BAND_SEL_GAP)
+        vfo.addWidget(self.band_selector, 1, 6, QtCore.Qt.AlignVCenter)  # centré sur le VFO
         step_row = QtWidgets.QHBoxLayout()
         step_row.setSpacing(4)
         step_row.addStretch()
@@ -3533,6 +3531,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rec_mic_timer = QtCore.QTimer(self)
         self.rec_mic_timer.timeout.connect(self._rec_links_check)
         self.rec_mic_timer.start(5000)
+        # MUET tenu : le flux d'écoute peut être recréé (relais, réseau) et repartir
+        # avec le son ; on remet toutes les 1,5 s l'état voulu
+        self.mute_guard_timer = QtCore.QTimer(self)
+        self.mute_guard_timer.timeout.connect(self._mute_guard)
+        self.mute_guard_timer.start(1500)
         QtCore.QTimer.singleShot(2500, self._rec_links_check)
         self.tx_player = None               # paplay du fichier
         self.tx_timer = QtCore.QTimer(self)
@@ -6859,6 +6862,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if fields[0] == index:
                 return fields[1]
         return None
+
+    def _mute_guard(self):
+        """Le son de la réception suit toujours l'interrupteur MUET (et reste coupé
+        en émission ou pendant l'attente d'un VOX n)."""
+        want = (self.mute_check.isChecked() or self.tx_active
+                or getattr(self, "vox_rx_muted", False))
+        stream = find_loopback_stream()
+        if stream is None:
+            return
+        if self.loopback is None or self.loopback[0] != stream[0]:
+            self.loopback = stream                  # flux recréé : on le reprend
+        if bool(stream[2]) != want:
+            subprocess.run(["pactl", "set-sink-input-mute", str(stream[0]),
+                            "1" if want else "0"], capture_output=True)
+            if want:
+                self.statusBar().showMessage("MUET rétabli (le son de la réception "
+                                             "était revenu tout seul)", 4000)
 
     def on_mute(self, muted):
         self._pactl_stream("set-sink-input-mute", "1" if muted else "0")
