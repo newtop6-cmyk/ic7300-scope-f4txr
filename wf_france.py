@@ -234,6 +234,8 @@ class WaterfallFrance(QtWidgets.QWidget):
     back = QtCore.pyqtSignal()              # RETOUR
     tune = QtCore.pyqtSignal(int, str)      # clic : se caler là (Hz, mode conseillé ou "")
     found = QtCore.pyqtSignal(dict)         # nouvelle station française sur la bande
+    fine = QtCore.pyqtSignal(int)           # réglage fin (glisser, molette) : Hz
+    fine_done = QtCore.pyqtSignal()         # fin du réglage fin : calage sur la voix
 
     def __init__(self):
         super().__init__()
@@ -278,6 +280,14 @@ class WaterfallFrance(QtWidgets.QWidget):
         # émetteurs en rouge clignotant (2 fois par seconde)
         self.blink_timer = QtCore.QTimer(self)
         self.blink_timer.timeout.connect(self._blink)
+        # réglage fin (glisser / molette) : envoi limité, puis calage sur la voix
+        self._fine_drag = None
+        self._fine_target = self._fine_sent = None
+        self._fine_timer = QtCore.QTimer(self)
+        self._fine_timer.timeout.connect(self._fine_send)
+        self._fine_end = QtCore.QTimer(self)
+        self._fine_end.setSingleShot(True)
+        self._fine_end.timeout.connect(lambda: self.fine_done.emit())
 
     # --- construction --------------------------------------------------------
     def _build(self):
@@ -981,6 +991,8 @@ class WaterfallFrance(QtWidgets.QWidget):
         BLU ou pointe de la CW). C'est la seule action de cet écran sur le VFO."""
         if event.button() != QtCore.Qt.LeftButton:
             return
+        if self._fine_drag is not None and self._fine_drag.get("moved"):
+            return                              # fin d'un glisser de réglage fin, pas un clic
         pos = event.scenePos()
         if self.dayp.sceneBoundingRect().contains(pos):         # échelle du jour
             g, _ = self._day_at(pos)
@@ -1090,10 +1102,59 @@ class WaterfallFrance(QtWidgets.QWidget):
             self._tune_station(s)
             self._refresh()
 
+    # --- réglage fin à l'oreille : glisser ou molette sur le waterfall ----------
+    FINE_HZ_PX = 10                         # glisser : 10 Hz par pixel (Ctrl : 1 Hz)
+
+    def _fine_set(self, hz):
+        """Nouvelle fréquence du réglage fin (envoyée au plus toutes les 40 ms)."""
+        self._fine_target = int(hz)
+        self.tune_label.setText(f"Réglage fin : {fmt_khz(hz / 1000)} kHz — "
+                                "glisser ou molette (Ctrl : 1 Hz, Maj : 100 Hz)")
+        if not self._fine_timer.isActive():
+            self._fine_timer.start(40)
+        self._fine_end.start(900)               # fin du réglage : calage sur la voix
+
+    def _fine_send(self):
+        if self._fine_target is not None and self._fine_target != self._fine_sent:
+            self._fine_sent = self._fine_target
+            self.fine.emit(self._fine_target)
+        else:
+            self._fine_timer.stop()
+
     def eventFilter(self, obj, event):
-        if event.type() == QtCore.QEvent.Wheel:
-            return True                         # molette sans effet sur le VFO
+        t = event.type()
+        if t == QtCore.QEvent.Wheel:
+            pos = self.graphics.mapToScene(event.pos())
+            if self.freq_hz and self._khz_at(pos)[0] is not None:
+                notches = event.angleDelta().y() / 120
+                mods = event.modifiers()
+                step = 1 if mods & QtCore.Qt.ControlModifier else \
+                    100 if mods & QtCore.Qt.ShiftModifier else 10
+                base = self._fine_target if self._fine_timer.isActive() or \
+                    self._fine_end.isActive() else self.freq_hz
+                self._fine_set(round((base + notches * step) / step) * step)
+            return True
+        if t == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+            if self.freq_hz and self._khz_at(self.graphics.mapToScene(event.pos()))[0] is not None:
+                self._fine_drag = {"x": event.pos().x(), "hz": self.freq_hz, "moved": False}
+            else:
+                self._fine_drag = None
+        elif t == QtCore.QEvent.MouseMove and self._fine_drag is not None \
+                and event.buttons() & QtCore.Qt.LeftButton:
+            dx = event.pos().x() - self._fine_drag["x"]
+            if abs(dx) > 4 or self._fine_drag["moved"]:
+                self._fine_drag["moved"] = True
+                per_px = 1 if event.modifiers() & QtCore.Qt.ControlModifier else self.FINE_HZ_PX
+                self._fine_set(self._fine_drag["hz"] + dx * per_px)
+        elif t == QtCore.QEvent.MouseButtonRelease and self._fine_drag is not None:
+            if self._fine_drag["moved"]:
+                QtCore.QTimer.singleShot(0, self._fine_drag_done)
+                return False
+            self._fine_drag = None
         return super().eventFilter(obj, event)
+
+    def _fine_drag_done(self):
+        self._fine_drag = None
 
     # --- capture d'écran -------------------------------------------------------
     def capture(self):

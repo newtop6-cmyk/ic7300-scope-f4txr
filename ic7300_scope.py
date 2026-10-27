@@ -2222,6 +2222,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fr_screen.back.connect(self._fr_reduce)
         self.fr_screen.span.connect(self._fr_span)
         self.fr_screen.tune.connect(self._fr_tune)
+        self.fr_screen.fine.connect(self._fr_fine)
+        self.fr_screen.fine_done.connect(self._fr_voice_calage)
         self.fr_screen.found.connect(self._fr_found)
         self.fr_hidden = []
         self.fr_saved_span = None
@@ -5155,6 +5157,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.civ.set_mode(mode)
             self._update_markers()
         self.tune_to(hz)
+        self._fr_voice_calage()
+
+    def _fr_fine(self, hz):
+        """Glisser / molette dans WATERFALL FR : la radio suit, au hertz près."""
+        if not self.civ:
+            return
+        if not getattr(self, "_fr_fine_on", False):
+            self._fr_fine_on = True
+            self._manual_tuning()               # une fois par réglage : recherches arrêtées
+        self.tune_to(hz)
+
+    def _fr_voice_calage(self):
+        """Fin du réglage : en BLU, le CALAGE AUTO BLU écoute la voix et ajuste
+        la fréquence au plus juste (voix naturelle)."""
+        self._fr_fine_on = False
+        if base_mode(self.mode_combo.currentText()) in ("LSB", "USB") \
+                and self.ssb_auto.isChecked():
+            QtCore.QTimer.singleShot(300, lambda: self._start_pull(True))
 
     def _ft8_keep_map_below(self):
         """Quand WSJT-X est au premier plan, la carte doit être juste dessous
