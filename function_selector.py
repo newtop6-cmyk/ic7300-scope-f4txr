@@ -42,7 +42,10 @@ class FunctionSelector(QtWidgets.QWidget):
         return [i for i, name in enumerate(self.positions) if name]
 
     def set_index(self, index, emit=True):
-        if not self.positions[index] or index == self.index:
+        if not self.positions[index]:
+            return
+        if index == self.index:
+            self.timer.start(16)                # revient se poser en douceur sur son cran
             return
         self.index = index
         self.timer.start(16)
@@ -66,12 +69,18 @@ class FunctionSelector(QtWidgets.QWidget):
         self.update()
 
     def _tick(self):
+        if getattr(self, "_drag", None):
+            return                              # la souris tient le bouton
         goal = ANGLES[self.index]
-        self.shown += (goal - self.shown) * 0.35
-        if abs(goal - self.shown) < 0.3:
+        self.shown += (goal - self.shown) * 0.2  # ralenti en fin de course : pose douce
+        if abs(goal - self.shown) < 0.2:
             self.shown = goal
             self.timer.stop()
         self.update()
+
+    def _angle_at(self, pos):
+        d = QtCore.QPointF(pos) - self.center
+        return max(ANGLES[0] - 6, min(ANGLES[-1] + 6, math.degrees(math.atan2(d.x(), -d.y()))))
 
     def mousePressEvent(self, event):
         pos = QtCore.QPointF(event.pos())
@@ -79,7 +88,33 @@ class FunctionSelector(QtWidgets.QWidget):
             if (pos - self._label_pos(a)).manhattanLength() < 22 and self.positions[i]:
                 self.set_index(i)
                 return
-        self._step(1)
+        # sur le bouton : on peut le tourner en glissant (doux) ; simple clic = cran suivant
+        self._drag = {"start": event.pos(), "moved": False}
+        self.timer.stop()
+
+    def mouseMoveEvent(self, event):
+        drag = getattr(self, "_drag", None)
+        if not drag:
+            return
+        if (event.pos() - drag["start"]).manhattanLength() > 4:
+            drag["moved"] = True
+        if drag["moved"]:
+            self.shown = self._angle_at(event.pos())   # le bec suit la souris
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        drag = getattr(self, "_drag", None)
+        self._drag = None
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        if not drag:
+            return
+        if not drag["moved"]:
+            self._step(1)                       # simple clic : cran suivant (comme avant)
+            return
+        # lâché : le cran utilisable le plus proche de l'angle atteint
+        best = min(self._usable(), key=lambda i: abs(ANGLES[i] - self.shown))
+        self.set_index(best)
 
     def wheelEvent(self, event):
         self._wheel += event.angleDelta().y()
