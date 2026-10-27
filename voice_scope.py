@@ -280,15 +280,23 @@ class VoiceScope(QtWidgets.QWidget):
         # ligne centrale de repos
         p.setPen(QtGui.QPen(QtGui.QColor(120, 255, 170, 70), 1))
         p.drawLine(QtCore.QPointF(screen.left() + 4, mid), QtCore.QPointF(screen.right() - 4, mid))
-        # surface entre les deux branches (lueur verte, plus forte au centre)
-        area = QtGui.QPolygonF(up + down[::-1])
-        g = QtGui.QLinearGradient(0, mid - half, 0, mid + half)
-        g.setColorAt(0.0, QtGui.QColor(40, 200, 110, 10))
-        g.setColorAt(0.5, QtGui.QColor(90, 255, 160, 75))
-        g.setColorAt(1.0, QtGui.QColor(40, 200, 110, 10))
-        p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(g)
-        p.drawPolygon(area)
+        # intérieur du spectre rempli : vert phosphore plein, plus lumineux au
+        # centre ; la partie déjà balayée (après le spot) un peu plus pâle
+        def fill(a, b, strength):
+            if b - a < 2:
+                return
+            area = QtGui.QPolygonF(up[a:b] + down[a:b][::-1])
+            g = QtGui.QLinearGradient(0, mid - half, 0, mid + half)
+            g.setColorAt(0.0, QtGui.QColor(30, 170, 90, int(150 * strength)))
+            g.setColorAt(0.35, QtGui.QColor(70, 235, 140, int(205 * strength)))
+            g.setColorAt(0.5, QtGui.QColor(170, 255, 205, int(235 * strength)))
+            g.setColorAt(0.65, QtGui.QColor(70, 235, 140, int(205 * strength)))
+            g.setColorAt(1.0, QtGui.QColor(30, 170, 90, int(150 * strength)))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(g)
+            p.drawPolygon(area)
+        fill(0, max(self.sweep, 1) + 1, 1.0)            # balayage en cours : plein
+        fill(max(self.sweep - 1, 0), n, 0.55)          # ancien balayage : plus pâle
         # partie ancienne (après le spot) plus pâle
         if self.sweep < n - 1:
             p.setPen(QtGui.QPen(QtGui.QColor(90, 255, 160, 70), 1.6))
