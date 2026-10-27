@@ -5239,12 +5239,16 @@ class MainWindow(QtWidgets.QMainWindow):
             problem = None
             if not os.path.exists(vox_msg_file(n)):
                 problem = f"VOX{n} : pas encore de message (clic droit sur VOX{n} → Enregistrer)"
-            elif not self.voice_cmds.learned(n):
-                self.vox_msg_dry_auto.add(n)    # jamais d'émission sans ta voix apprise
             elif self.vox_msg_rec is not None:
                 problem = "Termine d'abord l'enregistrement du message"
             elif not self._vox_mic():
                 problem = f"VOX{n} : pas de micro pour entendre « VOX {n} »"
+            if not problem and not self.voice_cmds.learned(n):
+                # voix pas encore apprise : l'appui lance l'apprentissage (jamais d'émission)
+                self._vox_msg_show()
+                self._vox_log(f"VOX{n} appuyé : voix pas apprise → apprentissage")
+                self._vox_learn_start(n)
+                return
             if problem:
                 self._vox_log(problem)
                 self.statusBar().showMessage(problem, 6000)
