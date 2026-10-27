@@ -2904,7 +2904,13 @@ class MainWindow(QtWidgets.QMainWindow):
         band_top.addWidget(self.preamp_box)
         keys = QtWidgets.QVBoxLayout()              # bandes et modes : un seul cadre
         keys.setSpacing(0)
-        keys.addLayout(bands)
+        # rangée des touches de bandes retirée : le commutateur rotatif la remplace
+        # (touches gardées en mémoire, cachées : le reste du code s'en sert)
+        for button in self.band_buttons.values():
+            button.hide()
+        self.bands_hidden_widget = QtWidgets.QWidget()
+        self.bands_hidden_widget.setLayout(bands)
+        self.bands_hidden_widget.hide()
         keys.addLayout(mode_line)
         band_top.addWidget(PanelFrame(keys), stretch=1)
         layout.addLayout(self.knob_bar)

@@ -69,7 +69,7 @@ class BandSelector(QtWidgets.QWidget):
         return QtCore.QPointF(math.sin(r), -math.cos(r))
 
     def _label_pos(self, a):
-        return self.C + self._dir(a) * 76
+        return self.C + self._dir(a) * 79
 
     def _lp(self, event):
         return QtCore.QPointF(event.pos()) / self.k
@@ -120,6 +120,35 @@ class BandSelector(QtWidgets.QWidget):
         event.accept()
 
     # --- dessin ------------------------------------------------------------
+    @staticmethod
+    def _led(p, at, on):
+        """Petite LED dans une bague chromée : bleue allumée, sinon éteinte."""
+        if on:
+            halo = QtGui.QRadialGradient(at, 10)
+            halo.setColorAt(0, QtGui.QColor(90, 180, 255, 220))
+            halo.setColorAt(1, QtGui.QColor(30, 110, 255, 0))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(halo)
+            p.drawEllipse(at, 10, 10)
+        g = QtGui.QConicalGradient(at, 135)
+        for stop, col in ((0, "#ffffff"), (0.25, "#777c82"), (0.5, "#e6e8ea"),
+                          (0.75, "#585d63"), (1, "#ffffff")):
+            g.setColorAt(stop, QtGui.QColor(col))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor("#16181a"), 0.6))
+        p.drawEllipse(at, 4.2, 4.2)
+        g = QtGui.QRadialGradient(at - QtCore.QPointF(0.8, 0.8), 3)
+        if on:
+            g.setColorAt(0, QtGui.QColor("#ffffff"))
+            g.setColorAt(0.4, QtGui.QColor("#9fd4ff"))
+            g.setColorAt(1, QtGui.QColor("#1e6bff"))
+        else:
+            g.setColorAt(0, QtGui.QColor("#3a4560"))
+            g.setColorAt(1, QtGui.QColor("#05070c"))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 0.5))
+        p.drawEllipse(at, 2.7, 2.7)
+
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -164,15 +193,9 @@ class BandSelector(QtWidgets.QWidget):
         for i, (name, a) in enumerate(zip(self.names, self.angles)):
             d = self._dir(a)
             p.setPen(QtGui.QPen(QtGui.QColor("#3a3020"), 1.4))
-            p.drawLine(c + d * 52, c + d * 60)
+            p.drawLine(c + d * 49, c + d * 55)
             lp = self._label_pos(a)
-            if i == self.index:
-                halo = QtGui.QRadialGradient(lp, 13)
-                halo.setColorAt(0, QtGui.QColor(70, 160, 255, 150))
-                halo.setColorAt(1, QtGui.QColor(30, 110, 255, 0))
-                p.setPen(QtCore.Qt.NoPen)
-                p.setBrush(halo)
-                p.drawEllipse(lp, 13, 13)
+            self._led(p, c + d * 63, i == self.index)      # LED à côté de chaque bande
             p.setPen(QtGui.QColor("#0d3c8c") if i == self.index else QtGui.QColor("#241c10"))
             p.drawText(QtCore.QRectF(lp.x() - 14, lp.y() - 7, 28, 14), QtCore.Qt.AlignCenter, name)
         # bague chromée autour du bouton
