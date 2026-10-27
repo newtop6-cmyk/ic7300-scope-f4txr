@@ -34,6 +34,7 @@ from ft8_map import Ft8Map
 from demo_finger import DemoFinger, SIZES as DEMO_SIZES
 from ball_button import BallButton
 from rtty_screen import RttyScreen
+from wf_france import WaterfallFrance
 from sstv_window import SstvWindow
 import sstv as sstv_modes
 from sstv_watch import SstvWatch
@@ -966,9 +967,14 @@ class CivReader(QtCore.QThread):
         self._data_off_mod = None
         self._transact(ser, (0x1A, 0x05, 0x00, 0x66), (0x1A,))
         saved = self._data_off_mod
-        if saved is not None and saved != 0x03:
+        if saved == 0x03 and load_state().get("tx_menu") is None:
+            # déjà sur USB sans trace d'une émission en cours : resté bloqué
+            # (appli coupée en pleine émission) → on reviendra à MIC,ACC
+            saved = 0x02
+        if saved is not None:
             update_state(tx_menu=saved)
-            self._command(ser, 0x1A, 0x05, 0x00, 0x66, 0x03)
+            if saved != 0x03:
+                self._command(ser, 0x1A, 0x05, 0x00, 0x66, 0x03)
 
     def _key_data(self, ser):
         # en mode data, le son vient de l'USB (réglage DATA MOD = USB) :
@@ -1986,6 +1992,8 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(5, 4, 5, 4)       # marges serrées : tout tient dans l'écran
+        layout.setSpacing(3)
 
         # Fréquence, mode et état
         top = QtWidgets.QHBoxLayout()
@@ -2207,6 +2215,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rtty_close.clicked.connect(lambda: self.rtty_toggle.setDown(False))
         self.rtty_timer = QtCore.QTimer(self)
         self.rtty_timer.timeout.connect(self._rtty_tick)
+        # WATERFALL FR : waterfall plein écran + stations françaises (wf_france.py) ;
+        # cet écran regarde seulement : il ne touche jamais au VFO
+        self.fr_screen = WaterfallFrance()
+        self.fr_screen.back.connect(lambda: self.fr_toggle.setDown(False))
+        self.fr_screen.span.connect(self._fr_span)
+        self.fr_hidden = []
+        self.fr_saved_span = None
+        self.fr_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = waterfall plein écran "
+            "avec curseur, et les stations françaises de la bande en temps réel (RBN, "
+            "DX Summit, texte décodé) ; le VFO n'est jamais changé. En haut = retour.")
+        self.fr_toggle.toggled.connect(self._fr_toggled)
+        self.fr_timer = QtCore.QTimer(self)
+        self.fr_timer.timeout.connect(self._fr_tick)
         # DÉMO : la souris devient un gros doigt (demo_finger.py)
         self.demo_finger = DemoFinger()
         self.demo_toggle = ToggleSwitch(
@@ -2270,12 +2292,20 @@ class MainWindow(QtWidgets.QMainWindow):
                   (self.message_toggle, "MESSAGE"),
                   (self.ft8_toggle, "FT8"),
                   (self.rtty_toggle, "DÉCODEUR RTTY"),
+                  (self.fr_toggle, "WATERFALL FR"),
                   (self.demo_toggle, "DÉMO"))
+        # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
+        for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
+            knob.fine = True
+        # 80 px par bouton (au lieu de 88) : la rangée tient dans la largeur de l'écran
+        col_px = 80
         for bar, items in ((self.audio_bar, audio), (self.knob_bar, others)):
             for knob, name in items:
+                if knob.width() > col_px:
+                    knob.setFixedSize(col_px, round(knob.height() * col_px / knob.width()))
                 col = QtWidgets.QVBoxLayout()
                 col.setSpacing(1)
-                col.addWidget(NamePlate(name, 88), 0, QtCore.Qt.AlignHCenter)
+                col.addWidget(NamePlate(name, col_px), 0, QtCore.Qt.AlignHCenter)
                 col.addWidget(knob, 0, QtCore.Qt.AlignHCenter)
                 bar.addLayout(col)
             if bar is self.audio_bar:
@@ -2630,7 +2660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_plate.clicked.connect(self.on_tune)
         tune_col = QtWidgets.QVBoxLayout()          # descendu : dans l'axe de FONCTION
         tune_col.setContentsMargins(0, 0, 0, 0)
-        tune_col.addSpacing(115)
+        tune_col.addSpacing(60)                     # (115 avant : trop haut pour l'écran)
         tune_col.addWidget(self.tune_plate, 0, QtCore.Qt.AlignHCenter)
         self.tune_col = tune_col                    # le bouton EMISSION s'y ajoute plus bas
         modes.addLayout(tune_col, rows + 2, 0, 1, 2, QtCore.Qt.AlignHCenter)
@@ -3425,6 +3455,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                        self.wf_low + self.range_spin.value()))
 
     def on_scope(self, points, low, high):
+        if self.fr_toggle.down:
+            self.fr_screen.feed_scope(points, low, high)
         self.hunter.feed_scope(points, low, high)
         self.cw_hunter.feed_scope(points, low, high)
         self.scanner.feed_scope(points, low, high)
@@ -4350,6 +4382,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "(plus de son d'origine quand le signal est faible). Recliquer pour arrêter.")
 
     def _apply_direct_volume(self):
+        """Regroupe les changements rapides (bouton qu'on glisse) : le son suit
+        en douceur, sans file d'attente de commandes pactl."""
+        if not hasattr(self, "_volume_timer"):
+            self._volume_timer = QtCore.QTimer(self)
+            self._volume_timer.setSingleShot(True)
+            self._volume_timer.timeout.connect(self._apply_direct_volume_now)
+        if not self._volume_timer.isActive():
+            self._volume_timer.start(30)
+
+    def _apply_direct_volume_now(self):
         """Volume du son direct : Volume PC, réduit à la part d'origine sous RNNoise."""
         volume = self.pc_volume.value() * self._preamp_factor()
         if self.rnnoise_button.isChecked():
@@ -4723,6 +4765,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if on:
             if self.rtty_toggle.down:           # un seul écran plein à la fois
                 self.rtty_toggle.setDown(False)
+            if self.fr_toggle.down:
+                self.fr_toggle.setDown(False)
             if self.vox_button.isChecked():         # le micro ne doit pas émettre
                 self.vox_button.setChecked(False)
             if not self.ft8_server.start():
@@ -4921,6 +4965,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if on:
             if self.ft8_toggle.down:            # un seul écran plein à la fois
                 self.ft8_toggle.setDown(False)
+            if self.fr_toggle.down:
+                self.fr_toggle.setDown(False)
             if self.civ and not self.tx_active:
                 self._manual_tuning()
                 hz = self.freq_hz or 14_085_000
@@ -4952,6 +4998,52 @@ class MainWindow(QtWidgets.QMainWindow):
             self._restore_windows(self.rtty_hidden)
             self.rtty_hidden = []
             self.decoder_combo.setCurrentIndex(self.rtty_prev_decoder)
+
+    # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
+    def _fr_tick(self):
+        self.fr_screen.set_frequency(self.freq_hz, self.mode_combo.currentText())
+
+    def _fr_span(self, hz):
+        """Bouton de largeur de l'écran : largeur du scope (pas la fréquence)."""
+        index = self.span_combo.findData(hz)
+        if index >= 0:
+            self.span_combo.setCurrentIndex(index)
+            self.on_span_selected()
+        self.fr_screen.set_span(hz)
+
+    def _fr_toggled(self, on):
+        if on:
+            if self.ft8_toggle.down:            # un seul écran plein à la fois
+                self.ft8_toggle.setDown(False)
+            if self.rtty_toggle.down:
+                self.rtty_toggle.setDown(False)
+            self.fr_saved_span = self.span_combo.currentData()
+            screen = (self.windowHandle().screen() if self.windowHandle()
+                      else QtWidgets.QApplication.primaryScreen())
+            self.fr_screen.setGeometry(screen.geometry())
+            self.fr_screen.set_span(self.fr_saved_span)
+            self._fr_tick()
+            self.fr_screen.start()
+            self.fr_screen.showFullScreen()
+            self.fr_screen.raise_()
+            self.fr_timer.start(250)
+
+            def hide_others():
+                if self.fr_toggle.down:
+                    keep = {int(self.fr_screen.winId())}
+                    if self.console_button.isChecked():
+                        keep |= set(console.terminal_windows())
+                    self.fr_hidden = self._hide_windows(keep)
+            QtCore.QTimer.singleShot(400, hide_others)
+        else:
+            self.fr_timer.stop()
+            self.fr_screen.stop()
+            if self.fr_saved_span is not None \
+                    and self.fr_saved_span != self.span_combo.currentData():
+                self._fr_span(self.fr_saved_span)       # largeur d'avant rendue
+            self.fr_saved_span = None
+            self._restore_windows(self.fr_hidden)
+            self.fr_hidden = []
 
     def _ft8_keep_map_below(self):
         """Quand WSJT-X est au premier plan, la carte doit être juste dessous
@@ -6116,6 +6208,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cw_station.feed_rx(text)
         if self.rtty_toggle.down:
             self.rtty_screen.feed_text(text)
+        if self.fr_toggle.down:
+            self.fr_screen.feed_text(text)
         if self.cw_view_active:
             self.cw_text.moveCursor(QtGui.QTextCursor.End)
             self.cw_text.insertPlainText(text)
@@ -6327,6 +6421,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ft8_toggle.setDown(False)
         if self.rtty_toggle.down:
             self.rtty_toggle.setDown(False)
+        if self.fr_toggle.down:
+            self.fr_toggle.setDown(False)
         self.loupe.stop()
         self.loupe.close()
         self.demo_finger.stop()             # la flèche de la souris revient

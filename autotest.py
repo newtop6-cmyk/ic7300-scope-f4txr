@@ -196,14 +196,14 @@ except ValueError:
 # 9. waterfall : relances dans les 10 dernières minutes
 log = os.path.join(HERE, "tx-debug.log")
 recent = 0
-if os.path.exists(log):
+if os.path.exists(log) and time.time() - os.path.getmtime(log) < 600:
     now = time.time()
     today = time.strftime("%Y-%m-%d ")
     for line in open(log, errors="ignore").read().splitlines()[-200:]:
         if "relance" in line:
             try:
                 t = time.mktime(time.strptime(today + line.split(".")[0], "%Y-%m-%d %H:%M:%S"))
-                recent += now - t < 600
+                recent += 0 <= now - t < 600
             except ValueError:
                 pass
 add("Affichage", "Waterfall (relances / 10 min)", recent <= 3, f"{recent} relance(s)")

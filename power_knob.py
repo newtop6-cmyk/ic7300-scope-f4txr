@@ -27,6 +27,10 @@ class VintageKnob(QtWidgets.QWidget):
         self.value = 0
         self._dragging = False
         self._wheel = 0
+        # fine=True (volumes) : réglage RELATIF et doux — glisser vers le haut ou
+        # la droite monte, ~400 px pour toute la course, Ctrl = 4 fois plus fin
+        self.fine = False
+        self._anchor = None
         self.setCursor(QtCore.Qt.OpenHandCursor)
         if tooltip:
             self.setToolTip(tooltip)
@@ -77,9 +81,13 @@ class VintageKnob(QtWidgets.QWidget):
             if self.isEnabled() and event.button() == QtCore.Qt.LeftButton:
                 self._direct = True
                 self._dragging = True
-                w = self._watts_at(event.pos())
-                if w is not None:
-                    self._user_set(w)
+                if self.fine:
+                    self._set_anchor(event.globalPos())
+                    self.setCursor(QtCore.Qt.SizeVerCursor)
+                else:
+                    w = self._watts_at(event.pos())
+                    if w is not None:
+                        self._user_set(w)
             event.accept()
             return
         if self._dragging and not self.rect().contains(event.pos()):
@@ -98,15 +106,41 @@ class VintageKnob(QtWidgets.QWidget):
             self._release()
         elif self.isEnabled():
             self._dragging = True
+            if self.fine:
+                self._set_anchor(QtGui.QCursor.pos())
             self.setMouseTracking(True)
             self.grabMouse(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
             self.grabKeyboard()
             self.update()
         event.accept()
 
+    def mouseReleaseEvent(self, event):
+        if getattr(self, "_direct", False) and self._dragging:
+            self._direct = False
+            self._dragging = False
+            self._anchor = None
+            self.setCursor(QtCore.Qt.OpenHandCursor)
+            self.update()
+        event.accept()
+
+    def _set_anchor(self, gpos):
+        self._anchor = (gpos.x(), gpos.y(), float(self.value),
+                        bool(QtWidgets.QApplication.keyboardModifiers()
+                             & QtCore.Qt.ControlModifier))
+
+    def _fine_value(self, gpos):
+        """Valeur d'après le déplacement depuis le point de départ (relatif)."""
+        ctrl = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ControlModifier)
+        if self._anchor is None or ctrl != self._anchor[3]:
+            self._set_anchor(gpos)              # Ctrl appuyé/lâché : repart d'ici, sans saut
+        x0, y0, v0, ctrl = self._anchor
+        rate = self.maximum / 400 / (4 if ctrl else 1)
+        return v0 + ((y0 - gpos.y()) + (gpos.x() - x0)) * rate
+
     def _release(self):
         if not self._dragging:
             return
+        self._anchor = None
         self._dragging = False
         self.setMouseTracking(False)
         self.releaseMouse()
@@ -131,19 +165,15 @@ class VintageKnob(QtWidgets.QWidget):
     def mouseMoveEvent(self, event):
         if not self._dragging:
             return
+        if self.fine:
+            self._user_set(self._fine_value(event.globalPos()))
+            return
         if not getattr(self, "_direct", False) and self._too_far(event.pos()):
             self._release()
             return
         w = self._watts_at(event.pos())
         if w is not None and abs(w - self.value) <= self.maximum / 2:     # pas de saut 0 ↔ 100
             self._user_set(w)
-
-    def mouseReleaseEvent(self, event):
-        if getattr(self, "_direct", False):     # mode direct : on lâche, c'est fini
-            self._direct = False
-            self._dragging = False
-            self.update()
-        event.accept()
 
     # --- dessin ----------------------------------------------------------
     def _dir(self, watts):
@@ -318,7 +348,7 @@ class ScaleBakelite(VintageKnob):
         self.text_fn = text_fn
 
     def setValue(self, value):
-        value = round(max(0.0, min(10.0, value)), 1)
+        value = round(max(0.0, min(10.0, value)), 2 if self.fine else 1)
         if value != self.value:
             self.value = value
             self.update()
@@ -337,6 +367,9 @@ class ScaleBakelite(VintageKnob):
 
     def mouseMoveEvent(self, event):
         if not self._dragging:
+            return
+        if self.fine:
+            self.setValue(self._fine_value(event.globalPos()))
             return
         if not getattr(self, "_direct", False) and self._too_far(event.pos()):
             self._release()
