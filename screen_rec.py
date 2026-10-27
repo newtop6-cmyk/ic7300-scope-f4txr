@@ -19,6 +19,7 @@ from PyQt5 import QtCore, QtWidgets
 
 AUDIO_SOURCE = "ic7300_enregistrement.monitor"
 OUT_DIR = os.path.expanduser("~")
+OUT_DIR_BF = os.path.expanduser("~/REC BF")          # REC BF : son seul
 TMP_DIR = os.path.expanduser("~/.cache/ic7300-scope/rec")
 RATE, CHANNELS = 48000, 2
 
@@ -56,7 +57,9 @@ class ScreenRecorder(QtCore.QObject):
         os.makedirs(TMP_DIR, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d_%H.%M.%S")
         name = f"REC-BF-{stamp}.ogg" if self.audio_only else f"MUSARDE-{stamp}.mkv"
-        self.path = os.path.join(OUT_DIR, name)
+        out = OUT_DIR_BF if self.audio_only else OUT_DIR
+        os.makedirs(out, exist_ok=True)
+        self.path = os.path.join(out, name)
         self.tmp_video = os.path.join(TMP_DIR, f"video-{stamp}.mkv")
         self.tmp_audio = os.path.join(TMP_DIR, f"son-{stamp}.raw")
         geo = QtWidgets.QApplication.primaryScreen().geometry()

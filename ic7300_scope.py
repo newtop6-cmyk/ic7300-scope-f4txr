@@ -2263,7 +2263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
         self.rec_bf_toggle = ToggleSwitch(
             "OFF", "ON", tooltip="REC BF : levier en bas = enregistre le son du trafic "
-            "(réception, émission et ton micro), sans l'image, dans ~/REC-BF-date.ogg ; "
+            "(réception, émission et ton micro), sans l'image, dans le dossier ~/REC BF (REC-BF-date.ogg) ; "
             "en haut = arrêt.")
         self.rec_bf_toggle.toggled.connect(
             lambda down: self._rec_switch(self.rec_bf, self.rec_bf_toggle, down))
