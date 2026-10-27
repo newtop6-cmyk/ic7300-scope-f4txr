@@ -33,6 +33,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ball_button import BallButton
 from kiwi_scan import KiwiScan, PHONE as SCAN_PHONE
+import callsigns
+from voice_call import VoiceCall
+
+VOICE_MODES = ("LSB", "USB", "AM", "FM")
 
 MY_CALL = "F4TXR"
 HISTORY = 400                   # lignes du waterfall
@@ -126,8 +130,10 @@ def fmt_khz(khz):
 
 
 class FrenchSpots(QtCore.QObject):
-    """Sources de spots en tâche de fond ; n'émet que les stations françaises."""
+    """Sources de spots en tâche de fond : `spot` = stations françaises,
+    `any_spot` = toutes les stations (pour reconnaître celle qu'on écoute)."""
     spot = QtCore.pyqtSignal(dict)
+    any_spot = QtCore.pyqtSignal(dict)
     status = QtCore.pyqtSignal(str, bool)     # (source, liaison bonne)
 
     def __init__(self):
@@ -170,12 +176,15 @@ class FrenchSpots(QtCore.QObject):
                     *lines, buf = buf.split(b"\n")
                     for raw in lines:
                         m = RBN_LINE.search(raw.decode("latin-1"))
-                        if m and is_french(m.group(3)):
-                            self.spot.emit({
-                                "call": m.group(3).upper(), "hz": int(float(m.group(2)) * 1000),
-                                "mode": m.group(4), "snr": int(m.group(5)), "src": "RBN",
-                                "t": time.time(), "info": m.group(7).strip(),
-                                "by": m.group(1).split("-")[0]})
+                        if not m:
+                            continue
+                        s = {"call": m.group(3).upper(), "hz": int(float(m.group(2)) * 1000),
+                             "mode": m.group(4), "snr": int(m.group(5)), "src": "RBN",
+                             "t": time.time(), "info": m.group(7).strip(),
+                             "by": m.group(1).split("-")[0]}
+                        self.any_spot.emit(s)
+                        if is_french(s["call"]):
+                            self.spot.emit(s)
             except OSError:
                 pass
             finally:
@@ -205,8 +214,7 @@ class FrenchSpots(QtCore.QObject):
                     spots = json.load(r)
                 self.status.emit("DX Summit", True)
                 for s in reversed(spots):           # du plus ancien au plus récent
-                    if s.get("id") in seen or not is_french(s.get("dx_call", ""),
-                                                            s.get("dx_country")):
+                    if s.get("id") in seen:
                         continue
                     seen.add(s.get("id"))
                     try:
@@ -215,10 +223,12 @@ class FrenchSpots(QtCore.QObject):
                         t = time.time()
                     if time.time() - t > KEEP_S:
                         continue
-                    self.spot.emit({
-                        "call": s["dx_call"].upper(), "hz": int(float(s["frequency"]) * 1000),
-                        "mode": "", "snr": None, "src": "DXS", "t": t,
-                        "info": s.get("info") or "", "by": s.get("de_call", "")})
+                    spot = {"call": s["dx_call"].upper(), "hz": int(float(s["frequency"]) * 1000),
+                            "mode": "", "snr": None, "src": "DXS", "t": t,
+                            "info": s.get("info") or "", "by": s.get("de_call", "")}
+                    self.any_spot.emit(spot)
+                    if is_french(s.get("dx_call", ""), s.get("dx_country")):
+                        self.spot.emit(spot)
                 if len(seen) > 5000:
                     seen = set(list(seen)[-2000:])
             except (OSError, ValueError, KeyError):
@@ -265,7 +275,14 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.scan_seg = None
         self.spots = FrenchSpots()
         self.spots.spot.connect(self.add_spot)
+        self.spots.any_spot.connect(self._any_spot)
         self.spots.status.connect(self._source_status)
+        # station écoutée (tous pays, tous modes) : spots, texte décodé, voix
+        self.band_spots = {}                # indicatif → spot (bande du VFO, tous pays)
+        self.heard = None                   # {call, src, rx, t, hz}
+        self.voice = VoiceCall()
+        self.voice.heard.connect(self._voice_heard)
+        self.audio_source = None
         self.scan = KiwiScan()
         self._build()
         self.scan.status.connect(self.scan_label.setText)
@@ -419,6 +436,17 @@ class WaterfallFrance(QtWidgets.QWidget):
         middle.addWidget(self.graphics, stretch=1)
 
         side = QtWidgets.QVBoxLayout()
+        # STATION ÉCOUTÉE : indicatif (rouge clignotant) et pays de la station calée
+        self.heard_label = QtWidgets.QLabel()
+        self.heard_label.setFixedWidth(560)
+        self.heard_label.setMinimumHeight(92)
+        self.heard_label.setStyleSheet(
+            "QLabel { background: rgba(40, 6, 6, 170); border: 2px solid #803030; "
+            "border-radius: 10px; padding: 6px 10px; }")
+        self.heard_label.setToolTip("Indicatif de la station sur laquelle la radio est calée : "
+                                    "spots RBN / DX Summit (tous pays), texte décodé (CW, RTTY, "
+                                    "PSK) ou indicatif épelé à la voix (Whisper)")
+        side.addWidget(self.heard_label)
         head = QtWidgets.QLabel("Stations françaises sur la bande")
         head.setStyleSheet("font: bold 13pt sans-serif; color: #ffffff;")
         side.addWidget(head)
@@ -516,6 +544,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.timer.stop()
         self.spots.stop()
         self.scan.stop()
+        self.voice.stop()
         self.hide()
 
     # --- scan par le récepteur Internet --------------------------------------
@@ -755,6 +784,11 @@ class WaterfallFrance(QtWidgets.QWidget):
     def feed_text(self, text):
         """Texte décodé (CW, RTTY, PSK) : les indicatifs français entendus ici."""
         self.text_tail = (self.text_tail + text.upper())[-200:]
+        # station écoutée, tous pays : l'indicatif après « DE » d'abord (l'émetteur)
+        for call in callsigns.calls_in_text(self.text_tail):
+            if call != MY_CALL:
+                self._heard_set(call, "décodé ici", MY_CALL)
+                break
         for call in set(TEXT_CALL.findall(self.text_tail)):
             if call != MY_CALL and is_french(call) and self.freq_hz:
                 self.add_spot({"call": call, "hz": self.freq_hz, "mode": self.mode,
@@ -782,6 +816,75 @@ class WaterfallFrance(QtWidgets.QWidget):
 
     def _source_status(self, name, ok):
         self.src_state[name] = ok
+
+    # --- station écoutée : indicatif et pays, tous modes, tous pays -------------
+    def set_audio_source(self, source):
+        """Son reçu de la radio (pour l'indicatif dit à la voix)."""
+        self.audio_source = source
+
+    def _any_spot(self, s):
+        band = band_of(self.freq_hz) if self.freq_hz else None
+        if band and band[1] <= s["hz"] <= band[2]:
+            self.band_spots[s["call"]] = s
+            if len(self.band_spots) > 3000:     # on oublie les plus anciens
+                for call, _ in sorted(self.band_spots.items(), key=lambda kv: kv[1]["t"])[:1000]:
+                    del self.band_spots[call]
+
+    def _voice_heard(self, calls, text):
+        mine = [c for c in calls if c != MY_CALL]
+        if mine:
+            self._heard_set(mine[-1], "voix (Whisper)", "?", text)
+
+    def _heard_set(self, call, src, rx, text=""):
+        """Indicatif trouvé pour la fréquence écoutée (le plus direct l'emporte)."""
+        self.heard = {"call": call, "src": src, "rx": rx, "t": time.time(),
+                      "hz": self.freq_hz, "country": callsigns.country(call) or "?",
+                      "text": text}
+        self.heard_label.setText(self._heard_html(self.blink_on))
+
+    def _heard_update(self):
+        """Toutes les secondes : nouvelle fréquence → on oublie ; sinon un spot
+        (tous pays) tout près de la fréquence donne l'indicatif tout de suite."""
+        now = time.time()
+        f = self.freq_hz
+        if self.heard and (not f or abs(self.heard["hz"] - f) > 1500):
+            self.heard = None
+        for call in [c for c, s in self.band_spots.items() if now - s["t"] > KEEP_S]:
+            del self.band_spots[call]
+        if f and (self.heard is None or self.heard["src"].startswith("spot")):
+            tol = 300 if self.mode.startswith(("CW", "RTTY")) else 1200
+            near = [s for s in self.band_spots.values()
+                    if abs(s["hz"] - f) <= tol and now - s["t"] < 600]
+            if near:
+                s = max(near, key=lambda s: s["t"])
+                if not self.heard or self.heard["call"] != s["call"]:
+                    self._heard_set(s["call"], "spot " + ("RBN" if s["src"] == "RBN"
+                                                          else "DX Summit"), s["by"])
+                    self.heard["hz"] = f
+        # écoute de la voix : seulement écran visible, en BLU / AM / FM
+        want = self.isVisible() and self.audio_source and self.mode.split("-")[0] in VOICE_MODES \
+            and not self.mode.endswith("-D")
+        if want and not self.voice.running:
+            self.voice.start(self.audio_source)
+        elif not want and self.voice.running:
+            self.voice.stop()
+        self.heard_label.setText(self._heard_html(self.blink_on))
+
+    def _heard_html(self, on):
+        h = self.heard
+        title = "<span style='color:#ffb0b0; font-size:10pt'>STATION ÉCOUTÉE</span>"
+        if not h:
+            listen = " · écoute de la voix…" if self.voice.running else ""
+            return (f"{title}<br><span style='color:#a0a0a0; font-size:13pt'>"
+                    f"indicatif pas encore entendu{listen}</span>")
+        age = int(time.time() - h["t"])
+        rx = (f" · reçue par <span style='color:{RX_COLOR}'>{h['rx']}</span>"
+              if h["rx"] not in ("?", "", None) else "")
+        return (f"{title}<br>"
+                f"<span style='color:{self._tx_color(on)}; font-size:26pt; font-weight:bold'>"
+                f"{h['call']}</span>&nbsp;&nbsp;"
+                f"<span style='color:#ffffff; font-size:16pt; font-weight:bold'>{h['country']}</span><br>"
+                f"<span style='color:#cfcfcf; font-size:10pt'>{h['src']}{rx} · il y a {age} s</span>")
 
     def _band_stations(self):
         now = time.time()
@@ -837,6 +940,7 @@ class WaterfallFrance(QtWidgets.QWidget):
                  for name in ("RBN CW", "RBN FT8", "DX Summit")]
         self.src_label.setText("Sources : " + "   ".join(parts))
         self._place_marks(stations)
+        self._heard_update()
 
     def _place_marks(self, stations=None):
         """Indicatifs posés sur le waterfall, à leur fréquence (partie visible)."""
@@ -907,8 +1011,12 @@ class WaterfallFrance(QtWidgets.QWidget):
         age = int((time.time() - s["t"]) // 60)
         age_txt = "à l'instant" if age < 1 else f"{age} min"
         snr = f" {s['snr']} dB" if s["snr"] is not None else ""
+        if "country" not in s:                  # pays de l'émetteur, calculé une fois
+            s["country"] = callsigns.country(tx) if tx not in ("?", "QSO FR") else ""
+        where = f" <span style='color:#d8d8d8; font-size:9pt'>({s['country']})</span>" \
+            if s["country"] else ""
         return (f"<span style='color:#cfcfcf'>{fmt_khz(s['hz'] / 1000)}</span>&nbsp; "
-                f"<span style='color:{self._tx_color(on)}'>{tx}</span>"
+                f"<span style='color:{self._tx_color(on)}'>{tx}</span>{where}"
                 f"<span style='color:#8a8f98'> ← </span>"
                 f"<span style='color:{RX_COLOR}'>{rx}</span>&nbsp; "
                 f"<span style='color:{self._color(s)}; font-size:10pt'>"
@@ -917,6 +1025,8 @@ class WaterfallFrance(QtWidgets.QWidget):
     def _blink(self):
         """Clignotement des émetteurs (rouge) : 2 fois par seconde."""
         self.blink_on = not self.blink_on
+        if self.heard:
+            self.heard_label.setText(self._heard_html(self.blink_on))
         for label, group in self.mark_labels:
             label.setHtml(self._mark_html(group, self.blink_on))
         for label, s in self.list_labels:

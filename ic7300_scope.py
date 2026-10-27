@@ -2219,6 +2219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Levier ON = veille : l'écran s'ouvre tout seul à chaque nouvelle station
         # française ; RETOUR le réduit. Le VFO ne bouge que sur un clic dans l'écran.
         self.fr_screen = WaterfallFrance()
+        self.fr_screen.set_audio_source(args.source)    # indicatif dit à la voix
         self.fr_screen.back.connect(self._fr_reduce)
         self.fr_screen.span.connect(self._fr_span)
         self.fr_screen.tune.connect(self._fr_tune)
