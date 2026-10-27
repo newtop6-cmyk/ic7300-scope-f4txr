@@ -447,6 +447,8 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.heard_label.setToolTip("Indicatif de la station sur laquelle la radio est calée : "
                                     "spots RBN / DX Summit (tous pays), texte décodé (CW, RTTY, "
                                     "PSK) ou indicatif épelé à la voix (Whisper)")
+        self.heard_label.setCursor(QtCore.Qt.PointingHandCursor)
+        self.heard_label.installEventFilter(self)      # clic = calage sur la station
         side.addWidget(self.heard_label)
         head = QtWidgets.QLabel("Stations françaises sur la bande")
         head.setStyleSheet("font: bold 13pt sans-serif; color: #ffffff;")
@@ -893,6 +895,7 @@ class WaterfallFrance(QtWidgets.QWidget):
                     self._heard_set(s["call"], "spot " + ("RBN" if s["src"] == "RBN"
                                                           else "DX Summit"), s["by"])
                     self.heard["hz"] = f
+                    self.heard["spot"] = s          # fréquence exacte de la station
         # écoute de la voix : seulement écran visible, en BLU / AM / FM
         want = self.isVisible() and self.audio_source and self.mode.split("-")[0] in VOICE_MODES \
             and not self.mode.endswith("-D")
@@ -1151,6 +1154,15 @@ class WaterfallFrance(QtWidgets.QWidget):
         if self._fine_drag is not None and self._fine_drag.get("moved"):
             return                              # fin d'un glisser de réglage fin, pas un clic
         pos = event.scenePos()
+        # clic sur un indicatif affiché sur le waterfall : calage immédiat sur sa station
+        for label, group in self.mark_labels:
+            if label.sceneBoundingRect().contains(pos):
+                s = max(group, key=lambda s: s["t"])
+                self.selected = s["call"]
+                for c in self.cursor:
+                    c.setPos(s["hz"] / 1000)
+                self._tune_station(s)
+                return
         if self.dayp.sceneBoundingRect().contains(pos):         # échelle du jour
             g, _ = self._day_at(pos)
             if g:
@@ -1280,6 +1292,16 @@ class WaterfallFrance(QtWidgets.QWidget):
 
     def eventFilter(self, obj, event):
         t = event.type()
+        if obj is self.heard_label:
+            # clic sur l'indicatif de la STATION ÉCOUTÉE : calage immédiat sur elle
+            if t == QtCore.QEvent.MouseButtonPress and self.heard:
+                s = self.heard.get("spot")
+                if s:
+                    self._tune_station(s)
+                elif self.heard.get("hz"):
+                    self._tune(self.heard["hz"], "", self.heard["call"])
+                return True
+            return False
         if t == QtCore.QEvent.Wheel:
             pos = self.graphics.mapToScene(event.pos())
             if self.freq_hz and self._khz_at(pos)[0] is not None:
