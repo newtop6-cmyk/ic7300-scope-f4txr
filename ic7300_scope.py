@@ -3180,6 +3180,18 @@ class MainWindow(QtWidgets.QMainWindow):
         decoder_row.addWidget(self.record_button)
         decoder_row.addWidget(self.record_label)
         decoder_row.addWidget(record_folder)
+        # REC vidéo : écran + son du trafic (le même enregistreur que dans WATERFALL FR)
+        decoder_row.addSpacing(10)
+        self.rec_video_button = QtWidgets.QPushButton("⏺ REC vidéo")
+        self.rec_video_button.setToolTip(
+            "Vidéo de l'écran avec le son du trafic (micro + réception + émission) dans "
+            "~/MUSARDE-date.mkv ; nouveau clic = arrêt")
+        self.rec_video_button.clicked.connect(self.screen_rec.toggle)
+        decoder_row.addWidget(self.rec_video_button)
+        self.screen_rec.changed.connect(lambda *_: self._rec_video_show())
+        self.rec_video_timer = QtCore.QTimer(self)
+        self.rec_video_timer.timeout.connect(self._rec_video_show)
+        self.rec_video_timer.start(1000)
         self.record_timer = QtCore.QTimer(self)
         self.record_timer.setInterval(500)
         self.record_timer.timeout.connect(self.update_record_label)
@@ -5036,6 +5048,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tune_to(hz)
 
     # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
+    def _rec_video_show(self):
+        """Bouton REC vidéo de l'écran principal : rouge + durée pendant l'enregistrement."""
+        rec = self.screen_rec
+        if rec.recording:
+            s = int(rec.elapsed())
+            self.rec_video_button.setText(f"■ REC {s // 60:02d}:{s % 60:02d}")
+            self.rec_video_button.setStyleSheet("background: #c62828; color: white; font-weight: bold;")
+        elif rec.finishing:
+            self.rec_video_button.setText("⏳ assemblage…")
+            self.rec_video_button.setStyleSheet("background: #8a6d00; color: white;")
+        else:
+            self.rec_video_button.setText("⏺ REC vidéo")
+            self.rec_video_button.setStyleSheet("")
+
     def _fr_tick(self):
         self.fr_screen.set_frequency(self.freq_hz, self.mode_combo.currentText())
         if base_mode(self.mode_combo.currentText()) in ("LSB", "USB") and self.ssb_auto.isChecked():
