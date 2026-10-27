@@ -15,6 +15,8 @@ import subprocess
 import threading
 import time
 
+import numpy as np
+
 from PyQt5 import QtCore, QtWidgets
 
 AUDIO_SOURCE = "ic7300_enregistrement.monitor"
@@ -22,6 +24,33 @@ OUT_DIR = os.path.expanduser("~")
 OUT_DIR_BF = os.path.expanduser("~/REC BF")          # REC BF : son seul
 TMP_DIR = os.path.expanduser("~/.cache/ic7300-scope/rec")
 RATE, CHANNELS = 48000, 2
+# REC BF : volumes égalisés (réception faible remontée, voix forte calmée)
+# puis limiteur : plus de saturation dans le fichier
+BF_FILTER = "dynaudnorm=f=300:g=15:p=0.89:m=12,alimiter=limit=0.94:level=false"
+
+
+def sound_quality(path, raw=False):
+    """Qualité d'un son, seconde par seconde : (niveau médian dB, secondes
+    saturées, secondes trop faibles, durée s). raw=True : fichier brut s16le."""
+    if raw:
+        data = np.memmap(path, dtype=np.int16, mode="r")
+    else:
+        out = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "s16le",
+                              "-ac", str(CHANNELS), "-ar", str(RATE), "-"],
+                             capture_output=True).stdout
+        data = np.frombuffer(out, dtype=np.int16)
+    step = RATE * CHANNELS
+    secs = len(data) // step
+    if secs == 0:
+        return None
+    levels, clipped, weak = [], 0, 0
+    for i in range(secs):
+        block = data[i * step:(i + 1) * step].astype(np.float32) / 32768
+        db = 10 * np.log10(float(np.mean(block * block)) + 1e-12)
+        levels.append(db)
+        clipped += int(np.max(np.abs(block)) > 0.98)
+        weak += int(db < -45)
+    return float(np.median(levels)), clipped, weak, secs
 
 
 class ScreenRecorder(QtCore.QObject):
@@ -173,16 +202,26 @@ class ScreenRecorder(QtCore.QObject):
         try:
             audio.terminate()
             audio.wait(timeout=5)
+            before = sound_quality(self.tmp_audio, raw=True)
             done = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                  "-f", "s16le", "-ar", str(RATE), "-ac", str(CHANNELS), "-i", self.tmp_audio,
+                 "-af", BF_FILTER, "-ar", str(RATE),
                  "-c:a", "libvorbis", "-b:a", "128k", self.path],
                 capture_output=True, text=True)
             if done.returncode == 0 and os.path.exists(self.path):
                 os.remove(self.tmp_audio)
                 n = os.path.getsize(self.path) / 1e6
+                after = sound_quality(self.path)
+                report = ""
+                if before and after:
+                    report = (f" · qualité : niveau {before[0]:.0f} → {after[0]:.0f} dB, "
+                              f"saturation {before[1]} s → {after[1]} s, "
+                              f"passages trop faibles {before[2]} s → {after[2]} s")
+                    if before[1] > before[3] * 0.05:
+                        report += " ⚠ source souvent saturée : baisser VOLUME / GAIN MICRO"
                 self.changed.emit(False, f"Son enregistré : {os.path.basename(self.path)} "
-                                         f"({n:.1f} Mo)")
+                                         f"({n:.1f} Mo){report}")
             else:
                 self.changed.emit(False, f"Enregistrement du son raté : brut gardé dans "
                                          f"{TMP_DIR} ({done.stderr.strip()[-120:]})")
