@@ -1,6 +1,7 @@
 """Timbre « QSO » pour les messages VOX n : la voix brute du micro est égalisée
-pour avoir le même timbre que la référence (extrait d'un QSO réussi :
-~/.config/ic7300-scope/timbre-reference.wav), puis compressée et mise à niveau.
+pour avoir le même timbre que la référence (~/.config/ic7300-scope/
+timbre-reference.wav : le message préféré de l'utilisateur), fond nettoyé,
+compression très légère (2:1), crête mise à -1 dB.
 
 Usage : apply(entrée_wav, sortie_wav) → durée (s) ; lève une exception si échec."""
 
@@ -16,9 +17,12 @@ REFERENCE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser
 FINISH = ("silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.15,"
           "areverse,silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.25,"
           "areverse,"
-          "acompressor=threshold=-24dB:ratio=4:attack=5:release=120:makeup=6dB,"
-          "dynaudnorm=f=200:g=11:p=0.9:m=8,alimiter=limit=0.89:level=false,"
-          "afade=t=in:d=0.03")
+          # fond sonore nettoyé, sans pompage : réduction de bruit + porte douce
+          "afftdn=nr=14:nf=-55:tn=1,"
+          "agate=threshold=0.015:ratio=3:attack=5:release=150:range=0.15,"
+          # compression très légère (2:1) : la voix garde son relief
+          "acompressor=threshold=-22dB:ratio=2:attack=10:release=200:makeup=2dB,"
+          "alimiter=limit=0.89:level=false,afade=t=in:d=0.03")
 
 
 def _read(path):
@@ -74,5 +78,16 @@ def apply(src, dst):
     os.remove(tmp)
     if done.returncode != 0:
         raise RuntimeError(done.stderr.strip()[-150:])
+    # volume final : crête à -1 dB (gain simple, sans écraser)
     with wave.open(dst) as w:
-        return w.getnframes() / w.getframerate()
+        rate_o, frames = w.getframerate(), w.readframes(w.getnframes())
+    z = np.frombuffer(frames, "<i2").astype(np.float64) / 32768
+    peak = np.max(np.abs(z)) if len(z) else 0
+    if peak > 0:
+        z = z * (10 ** (-1 / 20) / peak)
+    with wave.open(dst, "wb") as o:
+        o.setnchannels(1)
+        o.setsampwidth(2)
+        o.setframerate(rate_o)
+        o.writeframes((np.clip(z, -1, 1) * 32767).astype("<i2").tobytes())
+    return len(z) / rate_o
