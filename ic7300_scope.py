@@ -5145,18 +5145,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fr_show()
 
     def _fr_show(self):
-        """Écran WATERFALL FR au premier plan, plein écran (un seul écran plein)."""
-        if self.fr_screen.isVisible():
-            return
-        if self.ft8_toggle.down or self.rtty_toggle.down or self.tx_active \
-                or (self.cw_station is not None and self.cw_station.isVisible()):
-            return                              # pas par-dessus FT8, RTTY, CW ni l'émission
+        """Écran WATERFALL FR au premier plan, plein écran. Ouvert seulement à la
+        demande (levier, clic droit) : plus aucune condition ne le bloque."""
+        if self.ft8_toggle.down:                # un seul écran plein : FT8 / RTTY fermés
+            self.ft8_toggle.setDown(False)
+        if self.rtty_toggle.down:
+            self.rtty_toggle.setDown(False)
         screen = (self.windowHandle().screen() if self.windowHandle()
                   else QtWidgets.QApplication.primaryScreen())
         self.fr_screen.setGeometry(screen.geometry())
         self.fr_screen.showFullScreen()
         self.fr_screen.raise_()
         self.fr_screen.activateWindow()
+        self.statusBar().showMessage("WATERFALL FR ouvert (RETOUR ou Échap pour revenir)", 4000)
 
         def hide_others():
             if self.fr_toggle.down and self.fr_screen.isVisible():

@@ -506,9 +506,25 @@ class WaterfallFrance(QtWidgets.QWidget):
         left.addWidget(self.tune_label)
         bottom.addLayout(left)
         bottom.addStretch()
+        self.span_buttons = QtWidgets.QButtonGroup(self)
+        lab = QtWidgets.QLabel("Affichage")
+        lab.setStyleSheet("font: 11pt sans-serif; color: #a0a0a0;")
+        bottom.addWidget(lab)
+        for hz, text in SPANS:
+            b = QtWidgets.QPushButton(text)
+            b.setCheckable(True)
+            b.setFocusPolicy(QtCore.Qt.NoFocus)
+            b.setStyleSheet("QPushButton { font: bold 11pt sans-serif; color: #ddd; "
+                            "background: #222a33; border: 1px solid #556; border-radius: 6px; "
+                            "padding: 5px 6px; } QPushButton:checked { background: #ffd54a; "
+                            "color: #000; }")
+            b.clicked.connect(lambda _, h=hz: self.span.emit(h))
+            self.span_buttons.addButton(b, hz)
+            bottom.addWidget(b)
+        bottom.addSpacing(12)
+        # boules tout à droite : le terminal (toujours devant, en bas à gauche) ne les cache pas
         self.back_button = BallButton("RETOUR", diameter=84)
-        self.back_button.setToolTip("Réduit cet écran (il se rouvre tout seul à la "
-                                    "prochaine station française trouvée)")
+        self.back_button.setToolTip("Réduit cet écran (retour au Scope ; Échap aussi)")
         self.back_button.clicked.connect(self.back.emit)
         bottom.addWidget(self.back_button)
         bottom.addSpacing(6)
@@ -528,22 +544,6 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.rec_label.setFixedWidth(110)
         self.rec_label.setStyleSheet("font: bold 13pt monospace; color: #ff4040;")
         bottom.addWidget(self.rec_label)
-        bottom.addStretch()
-        self.span_buttons = QtWidgets.QButtonGroup(self)
-        lab = QtWidgets.QLabel("Affichage")
-        lab.setStyleSheet("font: 11pt sans-serif; color: #a0a0a0;")
-        bottom.addWidget(lab)
-        for hz, text in SPANS:
-            b = QtWidgets.QPushButton(text)
-            b.setCheckable(True)
-            b.setFocusPolicy(QtCore.Qt.NoFocus)
-            b.setStyleSheet("QPushButton { font: bold 12pt sans-serif; color: #ddd; "
-                            "background: #222a33; border: 1px solid #556; border-radius: 6px; "
-                            "padding: 6px 10px; } QPushButton:checked { background: #ffd54a; "
-                            "color: #000; }")
-            b.clicked.connect(lambda _, h=hz: self.span.emit(h))
-            self.span_buttons.addButton(b, hz)
-            bottom.addWidget(b)
         root.addLayout(bottom)
 
     # --- marche / arrêt ------------------------------------------------------
