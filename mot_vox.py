@@ -65,7 +65,8 @@ class MotVox(QtCore.QObject):
         self.source = None
         self.threshold = -40.0              # dBFS, suit le bouton de sensibilité du VOX
         self.paused = False
-        self.transcribe = True              # False : paroles envoyées sans Whisper
+        self.transcribe = True
+        self.last_db = -90.0              # False : paroles envoyées sans Whisper
         self.running = False
         self.proc = None
         self.worker = None
@@ -104,6 +105,7 @@ class MotVox(QtCore.QObject):
                     continue
                 x = np.frombuffer(data, "<i2").astype(np.float32) / 32768
                 db = 20 * np.log10(float(np.sqrt(np.mean(x * x))) + 1e-9)
+                self.last_db = max(db, self.last_db - 1.5)   # niveau affiché (retombe doucement)
                 loud = db > self.threshold
                 if not speech:
                     pre.append(data)

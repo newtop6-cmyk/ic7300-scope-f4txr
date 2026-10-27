@@ -2307,6 +2307,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda pos, n=n: self._vox_msg_menu(n, pos))
             self.vox_msg_buttons[n] = button
         self.vox_msg_armed = set()          # messages en attente de « VOX n »
+        self.vox_msg_dry = False            # ESSAI : tout comme en vrai, sans émettre
+        self.vox_dry_player = None
+        self.vox_dry_timer = QtCore.QTimer(self)
+        self.vox_dry_timer.timeout.connect(self._vox_dry_check)
         self.vox_msg_sending = None         # n° du message en cours d'émission
         self.vox_msg_rec = None             # (n, parec) pendant l'enregistrement
         self.vox_msg_rec_timer = QtCore.QTimer(self)
@@ -5203,7 +5207,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 style = over % "background: #1e6fd0; color: white; font-size: 8pt;"
                 text = "🗣\nAPPREND"
             else:
-                style, text = "", f"VOX{n}"
+                style, text = "", (f"VOX{n}\nESSAI" if self.vox_msg_dry else f"VOX{n}")
+                if self.vox_msg_dry:
+                    style = over % "font-size: 8pt;"
             if button.text() != text:
                 button.setText(text)
             full = PUSH_YELLOW_3D + style
@@ -5214,6 +5220,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _vox_msg_arm(self, n, on):
         """Appui sur VOX n : message en attente (aucune émission), ou annulé."""
+        if self.vox_msg_sending == n and self.vox_dry_player is not None:
+            self.vox_dry_player.terminate()     # ESSAI : arrêt du message
+            return
         if not on:
             self.vox_msg_armed.discard(n)
             self.statusBar().showMessage(f"VOX{n} : attente annulée", 4000)
@@ -5248,6 +5257,9 @@ class MainWindow(QtWidgets.QMainWindow):
         listen = menu.addAction(f"🔊 Écouter le message VOX{n} (sur le PC)")
         listen.setEnabled(os.path.exists(vox_msg_file(n)) and not recording)
         menu.addSeparator()
+        dry = menu.addAction("🧪 Mode ESSAI : sans émettre (message joué dans le casque)")
+        dry.setCheckable(True)
+        dry.setChecked(self.vox_msg_dry)
         learn = menu.addAction(f"🗣 Apprendre ma voix pour « VOX {n} »"
                                + (" (déjà appris : refaire)" if self.voice_cmds.learned(n)
                                   else ""))
@@ -5255,6 +5267,14 @@ class MainWindow(QtWidgets.QMainWindow):
         chosen = menu.exec_(self.vox_msg_buttons[n].mapToGlobal(pos))
         if chosen is learn:
             self._vox_learn_start(n)
+            return
+        if chosen is dry:
+            self.vox_msg_dry = dry.isChecked()
+            self._vox_msg_show()
+            self.statusBar().showMessage(
+                "Mode ESSAI : rien n'est émis, le message est joué dans le casque ; "
+                "niveau du micro et seuil affichés pendant l'attente" if self.vox_msg_dry
+                else "Mode ESSAI arrêté : VOX n émet de nouveau pour de vrai", 8000)
             return
         if chosen is record:
             if recording:
@@ -5324,7 +5344,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self.vox_msg_armed or self.tx_active:
             return
+        self.vox_seg_time = time.monotonic()
         n, dist, detail = self.voice_cmds.match(clip, self.vox_msg_armed)
+        self.vox_match_detail = detail
         if n is not None:
             self.statusBar().showMessage(f"Ta voix reconnue : {detail}", 6000)
             self._vox_msg_send(n)
@@ -5408,6 +5430,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _vox_msg_send(self, n):
         """« VOX n » entendu : émission du message, puis réception dès la fin."""
         self.vox_msg_armed.discard(n)       # une seule émission par appui
+        if self.vox_msg_dry:
+            return self._vox_dry_send(n)
         problem = None
         if not self.civ:
             problem = "émission impossible sans CAT"
@@ -5438,6 +5462,47 @@ class MainWindow(QtWidgets.QMainWindow):
                                      f"({length:.1f} s)")
         self._vox_msg_show()
         QtCore.QTimer.singleShot(300, lambda: self._vox_msg_play(n))  # radio en émission d'abord
+
+    def _vox_dry_send(self, n):
+        """ESSAI : même déroulé, sans PTT ; message joué sur la sortie du PC."""
+        if not os.path.exists(vox_msg_file(n)):
+            self.statusBar().showMessage(f"ESSAI VOX{n} : message introuvable", 6000)
+            return
+        self.vox_msg_sending = n
+        self.vox_dry_heard = getattr(self, "vox_seg_time", time.monotonic())
+        self.vox_dry_len = self._wav_seconds(vox_msg_file(n))
+        self._mot_vox_need()
+        self._vox_msg_show()
+        self.statusBar().showMessage(f"ESSAI VOX{n} : « VOX {n} » reconnu "
+                                     f"({getattr(self, 'vox_match_detail', '')}) — émission "
+                                     f"SIMULÉE, message dans le casque ({self.vox_dry_len:.1f} s)")
+        self.vox_dry_start = None
+        QtCore.QTimer.singleShot(300, lambda: self._vox_dry_play(n))  # comme la vraie bascule
+
+    def _vox_dry_play(self, n):
+        if self.vox_msg_sending != n:
+            return
+        self.vox_dry_start = time.monotonic()
+        self.vox_dry_player = subprocess.Popen(["paplay", vox_msg_file(n)])
+        self.vox_dry_timer.start(50)
+
+    def _vox_dry_check(self):
+        p = self.vox_dry_player
+        if p is None or p.poll() is None:
+            return
+        self.vox_dry_timer.stop()
+        self.vox_dry_player = None
+        n = self.vox_msg_sending
+        self.vox_msg_sending = None
+        end = time.monotonic()
+        start_delay = (self.vox_dry_start or end) - self.vox_dry_heard
+        self._mot_vox_need()
+        self._vox_msg_show()
+        self.statusBar().showMessage(
+            f"ESSAI VOX{n} terminé : départ {start_delay + 0.3:.1f} s après la fin de "
+            f"« VOX {n} » (dont 0,3 s de silence pour la détecter), message "
+            f"{end - (self.vox_dry_start or end):.1f} s, retour en réception (simulé) "
+            "dès la fin. Rien n'a été émis.", 20000)
 
     def _vox_msg_play(self, n):
         if self.tx_active and self.vox_msg_sending == n:
@@ -7052,6 +7117,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mot_vox.paused = self.vox_button.isChecked() or self.tx_active \
             or self.dictee.active             # pas de « VOX n » pendant une dictée
         self.mot_vox.threshold = self._vox_threshold()
+        if self.vox_msg_armed and self.vox_msg_dry and not self.vox_msg_sending:
+            db, thr = self.mot_vox.last_db, self.mot_vox.threshold
+            bar = "█" * max(0, min(30, int((db + 70) / 2)))
+            self.statusBar().showMessage(
+                f"ESSAI — micro {db:4.0f} dB {'▲ AU-DESSUS' if db > thr else '  sous'} "
+                f"du seuil {thr:.0f} dB  {bar}   dis « VOX "
+                + " / VOX ".join(map(str, sorted(self.vox_msg_armed))) + " »"
+                + (f"   | dernier essai : {self.vox_match_detail}"
+                   if time.monotonic() - getattr(self, "vox_seg_time", 0) < 8 else ""))
         if not self.mot_vox.running:                        # micro perdu
             if self.vox_vocal_button.isChecked():
                 self.vox_vocal_button.setChecked(False)
