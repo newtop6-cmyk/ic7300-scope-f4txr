@@ -68,6 +68,7 @@ from drum_display import DrumClock, DrumDisplay
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
+from band_selector import BandSelector
 from emergency_button import EmergencyButton
 from vintage_meter import SwrMicroGalva, SwrTitle, VintageSMeter, VintagePowerMeter
 from whistle import Whistle
@@ -291,6 +292,8 @@ PUSH_YELLOW_3D = (
 SWR_GALVA_PX = 44              # hauteur du micro-galva ROS (au-dessus du POWER)
 KNOB_POWER_PX = 120            # bouton de puissance (154 avant le micro-galva ROS)
 FUNC_SCALE = 0.77              # sélecteur FONCTION (1.0 avant le micro-galva ROS)
+BAND_SEL_PX = 200              # commutateur de bandes rotatif (à droite du VFO)
+BAND_SEL_GAP = 14
 EMERGENCY_PX = 78              # bouton d'arrêt d'urgence (champignon)
 EMERGENCY_GAP = 2
 SNAP_DELAY_MS = 1500            # bouton immobile depuis 1,5 s : arrondi au kHz
@@ -2556,6 +2559,14 @@ class MainWindow(QtWidgets.QMainWindow):
         meters.addStretch(1)                    # VFO entre les galvas et POWER
         self.vfo_slot = QtWidgets.QVBoxLayout()
         meters.addLayout(self.vfo_slot)
+        # à droite du VFO (décalé à gauche) : commutateur de bandes rotatif vintage
+        meters.addSpacing(BAND_SEL_GAP)
+        self.band_selector = BandSelector(BAND_SEL_PX)
+        self.band_selector.changed.connect(self._band_selector_changed)
+        band_col = QtWidgets.QVBoxLayout()
+        band_col.addStretch()
+        band_col.addWidget(self.band_selector, 0, QtCore.Qt.AlignHCenter)
+        meters.addLayout(band_col)
         meters.addStretch(1)
         # à droite : galva POWER, jumeau du S-mètre
         self.power_meter = VintagePowerMeter()
@@ -3998,6 +4009,7 @@ class MainWindow(QtWidgets.QMainWindow):
         band = band_of(hz)
         for name, button in self.band_buttons.items():
             button.setChecked(name == band)
+        self.band_selector.set_band(band)
         if band != self.last_band:          # nouvelle bande : bande latérale d'usage
             self.last_band = band
             if hasattr(self, "sideband_button"):
@@ -4015,6 +4027,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     json.dump(self.band_memory, f)
             except OSError:
                 pass
+
+    def _band_selector_changed(self, name):
+        """Commutateur de bandes tourné : même effet qu'une touche de bande."""
+        if name in self.band_buttons:
+            self.on_band(name)
+        if not self.civ or self.tx_active:      # refusé : le bouton revient
+            self.band_selector.set_band(band_of(self.freq_hz or 0))
 
     def on_band(self, name):
         if not self.civ or self.tx_active:
