@@ -121,6 +121,9 @@ STATE_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME")
 BANDS_FILE = os.path.join(os.path.dirname(STATE_FILE), "bandes.json")
 MESSAGE_FILE = os.path.join(os.path.dirname(STATE_FILE), "message-cw.txt")
 DEFAULT_MESSAGE = "CQ CQ CQ DE F4TXR F4TXR K"
+# VOX1 : message vocal enregistré au micro, émis d'un coup de levier
+VOX1_FILE = os.path.join(os.path.dirname(STATE_FILE), "vox1.wav")
+VOX1_MAX_S = 120                # enregistrement arrêté tout seul au-delà
 # bandes émission de l'IC-7300 : nom, limites (Hz), fréquence et mode de départ
 BANDS = [("160m", 1_810_000, 2_000_000, 1_850_000, "LSB"),
          ("80m", 3_500_000, 3_800_000, 3_700_000, "LSB"),
@@ -2258,6 +2261,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demo_toggle.toggled.connect(self._demo_toggled)
         self.demo_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.demo_toggle.customContextMenuRequested.connect(self._demo_menu)
+        # VOX1 : message vocal préparé (clic droit = l'enregistrer au micro)
+        self.vox1_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="VOX1 : levier en bas = la radio passe en émission, "
+            "envoie ton message vocal enregistré, puis repasse tout de suite en réception "
+            "(le levier revient sur OFF) ; en haut = arrêt. "
+            "Clic droit : enregistrer le message au micro, ou l'écouter.")
+        self.vox1_toggle.toggled.connect(self._vox1_toggled)
+        self.vox1_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.vox1_toggle.customContextMenuRequested.connect(self._vox1_menu)
+        self.vox1_sending = False
+        self.vox1_rec = None                # parec pendant l'enregistrement du message
+        self.vox1_rec_timer = QtCore.QTimer(self)
+        self.vox1_rec_timer.setSingleShot(True)
+        self.vox1_rec_timer.timeout.connect(self._vox1_rec_stop)
         # REC BF : son seul (réception + émission + micro) ; VDO+BF : écran + son
         self.rec_bf = ScreenRecorder(audio_only=True)
         self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
@@ -2334,7 +2351,8 @@ class MainWindow(QtWidgets.QMainWindow):
                   (self.demo_toggle, "DÉMO"))
         # 2e ligne d'interrupteurs, sous la première : les nouveaux s'ajoutent ici
         others2 = ((self.rec_bf_toggle, "REC BF"),
-                   (self.vdo_toggle, "VDO+BF"))
+                   (self.vdo_toggle, "VDO+BF"),
+                   (self.vox1_toggle, "VOX1"))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
@@ -5102,6 +5120,129 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tune_to(hz)
 
     # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
+    # --- VOX1 : message vocal préparé -------------------------------------
+    def _vox1_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        if self.vox1_rec is None:
+            record = menu.addAction("🎙 Enregistrer le message (micro)")
+        else:
+            record = menu.addAction("⏹ Terminer l'enregistrement")
+        listen = menu.addAction("🔊 Écouter le message (sur le PC)")
+        listen.setEnabled(os.path.exists(VOX1_FILE) and self.vox1_rec is None)
+        chosen = menu.exec_(self.vox1_toggle.mapToGlobal(pos))
+        if chosen is record:
+            if self.vox1_rec is None:
+                self._vox1_rec_start()
+            else:
+                self._vox1_rec_stop()
+        elif chosen is listen:
+            subprocess.Popen(["paplay", VOX1_FILE])
+            self.statusBar().showMessage("VOX1 : écoute du message sur le PC", 4000)
+
+    def _vox1_rec_start(self):
+        if self.tx_active:
+            self.statusBar().showMessage("VOX1 : pas d'enregistrement pendant l'émission", 5000)
+            return
+        source = self.tx_source.currentData()
+        if not source or source == "file":
+            source = "@DEFAULT_SOURCE@"
+        os.makedirs(os.path.dirname(VOX1_FILE), exist_ok=True)
+        self.vox1_tmp = VOX1_FILE + ".brut.wav"
+        try:
+            self.vox1_rec = subprocess.Popen(
+                ["parec", "-d", self.eq_engine.monitor_for(source), "--file-format=wav",
+                 "--rate=48000", "--channels=1", "--client-name=IC-7300 VOX1",
+                 self.vox1_tmp], stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self.statusBar().showMessage(f"VOX1 : enregistrement impossible ({e})", 6000)
+            return
+        self.vox1_rec_timer.start(VOX1_MAX_S * 1000)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("VOX1")
+        box.setText("🎙 Enregistrement du message VOX1…\n\nParle dans le micro, "
+                    "puis clique sur « Terminer ».")
+        box.addButton("Terminer", QtWidgets.QMessageBox.AcceptRole)
+        box.setModal(False)
+        box.buttonClicked.connect(lambda *_: self._vox1_rec_stop())
+        self.vox1_box = box
+        box.show()
+
+    def _vox1_rec_stop(self):
+        """Fin de l'enregistrement : silences du début et de la fin enlevés
+        (retour en réception dès le dernier mot)."""
+        if self.vox1_rec is None:
+            return
+        self.vox1_rec_timer.stop()
+        self.vox1_rec.terminate()
+        self.vox1_rec.wait(timeout=5)
+        self.vox1_rec = None
+        box = getattr(self, "vox1_box", None)
+        if box is not None:
+            box.close()
+            self.vox1_box = None
+        trim = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15,"
+                "areverse,"
+                "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.25,"
+                "areverse")
+        done = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", self.vox1_tmp,
+                               "-af", trim, "-ar", "48000", "-ac", "1", VOX1_FILE],
+                              capture_output=True, text=True)
+        try:
+            with wave.open(VOX1_FILE) as w:
+                length = w.getnframes() / w.getframerate()
+        except (OSError, wave.Error, EOFError):
+            length = 0
+        if done.returncode != 0 or length < 0.3:
+            self.statusBar().showMessage("VOX1 : rien d'enregistré (micro muet ?) — "
+                                         "message précédent gardé s'il existe", 8000)
+            return
+        os.remove(self.vox1_tmp)
+        self.statusBar().showMessage(f"VOX1 : message enregistré ({length:.1f} s). "
+                                     "Levier VOX1 en bas pour l'émettre", 8000)
+
+    def _vox1_toggled(self, on):
+        if not on:
+            if self.vox1_sending and self.tx_active:
+                self.stop_tx("VOX1 arrêté")
+            return
+        problem = None
+        if not self.civ:
+            problem = "VOX1 : émission impossible sans CAT"
+        elif self.tx_active:
+            problem = "VOX1 : déjà en émission"
+        elif self.vox1_rec is not None:
+            problem = "VOX1 : termine d'abord l'enregistrement du message"
+        elif not os.path.exists(VOX1_FILE):
+            problem = "VOX1 : pas encore de message (clic droit sur VOX1 → Enregistrer)"
+        elif base_mode(self.mode_combo.currentText()) not in ("LSB", "USB", "AM", "FM"):
+            problem = "VOX1 : seulement en phonie (LSB, USB, AM, FM)"
+        if problem:
+            self.statusBar().showMessage(problem, 6000)
+            self.vox1_toggle.setDown(False, emit=False)
+            return
+        try:
+            with wave.open(VOX1_FILE) as w:
+                length = w.getnframes() / w.getframerate()
+        except (OSError, wave.Error, EOFError):
+            length = 0
+        self.vox1_sending = True
+        self.civ.set_ptt(True)
+        self.tx_limit = max(TX_TIMEOUT, length + 15)
+        self.tx_active = True
+        self.tx_galva.set_tx(True)
+        self._pactl_stream("set-sink-input-mute", "1")     # casque muet pendant l'émission
+        self._update_ssb()
+        self.tx_started = time.monotonic()
+        self.tx_timer.start()
+        self._set_ptt_button(True)
+        self.statusBar().showMessage(f"VOX1 : émission du message ({length:.1f} s)")
+        QtCore.QTimer.singleShot(300, self._vox1_play)   # la radio passe d'abord en émission
+
+    def _vox1_play(self):
+        if self.tx_active and self.vox1_sending:
+            self.tx_player = subprocess.Popen(
+                ["paplay", f"--device={self.radio_sink}", VOX1_FILE])
+
     def _rec_switch(self, rec, switch, down):
         """Interrupteurs REC BF et VDO+BF : levier en bas = départ, en haut = arrêt."""
         if down and not rec.recording:
@@ -5753,6 +5894,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def stop_tx(self, reason=None):
         self._backlight_tx(False)           # rétro-éclairage : retour au calme
+        if getattr(self, "vox1_sending", False):
+            self.vox1_sending = False
+            self.vox1_toggle.setDown(False, emit=False)
         if self.tx_player:
             self.tx_player.terminate()
             self.tx_player = None
@@ -5808,7 +5952,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if elapsed > self.tx_limit:
             self.stop_tx(f"Émission coupée au bout de {elapsed / 60:.0f} min")
         elif self.tx_player and self.tx_player.poll() is not None:
-            self.stop_tx("Fichier émis en entier")
+            self.stop_tx("VOX1 : message émis, retour en réception" if self.vox1_sending
+                         else "Fichier émis en entier")
 
     def _cw_scope_update(self):
         """Réception CW (et seulement elle) : l'oscilloscope montre la
