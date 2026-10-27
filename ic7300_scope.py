@@ -2258,6 +2258,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demo_toggle.toggled.connect(self._demo_toggled)
         self.demo_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.demo_toggle.customContextMenuRequested.connect(self._demo_menu)
+        # REC BF : son seul (réception + émission + micro) ; VDO+BF : écran + son
+        self.rec_bf = ScreenRecorder(audio_only=True)
+        self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
+        self.rec_bf_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="REC BF : levier en bas = enregistre le son du trafic "
+            "(réception, émission et ton micro), sans l'image, dans ~/REC-BF-date.ogg ; "
+            "en haut = arrêt.")
+        self.rec_bf_toggle.toggled.connect(
+            lambda down: self._rec_switch(self.rec_bf, self.rec_bf_toggle, down))
+        self.rec_bf.changed.connect(
+            lambda *_: self.rec_bf_toggle.setDown(self.rec_bf.recording, emit=False))
+        self.vdo_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="VDO+BF : levier en bas = vidéo complète de l'écran avec "
+            "le son du trafic, dans ~/MUSARDE-date.mkv ; en haut = arrêt (même "
+            "enregistreur que les boutons REC vidéo).")
+        self.vdo_toggle.toggled.connect(
+            lambda down: self._rec_switch(self.screen_rec, self.vdo_toggle, down))
+        self.screen_rec.changed.connect(
+            lambda *_: self.vdo_toggle.setDown(self.screen_rec.recording, emit=False))
         # LOUPE : lentille ronde qui suit le pointeur (loupe.py)
         self.loupe = Loupe()
         self.loupe_wheel = AltWheel(self.loupe)
@@ -2312,12 +2331,14 @@ class MainWindow(QtWidgets.QMainWindow):
                   (self.ft8_toggle, "FT8"),
                   (self.rtty_toggle, "DÉCODEUR RTTY"),
                   (self.fr_toggle, "WATERFALL FR"),
-                  (self.demo_toggle, "DÉMO"))
+                  (self.demo_toggle, "DÉMO"),
+                  (self.rec_bf_toggle, "REC BF"),
+                  (self.vdo_toggle, "VDO+BF"))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
-        # 80 px par bouton (au lieu de 88) : la rangée tient dans la largeur de l'écran
-        col_px = 80
+        # 72 px par bouton (au lieu de 88) : la rangée tient dans la largeur de l'écran
+        col_px = 72
         for bar, items in ((self.audio_bar, audio), (self.knob_bar, others)):
             for knob, name in items:
                 if knob.width() > col_px:
@@ -5066,6 +5087,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tune_to(hz)
 
     # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
+    def _rec_switch(self, rec, switch, down):
+        """Interrupteurs REC BF et VDO+BF : levier en bas = départ, en haut = arrêt."""
+        if down and not rec.recording:
+            rec.start()
+        elif not down and rec.recording:
+            rec.stop()
+        if rec.finishing and down:
+            self.statusBar().showMessage("Enregistrement précédent en cours de finition, "
+                                         "un instant…", 5000)
+        switch.setDown(rec.recording, emit=False)
+
     def _rec_video_show(self):
         """Bouton REC vidéo de l'écran principal : rouge + durée pendant l'enregistrement."""
         rec = self.screen_rec
@@ -6745,6 +6777,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.fr_toggle.down:
             self.fr_toggle.setDown(False)
         self.screen_rec.stop(wait=True)     # vidéo en cours : refermée et assemblée
+        self.rec_bf.stop(wait=True)         # son REC BF en cours : fichier fermé
         self.loupe.stop()
         self.loupe.close()
         self.demo_finger.stop()             # la flèche de la souris revient

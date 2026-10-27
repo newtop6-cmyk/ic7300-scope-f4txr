@@ -26,8 +26,9 @@ RATE, CHANNELS = 48000, 2
 class ScreenRecorder(QtCore.QObject):
     changed = QtCore.pyqtSignal(bool, str)      # (enregistre ?, message)
 
-    def __init__(self):
+    def __init__(self, audio_only=False):
         super().__init__()
+        self.audio_only = audio_only            # REC BF : le son seul, sans l'écran
         self.video = self.audio = None
         self.path = None
         self.started = 0.0
@@ -35,7 +36,8 @@ class ScreenRecorder(QtCore.QObject):
 
     @property
     def recording(self):
-        return self.video is not None and self.video.poll() is None
+        proc = self.audio if self.audio_only else self.video
+        return proc is not None and proc.poll() is None
 
     def elapsed(self):
         return time.time() - self.started if self.recording else 0.0
@@ -53,7 +55,8 @@ class ScreenRecorder(QtCore.QObject):
             return
         os.makedirs(TMP_DIR, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d_%H.%M.%S")
-        self.path = os.path.join(OUT_DIR, f"MUSARDE-{stamp}.mkv")
+        name = f"REC-BF-{stamp}.ogg" if self.audio_only else f"MUSARDE-{stamp}.mkv"
+        self.path = os.path.join(OUT_DIR, name)
         self.tmp_video = os.path.join(TMP_DIR, f"video-{stamp}.mkv")
         self.tmp_audio = os.path.join(TMP_DIR, f"son-{stamp}.raw")
         geo = QtWidgets.QApplication.primaryScreen().geometry()
@@ -64,15 +67,16 @@ class ScreenRecorder(QtCore.QObject):
                  f"--channels={CHANNELS}", "--latency-msec=20",
                  "--client-name=IC-7300 enregistrement video"],
                 stdout=open(self.tmp_audio, "wb"), stderr=subprocess.DEVNULL)
-            self.video = subprocess.Popen(
-                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                 "-thread_queue_size", "1024", "-f", "x11grab", "-framerate", "15",
-                 "-video_size", f"{w}x{h}", "-draw_mouse", "1",
-                 "-i", f"{os.environ.get('DISPLAY', ':0')}+{geo.x()},{geo.y()}",
-                 "-copyts",                     # heure réelle de chaque image (calage du son)
-                 "-c:v", "libx264", "-preset", "faster", "-crf", "28", "-pix_fmt", "yuv420p",
-                 self.tmp_video],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if not self.audio_only:
+                self.video = subprocess.Popen(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                     "-thread_queue_size", "1024", "-f", "x11grab", "-framerate", "15",
+                     "-video_size", f"{w}x{h}", "-draw_mouse", "1",
+                     "-i", f"{os.environ.get('DISPLAY', ':0')}+{geo.x()},{geo.y()}",
+                     "-copyts",                     # heure réelle de chaque image (calage du son)
+                     "-c:v", "libx264", "-preset", "faster", "-crf", "28", "-pix_fmt", "yuv420p",
+                     self.tmp_video],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         except OSError as e:
             self._kill()
             self.changed.emit(False, f"Enregistrement impossible : {e}")
@@ -82,6 +86,12 @@ class ScreenRecorder(QtCore.QObject):
         self.changed.emit(True, f"Enregistrement : {os.path.basename(self.path)}")
 
     def _check_started(self):
+        if self.audio_only:
+            if self.audio is not None and self.audio.poll() is not None:  # parec arrêté
+                self._kill()
+                self.changed.emit(False, "Enregistrement du son arrêté (sortie "
+                                         "« ic7300_enregistrement » absente ?)")
+            return
         if self.video is not None and self.video.poll() is not None:     # ffmpeg arrêté
             err = (self.video.stderr.read() or b"").decode(errors="replace").strip()
             self._kill()
@@ -101,13 +111,16 @@ class ScreenRecorder(QtCore.QObject):
         video, audio = self.video, self.audio
         self.video = self.audio = None
         self.finishing = True
-        self.changed.emit(False, "Arrêt : assemblage de la vidéo et du son…")
+        self.changed.emit(False, "Arrêt : enregistrement du fichier…" if self.audio_only
+                          else "Arrêt : assemblage de la vidéo et du son…")
         job = threading.Thread(target=self._finish, args=(video, audio), daemon=not wait)
         job.start()
         if wait:
             job.join(timeout=120)
 
     def _finish(self, video, audio):
+        if self.audio_only:
+            return self._finish_audio(audio)
         try:
             try:
                 video.stdin.write(b"q")             # ffmpeg referme l'image proprement
@@ -149,5 +162,28 @@ class ScreenRecorder(QtCore.QObject):
                                          f"{TMP_DIR} ({done.stderr.strip()[-120:]})")
         except Exception as e:                      # on prévient toujours
             self.changed.emit(False, f"Enregistrement : erreur à l'arrêt ({e})")
+        finally:
+            self.finishing = False
+
+    def _finish_audio(self, audio):
+        """REC BF : son brut → fichier Ogg Vorbis (le son entier, jusqu'à l'arrêt)."""
+        try:
+            audio.terminate()
+            audio.wait(timeout=5)
+            done = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "s16le", "-ar", str(RATE), "-ac", str(CHANNELS), "-i", self.tmp_audio,
+                 "-c:a", "libvorbis", "-b:a", "128k", self.path],
+                capture_output=True, text=True)
+            if done.returncode == 0 and os.path.exists(self.path):
+                os.remove(self.tmp_audio)
+                n = os.path.getsize(self.path) / 1e6
+                self.changed.emit(False, f"Son enregistré : {os.path.basename(self.path)} "
+                                         f"({n:.1f} Mo)")
+            else:
+                self.changed.emit(False, f"Enregistrement du son raté : brut gardé dans "
+                                         f"{TMP_DIR} ({done.stderr.strip()[-120:]})")
+        except Exception as e:
+            self.changed.emit(False, f"Enregistrement du son : erreur à l'arrêt ({e})")
         finally:
             self.finishing = False
