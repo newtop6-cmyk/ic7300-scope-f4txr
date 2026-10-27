@@ -5411,6 +5411,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vox_match_detail = detail
         self._vox_log(f"voix : {detail}" + (" → reconnue" if n is not None else ""))
         if n is not None:
+            self.voice_cmds.add_example(n, clip)        # suit ta voix du moment
             self.statusBar().showMessage(f"Ta voix reconnue : {detail}", 6000)
             self._vox_msg_send(n)
         else:

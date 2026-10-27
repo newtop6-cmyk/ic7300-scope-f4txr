@@ -18,6 +18,7 @@ VOICE_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser
                          "ic7300-scope", "voix")
 LEARN_COUNT = 6                 # exemples demandés par commande
 MARGIN = 1.35                   # tolérance au-delà de l'écart entre tes exemples
+ACCEPT_MAX = 19.5               # plafond : ta voix 7–17,6, autres voix / mots 22 et plus
 TOLERANCE = 1.2                 # marge en plus à la reconnaissance (voix du soir, micro…)
 WIN, HOP, NFFT, NMEL, NCEP = 400, 160, 512, 26, 13
 
@@ -159,10 +160,36 @@ class VoiceCommands:
             best = min(scores, key=scores.get)
             return None, scores[best], f"VOX {best} à {scores[best]:.1f} — pas en attente"
         best = min(cands, key=scores.get)
-        d = scores[best]
-        limit = self.limit.get(best, 0) * TOLERANCE
+        # ta voix : comparée à TOUS tes exemples (le bouton a déjà choisi le message ;
+        # il suffit que ce soit toi qui dises « VOX … »)
+        near = min(scores, key=scores.get)
+        d = scores[near]
+        limit = min(max(self.limit.get(best, 0), self.limit.get(near, 0)) * TOLERANCE,
+                    ACCEPT_MAX)
         others = ", ".join(f"VOX {k} à {v:.1f}" for k, v in sorted(scores.items()) if k != best)
-        detail = f"VOX {best} à {d:.1f} (limite {limit:.1f})" + (f" ; {others}" if others else "")
+        detail = (f"VOX {best} à {scores[best]:.1f} ; plus proche de tes exemples {d:.1f} "
+                  f"(limite {limit:.1f})" + (f" ; {others}" if others else ""))
         if d > limit:
             return None, d, detail + " — voix ou mot trop différents"
         return best, d, detail
+
+    MAX_EXAMPLES = 10
+
+    def add_example(self, n, clip):
+        """Commande reconnue : ta voix du moment rejoint les exemples (10 au plus,
+        les plus anciens partent) ; la tolérance ne diminue jamais."""
+        f = features(clip)
+        if f is None:
+            return
+        os.makedirs(VOICE_DIR, exist_ok=True)
+        import time
+        with open(os.path.join(VOICE_DIR, f"vox{n}-a{int(time.time())}.raw"), "wb") as out:
+            out.write(clip)
+        files = sorted(self._files(n), key=os.path.getmtime)
+        for old in files[:-self.MAX_EXAMPLES]:
+            os.remove(old)
+        limit = self.limit.get(n, 0)
+        self.load()
+        self.limit[n] = max(limit, self.limit.get(n, 0))
+        with open(os.path.join(VOICE_DIR, "seuils.json"), "w") as fh:
+            json.dump({str(k): v for k, v in self.limit.items()}, fh)
