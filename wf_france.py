@@ -19,6 +19,8 @@ Essai seul : python3 wf_france.py
 
 import calendar
 import json
+import math
+import os
 import re
 import socket
 import threading
@@ -40,6 +42,7 @@ SNAP_KHZ = 0.6                  # clic à moins de 0,6 kHz d'une station : on se
 BLEU, BLANC, ROUGE = "#3d7dff", "#f2f2f2", "#ff4040"
 VERT = "#3ddc84"                # QSO français trouvé par le scan
 SCAN_COLOR = "#ff4fd8"          # curseur du scan
+DAY_DIR = os.path.expanduser("~/.config/ic7300-scope")     # scan-AAAAMMJJ.jsonl : le jour
 
 BANDS = [("160m", 1_810_000, 2_000_000), ("80m", 3_500_000, 3_800_000),
          ("60m", 5_351_500, 5_366_500), ("40m", 7_000_000, 7_200_000),
@@ -59,7 +62,7 @@ FR_COUNTRIES = {
 TEXT_CALL = re.compile(r"\b([A-Z0-9]{1,3}[0-9][A-Z]{1,4}(?:/[A-Z0-9]{1,4})?)\b")
 RBN_LINE = re.compile(r"DX de (\S+?):\s+(\d+\.\d+)\s+(\S+)\s+(\S+)\s+(-?\d+) dB"
                       r"(?:\s+(\d+) (?:WPM|BPS))?\s+(.*?)\s*(\d{4})Z")
-SPANS = [(5000, "±5"), (10_000, "±10"), (25_000, "±25"), (50_000, "±50"),
+SPANS = [(0, "BANDE"), (5000, "±5"), (10_000, "±10"), (25_000, "±25"), (50_000, "±50"),
          (100_000, "±100"), (250_000, "±250")]
 
 
@@ -193,7 +196,9 @@ class WaterfallFrance(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Waterfall — stations françaises")
-        self.setStyleSheet("background: #05070b; color: #e8e8e8;")
+        self.setObjectName("wfFrance")
+        self.setStyleSheet("color: #e8e8e8; QToolTip { background: #10161e; }")
+        self.pings = []                     # ondes de sonar (heure, français ?)
         self.stations = {}                  # indicatif → spot fusionné
         self.freq_hz = None
         self.mode = ""
@@ -209,6 +214,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.text_tail = ""
         self.known = set()                  # stations déjà signalées (ouverture automatique)
         self.scan_results = []              # résultats du scan (segment en cours)
+        self.day = self._load_day()         # tous les résultats du jour (fichier)
         self.scan_seg = None
         self.spots = FrenchSpots()
         self.spots.spot.connect(self.add_spot)
@@ -221,6 +227,9 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.scan.segment.connect(self._scan_segment)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._refresh)
+        # fond radar animé (balai, traînée, cercles), comme le fond FT8
+        self.radar_timer = QtCore.QTimer(self)
+        self.radar_timer.timeout.connect(self.update)
 
     # --- construction --------------------------------------------------------
     def _build(self):
@@ -250,14 +259,16 @@ class WaterfallFrance(QtWidgets.QWidget):
 
         middle = QtWidgets.QHBoxLayout()
         self.graphics = pg.GraphicsLayoutWidget()
-        self.graphics.setBackground("#05070b")
+        self.graphics.setBackground(None)           # transparent : le radar se voit derrière
+        self.graphics.setStyleSheet("background: transparent; border: none;")
+        self.graphics.viewport().setAutoFillBackground(False)
         self.spec = self.graphics.addPlot(row=0, col=0)
         self.spec.setYRange(-130, 0, padding=0)
         self.spec.setMouseEnabled(x=False, y=False)
         self.spec.hideButtons()
         self.spec.hideAxis("left")
         self.spec.showGrid(x=True, y=False, alpha=0.2)
-        self.spec_curve = self.spec.plot(pen=pg.mkPen("#4fc3f7", width=1), fillLevel=-140,
+        self.spec_curve = self.spec.plot(pen=pg.mkPen("#4fc3f7", width=1), fillLevel=-1000,
                                          brush=(79, 195, 247, 50))
         self.wfp = self.graphics.addPlot(row=1, col=0)
         self.wfp.setXLink(self.spec)
@@ -290,6 +301,22 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.graphics.ci.layout.setRowStretchFactor(0, 1)
         self.graphics.ci.layout.setRowStretchFactor(1, 5)
         self.graphics.ci.layout.setRowMaximumHeight(2, 95)
+        # 2e échelle : stations scannées depuis minuit (fichier du jour), interactive
+        self.dayp = self.graphics.addPlot(row=3, col=0)
+        self.dayp.setXLink(self.seg)
+        self.dayp.setMouseEnabled(x=False, y=False)
+        self.dayp.hideButtons()
+        self.dayp.hideAxis("left")
+        self.dayp.setYRange(0, 1, padding=0)
+        self.dayp.getAxis("bottom").setTextPen("#cfcfcf")
+        self.dayp.setTitle("<span style='color:#9fe8b8'>STATIONS SCANNÉES AUJOURD'HUI "
+                           "— survol : détail · clic : se caler</span>", size="10pt")
+        self.day_points = pg.ScatterPlotItem(pxMode=True, hoverable=True)
+        self.dayp.addItem(self.day_points)
+        self.day_labels = []
+        self.day_tuned = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
+        self.dayp.addItem(self.day_tuned, ignoreBounds=True)
+        self.graphics.ci.layout.setRowMaximumHeight(3, 95)
         # fréquence de la radio (jaune) et curseur de la souris (blanc)
         self.tuned = [pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
                       for _ in range(2)]
@@ -325,7 +352,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.listw.setFixedWidth(560)
         self.listw.setFocusPolicy(QtCore.Qt.NoFocus)
         self.listw.setStyleSheet(
-            "QListWidget { font: bold 13pt monospace; background: #0a0e14; "
+            "QListWidget { font: bold 13pt monospace; background: rgba(6, 12, 28, 165); "
             "border: 1px solid #2a3340; } QListWidget::item { padding: 3px; } "
             "QListWidget::item:hover { background: #1c2a3c; }")
         self.listw.setToolTip("Clic sur une station : la radio se cale dessus")
@@ -379,7 +406,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         bottom.addWidget(self.back_button)
         bottom.addStretch()
         self.span_buttons = QtWidgets.QButtonGroup(self)
-        lab = QtWidgets.QLabel("Largeur kHz")
+        lab = QtWidgets.QLabel("Affichage")
         lab.setStyleSheet("font: 11pt sans-serif; color: #a0a0a0;")
         bottom.addWidget(lab)
         for hz, text in SPANS:
@@ -432,6 +459,7 @@ class WaterfallFrance(QtWidgets.QWidget):
             self.scan_results = [r for r in self.scan_results if lo <= r["hz"] <= hi]
             self.seg.setXRange(lo / 1000, hi / 1000, padding=0.01)
             self._draw_scan()
+            self._draw_day()
 
     def _scan_testing(self, hz):
         for line in self.scan_lines:
@@ -443,7 +471,90 @@ class WaterfallFrance(QtWidgets.QWidget):
             self.seg_cursor.setPos(hz / 1000)
             self.scan_label.setText(f"Scan : écoute de {fmt_khz(hz / 1000)} kHz…")
 
+    # --- stations scannées du jour (fichier, survit aux redémarrages) --------
+    @staticmethod
+    def _day_file():
+        return os.path.join(DAY_DIR, time.strftime("scan-%Y%m%d.jsonl"))
+
+    def _load_day(self):
+        out = []
+        try:
+            with open(self._day_file()) as f:
+                for line in f:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        self.day_name = self._day_file()
+        return out
+
+    def _save_day(self, r):
+        if self._day_file() != getattr(self, "day_name", None):
+            self.day = []                       # minuit passé : nouvelle journée
+            self.day_name = self._day_file()
+        keep = {k: r.get(k) for k in ("hz", "band", "mode", "lang", "prob", "fr", "t")}
+        keep["text"] = (r.get("text") or "")[:120]
+        self.day.append(keep)
+        try:
+            os.makedirs(DAY_DIR, exist_ok=True)
+            with open(self.day_name, "a") as f:
+                f.write(json.dumps(keep, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def _day_groups(self):
+        """Résultats du jour du segment affiché, regroupés au kHz près."""
+        if self.scan_seg is None:
+            return []
+        lo, hi = self.scan_seg
+        groups = {}
+        for r in self.day:
+            if not lo <= r["hz"] <= hi:
+                continue
+            g = groups.setdefault(round(r["hz"] / 1000), {"tests": [], "hz": r["hz"]})
+            g["tests"].append(r)
+        out = []
+        for g in groups.values():
+            tests = sorted(g["tests"], key=lambda r: r["t"])
+            fr = [r for r in tests if r["fr"]]
+            last = (fr or tests)[-1]
+            out.append({"hz": last["hz"], "mode": last.get("mode") or "", "n": len(tests),
+                        "n_fr": len(fr), "first": tests[0]["t"], "last": tests[-1]["t"],
+                        "langs": sorted({(r.get("lang") or "?") for r in tests}),
+                        "text": next((r.get("text") for r in reversed(fr) if r.get("text")), "")})
+        return sorted(out, key=lambda g: g["hz"])
+
+    def _draw_day(self):
+        groups = self._day_groups()
+        pts = []
+        for g in groups:
+            fr = g["n_fr"] > 0
+            size = min(26, (12 if fr else 8) + 3 * (g["n"] - 1))
+            pts.append({"pos": (g["hz"] / 1000, 0.3), "size": size,
+                        "brush": pg.mkBrush(VERT if fr else "#8a8f98"),
+                        "pen": pg.mkPen("#000"), "symbol": "o" if fr else "s", "data": g})
+        self.day_points.setData(pts)
+        for item in self.day_labels:
+            self.dayp.removeItem(item)
+        self.day_labels = []
+        for g in groups:
+            if g["n_fr"]:
+                label = pg.TextItem(time.strftime("%H:%M", time.localtime(g["last"])),
+                                    color=VERT, anchor=(0.5, 1.2))
+                label.setPos(g["hz"] / 1000, 0.3)
+                self.dayp.addItem(label, ignoreBounds=True)
+                self.day_labels.append(label)
+
+    def _day_at(self, pos):
+        khz = self.dayp.vb.mapSceneToView(pos).x()
+        near = [g for g in self._day_groups() if abs(g["hz"] / 1000 - khz) < 1.5]
+        return (min(near, key=lambda g: abs(g["hz"] / 1000 - khz)) if near else None), khz
+
     def _scan_result(self, r):
+        self._save_day(r)
+        self.pings.append((time.time(), bool(r["fr"])))     # onde de sonar sur le fond
         self.scan_results = [x for x in self.scan_results if abs(x["hz"] - r["hz"]) > 1500]
         self.scan_results.append(r)
         lang = (r["lang"] or "?").upper()
@@ -458,12 +569,13 @@ class WaterfallFrance(QtWidgets.QWidget):
         self._draw_scan()
 
     def _draw_scan(self):
+        self._draw_day()
         now = time.time()
         spots = []
         for r in self.scan_results:
             fresh = now - r["t"] < 600
             color = VERT if r["fr"] else "#8a8f98"
-            spots.append({"pos": (r["hz"] / 1000, 0.45), "brush": pg.mkBrush(color),
+            spots.append({"pos": (r["hz"] / 1000, 0.3), "brush": pg.mkBrush(color),
                           "pen": pg.mkPen("#000"), "symbol": "o" if r["fr"] else "s",
                           "size": 18 if r["fr"] else 11, "data": r["hz"]})
             if not fresh:
@@ -475,7 +587,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         for r in self.scan_results:
             text = "FR" if r["fr"] else (r["lang"] or "?").upper()
             label = pg.TextItem(text, color=VERT if r["fr"] else "#a0a4aa", anchor=(0.5, 1.1))
-            label.setPos(r["hz"] / 1000, 0.45)
+            label.setPos(r["hz"] / 1000, 0.3)
             self.seg.addItem(label, ignoreBounds=True)
             self.seg_labels.append(label)
     # --- entrées venant du Scope ---------------------------------------------
@@ -486,7 +598,10 @@ class WaterfallFrance(QtWidgets.QWidget):
             for line in self.tuned:
                 line.setPos(hz / 1000)
             self.seg_tuned.setPos(hz / 1000)
+            self.day_tuned.setPos(hz / 1000)
             band = self._scan_band()
+            if band in SCAN_PHONE and band != old_band:     # échelles prêtes avant le scan
+                self._scan_segment(*SCAN_PHONE[band][:2])
             if band != old_band and self.timer.isActive() and self.scan_button.isChecked():
                 if band in SCAN_PHONE:
                     self.scan.start(band)
@@ -534,6 +649,7 @@ class WaterfallFrance(QtWidgets.QWidget):
         self.low += 0.05 * (target - self.low)
         top = float(np.percentile(points, 99.5)) + 2
         self.range += 0.05 * (min(max(top - self.low, 25.0), 90.0) - self.range)
+        self.spec.setYRange(self.low - 3, self.low + self.range + 8, padding=0)
         self.wf = np.roll(self.wf, 1, axis=0)
         self.wf[0] = points
         self.img.setImage(self.wf, autoLevels=False, levels=(self.low, self.low + self.range))
@@ -679,6 +795,28 @@ class WaterfallFrance(QtWidgets.QWidget):
         return None, False
 
     def _mouse_moved(self, pos):
+        if self.dayp.sceneBoundingRect().contains(pos):         # échelle du jour : détail
+            g, khz = self._day_at(pos)
+            if g:
+                langs = ", ".join(x.upper() for x in g["langs"])
+                text = (f" {fmt_khz(g['hz'] / 1000)} kHz {g['mode']} "
+                        f"\n {'QSO FRANÇAIS' if g['n_fr'] else 'autre langue'} · "
+                        f"écouté {g['n']}× ({langs}) "
+                        f"\n de {time.strftime('%H:%M', time.localtime(g['first']))} "
+                        f"à {time.strftime('%H:%M', time.localtime(g['last']))} ")
+                if g["text"]:
+                    text += f"\n « {g['text'][:50]} » "
+                if text != getattr(self, "_tip_text", None):
+                    self._tip_text = text
+                    QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), text.replace(" \n ", "\n").strip(),
+                                                self.graphics)
+            else:
+                self._tip_text = None
+                QtWidgets.QToolTip.hideText()
+            return
+        if getattr(self, "_tip_text", None):
+            self._tip_text = None
+            QtWidgets.QToolTip.hideText()
         khz, in_wf = self._khz_at(pos)
         if khz is None or self.edges is None:
             for c in self.cursor:
@@ -708,6 +846,11 @@ class WaterfallFrance(QtWidgets.QWidget):
         if event.button() != QtCore.Qt.LeftButton:
             return
         pos = event.scenePos()
+        if self.dayp.sceneBoundingRect().contains(pos):         # échelle du jour
+            g, _ = self._day_at(pos)
+            if g:
+                self._tune(g["hz"], g["mode"], "QSO FR du jour" if g["n_fr"] else "signal du jour")
+            return
         if self.seg.sceneBoundingRect().contains(pos):          # bande de scan
             khz = self.seg.vb.mapSceneToView(pos).x()
             near = [r for r in self.scan_results if abs(r["hz"] / 1000 - khz) < 3]
@@ -789,6 +932,82 @@ class WaterfallFrance(QtWidgets.QWidget):
         if event.type() == QtCore.QEvent.Wheel:
             return True                         # molette sans effet sur le VFO
         return super().eventFilter(obj, event)
+
+    # --- fond radar ------------------------------------------------------------
+    SWEEP_S = 5.0                           # un balayage gauche → droite
+
+    def showEvent(self, event):
+        self.radar_timer.start(50)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self.radar_timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        home = QtCore.QPointF(w / 2, h - 50)        # centre : sous la boule RETOUR
+        reach = math.hypot(w / 2, h)
+        now = time.time()
+        bg = QtGui.QRadialGradient(home, reach)
+        bg.setColorAt(0.0, QtGui.QColor("#1d4fb0"))
+        bg.setColorAt(0.35, QtGui.QColor("#0d2d7a"))
+        bg.setColorAt(0.7, QtGui.QColor("#061647"))
+        bg.setColorAt(1.0, QtGui.QColor("#010614"))
+        p.fillRect(self.rect(), bg)
+        # balai : cône lumineux qui tourne, traînée qui s'efface derrière lui
+        # balayage de la moitié haute, de gauche à droite, puis on recommence
+        sweep = 180.0 + (now % self.SWEEP_S) / self.SWEEP_S * 180.0
+        cone = QtGui.QConicalGradient(home, -sweep)
+        cone.setColorAt(0.0, QtGui.QColor(170, 255, 230, 200))
+        cone.setColorAt(0.012, QtGui.QColor(110, 255, 210, 150))
+        cone.setColorAt(0.05, QtGui.QColor(80, 245, 200, 100))
+        cone.setColorAt(0.13, QtGui.QColor(60, 225, 185, 50))
+        cone.setColorAt(0.26, QtGui.QColor(50, 210, 175, 0))
+        cone.setColorAt(1.0, QtGui.QColor(60, 220, 180, 0))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(cone)
+        p.drawEllipse(home, reach, reach)
+        # cercles concentriques gradués, allumés dans le sillage du balai
+        step = 85.0
+        for i in range(1, int(reach / step) + 1):
+            r = i * step
+            box = QtCore.QRectF(home.x() - r, home.y() - r, 2 * r, 2 * r)
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.setPen(QtGui.QPen(QtGui.QColor(150, 230, 255, 50), 0.9))
+            p.drawEllipse(home, r, r)
+            for k in range(18):
+                alpha = int(220 * (1 - k / 18) ** 1.4)
+                p.setPen(QtGui.QPen(QtGui.QColor(170, 255, 225, alpha), 1.2))
+                p.drawArc(box, int(-(sweep - 5 * (k + 1)) * 16), int(-5 * 16))
+            p.setPen(QtGui.QPen(QtGui.QColor(150, 230, 255, 50), 0.8))
+            for deg in range(0, 360, 10):
+                c, sn = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+                tick = 5 if deg % 30 == 0 else 2.5
+                p.drawLine(home + QtCore.QPointF(c * (r - tick), sn * (r - tick)),
+                           home + QtCore.QPointF(c * (r + tick), sn * (r + tick)))
+        rad = math.radians(sweep)
+        tip = home + QtCore.QPointF(math.cos(rad) * reach, math.sin(rad) * reach)
+        p.setPen(QtGui.QPen(QtGui.QColor(120, 255, 210, 80), 7))     # halo du faisceau
+        p.drawLine(home, tip)
+        p.setPen(QtGui.QPen(QtGui.QColor(235, 255, 245, 220), 2.0))
+        p.drawLine(home, tip)
+        # ondes de sonar : une par QSO écouté (vert = français)
+        self.pings = [(t, fr) for t, fr in self.pings if now - t < 4.0]
+        for t, fr in self.pings:
+            age = now - t
+            for k in range(3):
+                a = age - k * 0.35
+                if a <= 0:
+                    continue
+                r = a * 420
+                alpha = int(230 * max(0.0, 1 - a / 3.2))
+                col = QtGui.QColor(61, 220, 132, alpha) if fr else QtGui.QColor(200, 210, 230, alpha // 2)
+                p.setPen(QtGui.QPen(col, 3 - k))
+                p.drawEllipse(home, r, r)
+        p.end()
 
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key_Escape:

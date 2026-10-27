@@ -1,8 +1,9 @@
 """Loupe ronde qui suit le pointeur de la souris (X11).
 
-Seule la zone sous le pointeur est grossie, dans une lentille posée à côté
-de lui (jamais dessus : elle ne cache pas ce qu'on vise et ne bloque aucun
-clic). Un réticule rouge marque le pixel exact visé par le pointeur.
+Sur les fenêtres du Scope, la lentille est CENTRÉE sur le pointeur : l'image
+grossie est redessinée par Qt (widget.grab), donc sans se filmer elle-même ;
+elle laisse passer les clics. Ailleurs (autres programmes), elle se pose à
+côté du pointeur. Un réticule rouge marque le pixel exact visé.
 Grossissement réglable de ×2 à ×10 (set_zoom), gardé entre deux sessions.
 """
 
@@ -64,11 +65,43 @@ class Loupe(QtWidgets.QWidget):
         self.hide()
 
     # --- suivi du pointeur ----------------------------------------------
+    def _app_window_at(self, pos):
+        """Fenêtre du Scope sous le pointeur (la loupe et le doigt exclus)."""
+        found = []
+        for w in QtWidgets.QApplication.topLevelWidgets():
+            if w is self or not w.isVisible() or w.isMinimized() \
+                    or w.windowFlags() & QtCore.Qt.WindowTransparentForInput:
+                continue
+            if w.geometry().contains(pos):
+                found.append(w)
+        if not found:
+            return None
+        # la fenêtre active, sinon un écran plein, sinon la plus petite (posée dessus)
+        found.sort(key=lambda w: (not w.isActiveWindow(), not w.isFullScreen(),
+                                  w.width() * w.height()))
+        return found[0]
+
     def _follow(self):
         pos = QtGui.QCursor.pos()
         screen = QtWidgets.QApplication.screenAt(pos) or QtWidgets.QApplication.primaryScreen()
         geo = screen.geometry()
         src = SIZE // self.zoom                     # côté de la zone grossie
+        win = self._app_window_at(pos)
+        if win is not None:
+            # centrée sur le pointeur ; image redessinée par Qt (pas de la loupe)
+            self.move(pos.x() - SIZE // 2, pos.y() - SIZE // 2)
+            local = win.mapFromGlobal(pos)
+            want = QtCore.QRect(local.x() - src // 2, local.y() - src // 2, src, src)
+            part = want.intersected(win.rect())     # près d'un bord : le reste en noir
+            image = QtGui.QPixmap(src, src)
+            image.fill(QtGui.QColor("#000"))
+            if not part.isEmpty():
+                p = QtGui.QPainter(image)
+                p.drawPixmap(part.topLeft() - want.topLeft(), win.grab(part))
+                p.end()
+            self.image = image
+            self.update()
+            return
         # lentille en bas à droite du pointeur, assez loin pour ne pas
         # recouvrir la zone qu'elle grossit ; retournée près des bords
         gap = src // 2 + 24

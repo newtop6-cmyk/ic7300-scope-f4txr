@@ -2225,12 +2225,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fr_screen.found.connect(self._fr_found)
         self.fr_hidden = []
         self.fr_saved_span = None
+        self.fr_full = False                    # WATERFALL FR : bande entière (mode fixe)
+        self.fr_full_band = None
         self.fr_toggle = ToggleSwitch(
-            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = veille ; le waterfall "
-            "plein écran s'ouvre tout seul dès qu'une station française est trouvée sur la "
-            "bande (RBN, DX Summit, texte décodé, scan QSO FR par récepteur Internet). "
-            "Dans l'écran : clic sur un signal = la radio s'y cale. En haut = arrêt.")
+            "OFF", "ON", tooltip="WATERFALL FR : levier en bas = waterfall plein écran "
+            "tout de suite ; RETOUR le réduit en veille, il se rouvre tout seul dès qu'une "
+            "station française est trouvée sur la bande (RBN, DX Summit, texte décodé, scan QSO FR par récepteur Internet). "
+            "Dans l'écran : clic sur un signal = la radio s'y cale. En haut = arrêt. "
+            "Clic droit : ouvrir l'écran tout de suite.")
         self.fr_toggle.toggled.connect(self._fr_toggled)
+        self.fr_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.fr_toggle.customContextMenuRequested.connect(self._fr_open_now)
         self.fr_timer = QtCore.QTimer(self)
         self.fr_timer.timeout.connect(self._fr_tick)
         # DÉMO : la souris devient un gros doigt (demo_finger.py)
@@ -3318,10 +3323,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_loopback_source = None
         self.tx_loopback_input = None
         self._tx_mic_unload()               # restes d'une session plantée
+        self._rec_mic_unload()
         source = self.tx_source.currentData()
         if source and source != "file":
             self.eq_engine.start(source)    # voix égalisée prête avant la liaison
             self._tx_mic_mute(source, True)  # liaison prête dès le départ, micro coupé
+        # micro → enregistrement : revérifié toutes les 5 s hors émission (le système
+        # son peut le remettre muet au démarrage)
+        self.rec_mic_timer = QtCore.QTimer(self)
+        self.rec_mic_timer.timeout.connect(self._rec_links_check)
+        self.rec_mic_timer.start(5000)
+        QtCore.QTimer.singleShot(2500, self._rec_links_check)
         self.tx_player = None               # paplay du fichier
         self.tx_timer = QtCore.QTimer(self)
         self.tx_timer.setInterval(250)
@@ -4971,6 +4983,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ft8_toggle.setDown(False)
             if self.fr_toggle.down:
                 self.fr_toggle.setDown(False)
+            # fréquence et mode d'avant : rendus à la fermeture de l'écran RTTY
+            self.rtty_prev = (self.freq_hz, self.mode_combo.currentText())
             if self.civ and not self.tx_active:
                 self._manual_tuning()
                 hz = self.freq_hz or 14_085_000
@@ -5002,41 +5016,92 @@ class MainWindow(QtWidgets.QMainWindow):
             self._restore_windows(self.rtty_hidden)
             self.rtty_hidden = []
             self.decoder_combo.setCurrentIndex(self.rtty_prev_decoder)
+            prev = getattr(self, "rtty_prev", None)
+            self.rtty_prev = None
+            if prev and self.civ and not self.tx_active:      # retour au trafic d'avant
+                hz, mode = prev
+                if mode and mode != self.mode_combo.currentText():
+                    self.ft8_set_mode(mode)
+                if hz and hz != self.freq_hz:
+                    self.tune_to(hz)
 
     # --- WATERFALL FR plein écran (lecture seule : VFO jamais changé) ----------
     def _fr_tick(self):
         self.fr_screen.set_frequency(self.freq_hz, self.mode_combo.currentText())
+        if self.fr_full and self.freq_hz and band_of(self.freq_hz) != self.fr_full_band:
+            self._fr_full_band()                # autre bande : l'affichage suit
+
+    # plages du mode fixe du scope de l'IC-7300 (code BCD de la plage)
+    FIXED_RANGES = ((30_000, 1_600_000, 0x01), (1_600_000, 2_000_000, 0x02),
+                    (2_000_000, 6_000_000, 0x03), (6_000_000, 8_000_000, 0x04),
+                    (8_000_000, 11_000_000, 0x05), (11_000_000, 15_000_000, 0x06),
+                    (15_000_000, 20_000_000, 0x07), (20_000_000, 22_000_000, 0x08),
+                    (22_000_000, 26_000_000, 0x09), (26_000_000, 30_000_000, 0x10),
+                    (30_000_000, 45_000_000, 0x11), (45_000_000, 60_000_000, 0x12),
+                    (60_000_000, 74_800_000, 0x13))
+
+    def _fr_full_band(self):
+        """Scope de la radio en mode FIXE, bords = la bande entière (1 MHz au plus),
+        jeu de bords n° 3 de la radio."""
+        if not self.civ or not self.freq_hz:
+            return
+        name = band_of(self.freq_hz)
+        self.fr_full_band = name
+        edges = next(((lo, hi) for n, lo, hi, _, _ in BANDS if n == name), None)
+        if edges is None:                       # hors bande : on reste en mode centré
+            self.civ._commands.put((0x27, 0x14, 0x00, 0x00))
+            return
+        lo, hi = edges
+        if hi - lo > 1_000_000:                 # 10 m, 6 m : la fenêtre de 1 MHz suit le VFO
+            lo = max(lo, min(self.freq_hz - 500_000, hi - 1_000_000))
+            hi = lo + 1_000_000
+        code = next((c for a, b, c in self.FIXED_RANGES if a <= lo < b), None)
+        if code is None:
+            return
+        self.civ._commands.put((0x27, 0x1E, code, 0x03, *to_bcd_le(lo), *to_bcd_le(hi)))
+        self.civ._commands.put((0x27, 0x16, 0x00, 0x03))      # bords n° 3
+        self.civ._commands.put((0x27, 0x14, 0x00, 0x01))      # mode fixe
 
     def _fr_span(self, hz):
-        """Bouton de largeur de l'écran : largeur du scope (pas la fréquence)."""
-        index = self.span_combo.findData(hz)
-        if index >= 0:
-            self.span_combo.setCurrentIndex(index)
-            self.on_span_selected()
+        """Boutons de l'écran : BANDE (0) = bande entière, sinon largeur centrée."""
+        self.fr_full = hz == 0
+        if self.fr_full:
+            self._fr_full_band()
+        else:
+            if self.civ:
+                self.civ._commands.put((0x27, 0x14, 0x00, 0x00))     # mode centré
+            index = self.span_combo.findData(hz)
+            if index >= 0:
+                self.span_combo.setCurrentIndex(index)
+                self.on_span_selected()
         self.fr_screen.set_span(hz)
 
     def _fr_toggled(self, on):
         if on:
             self.fr_saved_span = self.span_combo.currentData()
-            self.fr_screen.set_span(self.fr_saved_span)
+            self._fr_span(0)                    # toute la bande dès l'ouverture
             self._fr_tick()
             self.fr_screen.start()
             self.fr_timer.start(250)
-            if any(True for _ in self.fr_screen._band_stations()[1]):
-                self._fr_show()
-            else:
-                self.statusBar().showMessage(
-                    "WATERFALL FR en veille : l'écran s'ouvrira dès qu'une station "
-                    "française sera trouvée", 8000)
+            self._fr_show()                     # visible tout de suite ; RETOUR = veille
         else:
             self.fr_timer.stop()
             self.fr_screen.stop()
+            self.fr_full = False
+            if self.civ:
+                self.civ._commands.put((0x27, 0x14, 0x00, 0x00))     # scope centré, comme avant
             if self.fr_saved_span is not None \
                     and self.fr_saved_span != self.span_combo.currentData():
                 self._fr_span(self.fr_saved_span)       # largeur d'avant rendue
             self.fr_saved_span = None
             self._restore_windows(self.fr_hidden)
             self.fr_hidden = []
+
+    def _fr_open_now(self, *_):
+        """Clic droit sur l'interrupteur : écran ouvert tout de suite (veille lancée)."""
+        if not self.fr_toggle.down:
+            self.fr_toggle.setDown(True)
+        self._fr_show()
 
     def _fr_show(self):
         """Écran WATERFALL FR au premier plan, plein écran (un seul écran plein)."""
@@ -5471,6 +5536,77 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tx_loopback_input:
             subprocess.run(["pactl", "set-sink-input-mute", self.tx_loopback_input,
                             "1" if mute else "0"], capture_output=True)
+        # enregistrement : le micro en permanence ; coupé quand il part déjà vers la
+        # radio (il est alors enregistré par le chemin d'émission : pas de doublon)
+        self._rec_mic(self.tx_loopback_source, record=mute)
+
+    REC_MIC_NODE = "ic7300_enreg_micro"
+
+    def _rec_mic_unload(self):
+        out = subprocess.run(["pactl", "list", "modules", "short"],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            if self.REC_MIC_NODE in line:
+                subprocess.run(["pactl", "unload-module", line.split()[0]],
+                               capture_output=True)
+        self.rec_mic_module = self.rec_mic_monitor = self.rec_mic_input = None
+
+    def _rec_links_check(self):
+        """Sortie d'enregistrement : réception et émission toujours actives, micro
+        actif hors émission. Le système son peut les remettre muettes (mémoire par
+        rôle) : on rétablit."""
+        if not self.tx_active:
+            self._rec_mic(self.tx_loopback_source, record=True)
+        try:
+            streams = json.loads(subprocess.run(
+                ["pactl", "-f", "json", "list", "sink-inputs"],
+                capture_output=True, text=True, env=PACTL_ENV, timeout=2).stdout)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            return
+        for stream in streams:
+            if stream["properties"].get("node.name") in ("ic7300_enreg_rx", "ic7300_enreg_tx") \
+                    and stream["mute"]:
+                subprocess.run(["pactl", "set-sink-input-mute", str(stream["index"]), "0"],
+                               capture_output=True)
+
+    def _rec_mic(self, source, record):
+        """Liaison micro → sortie d'enregistrement (SimpleScreenRecorder)."""
+        if not source:
+            return
+        monitor = self.eq_engine.monitor_for(source)
+        if getattr(self, "rec_mic_monitor", None) != monitor or not getattr(
+                self, "rec_mic_module", None):
+            self._rec_mic_unload()
+            out = subprocess.run(
+                ["pactl", "load-module", "module-loopback", f"source={monitor}",
+                 f"sink={RECORD_SINK}", "latency_msec=60",
+                 "source_dont_move=true", "sink_dont_move=true",
+                 f"sink_input_properties='node.name={self.REC_MIC_NODE} "
+                 "media.role=ic7300rec'"],
+                capture_output=True, text=True)
+            self.rec_mic_module = out.stdout.strip() or None
+            self.rec_mic_monitor = monitor
+        if not self.rec_mic_module:
+            return
+        if self.rec_mic_input is None:
+            for _ in range(40):
+                try:
+                    streams = json.loads(subprocess.run(
+                        ["pactl", "-f", "json", "list", "sink-inputs"],
+                        capture_output=True, text=True, env=PACTL_ENV).stdout)
+                except ValueError:
+                    streams = []
+                for stream in streams:
+                    if stream["properties"].get("node.name") == self.REC_MIC_NODE:
+                        self.rec_mic_input = str(stream["index"])
+                if self.rec_mic_input:
+                    break
+                time.sleep(0.05)
+        if self.rec_mic_input:
+            done = subprocess.run(["pactl", "set-sink-input-mute", self.rec_mic_input,
+                                   "0" if record else "1"], capture_output=True)
+            if done.returncode != 0:            # flux recréé : on le recherchera
+                self.rec_mic_input = None
 
     def stop_tx(self, reason=None):
         self._backlight_tx(False)           # rétro-éclairage : retour au calme
@@ -6473,6 +6609,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.eq_engine.stop()
         self.function_screen.close()
         self._tx_mic_unload()
+        self._rec_mic_unload()
         if self.tx_active:              # fermé en émission : l'écoute ne doit pas rester muette
             self._pactl_stream("set-sink-input-mute",
                                "1" if self.mute_check.isChecked() else "0")

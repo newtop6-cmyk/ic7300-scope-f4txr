@@ -48,7 +48,8 @@ class ToggleSwitch(QtWidgets.QWidget):
         self.update()
 
     def mousePressEvent(self, event):
-        self.setDown(not self.down)
+        if event.button() == QtCore.Qt.LeftButton:      # clic droit : menu, sans basculer
+            self.setDown(not self.down)
 
     def wheelEvent(self, event):
         self.setDown(event.angleDelta().y() < 0)
