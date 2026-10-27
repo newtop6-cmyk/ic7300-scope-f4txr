@@ -287,16 +287,16 @@ class VoiceScope(QtWidgets.QWidget):
                 return
             area = QtGui.QPolygonF(up[a:b] + down[a:b][::-1])
             g = QtGui.QLinearGradient(0, mid - half, 0, mid + half)
-            g.setColorAt(0.0, QtGui.QColor(30, 170, 90, int(150 * strength)))
-            g.setColorAt(0.35, QtGui.QColor(70, 235, 140, int(205 * strength)))
-            g.setColorAt(0.5, QtGui.QColor(170, 255, 205, int(235 * strength)))
-            g.setColorAt(0.65, QtGui.QColor(70, 235, 140, int(205 * strength)))
-            g.setColorAt(1.0, QtGui.QColor(30, 170, 90, int(150 * strength)))
+            g.setColorAt(0.0, QtGui.QColor(40, 230, 40, int(215 * strength)))     # vert fluo
+            g.setColorAt(0.3, QtGui.QColor(57, 255, 20, int(245 * strength)))
+            g.setColorAt(0.5, QtGui.QColor(190, 255, 170, int(255 * strength)))   # cœur éclatant
+            g.setColorAt(0.7, QtGui.QColor(57, 255, 20, int(245 * strength)))
+            g.setColorAt(1.0, QtGui.QColor(40, 230, 40, int(215 * strength)))
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(g)
             p.drawPolygon(area)
         fill(0, max(self.sweep, 1) + 1, 1.0)            # balayage en cours : plein
-        fill(max(self.sweep - 1, 0), n, 0.55)          # ancien balayage : plus pâle
+        fill(max(self.sweep - 1, 0), n, 0.85)          # ancien balayage : à peine moins vif
         # partie ancienne (après le spot) plus pâle
         if self.sweep < n - 1:
             p.setPen(QtGui.QPen(QtGui.QColor(90, 255, 160, 70), 1.6))
