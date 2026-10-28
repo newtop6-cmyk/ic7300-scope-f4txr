@@ -72,6 +72,7 @@ from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
 from arc_step import ArcStepWindow
+from backlit_window import BacklitWindow
 from vintage_push import RoundPush, VintagePush
 from jewel_lamp import JewelLamp
 from station_plate import StationPlate
@@ -7308,21 +7309,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _step_window(width=210):
-        """Lucarne rétroéclairée ambre (pas en cours, mode…)."""
-        lab = QtWidgets.QLabel()
-        lab.setAlignment(QtCore.Qt.AlignCenter)
-        lab.setFixedSize(width, 40)
-        lab.setStyleSheet(
-            "QLabel { font: 900 16pt 'DejaVu Sans Condensed'; color: #ffb43a;"
-            " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a0f04,"
-            " stop:0.5 #2e1a06, stop:1 #120a02); border: 3px solid #9a9d98;"
-            " border-top-color: #4a4c48; border-left-color: #4a4c48; border-radius: 8px; }")
-        glow = QtWidgets.QGraphicsDropShadowEffect(lab)
-        glow.setOffset(0, 0)
-        glow.setBlurRadius(12)
-        glow.setColor(QtGui.QColor(255, 150, 30, 200))
-        lab.setGraphicsEffect(glow)
-        return lab
+        """Lucarne rétroéclairée vintage (pas en cours, mode…), backlit_window.py."""
+        return BacklitWindow(width, 42)
 
     def _mode_window(self):
         """Lucarne du mode (LSB, USB, CW…) : suit la radio ; clic = choisir le mode."""
