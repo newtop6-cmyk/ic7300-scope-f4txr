@@ -1,5 +1,5 @@
 """Bouton d'arrêt d'urgence : champignon rouge très en relief, sur une
-collerette jaune où « EMERGENCY » est écrit en rouge en arc de 130° sur le haut.
+collerette jaune où « EMERGENCY » est écrit en rouge tout autour (360°).
 
 Signal pressed() à l'appui. set_flashing(True) : le champignon flashe par
 cycles de 3 éclairs à intervalles réguliers (jusqu'à set_flashing(False))."""
@@ -74,26 +74,50 @@ class EmergencyButton(QtWidgets.QWidget):
         p.setBrush(ring)
         p.setPen(QtGui.QPen(QtGui.QColor("#1a1a1a"), 1.4))
         p.drawEllipse(c, R - 1, R - 1)
-        # « EMERGENCY » en rouge, serré en arc de 130° sur le haut de la collerette
-        text = "EMERGENCY"
-        f = QtGui.QFont("DejaVu Sans", max(6, round(s * 0.105)), QtGui.QFont.Black)
-        p.setFont(f)
+        # « EMERGENCY » en rouge sur tout le tour (360°) : en haut lu de
+        # l'extérieur, en bas lu à l'endroit (comme un vrai arrêt d'urgence),
+        # séparés par deux ✱ à gauche et à droite
+        rb_ = R * 0.56                               # bord du socle noir
+        f = QtGui.QFont("DejaVu Sans Condensed")
+        f.setWeight(QtGui.QFont.Black)
+        size = max(7, round((R - 1 - rb_) * 0.74))
+        f.setPixelSize(size)
         fm = QtGui.QFontMetricsF(f)
-        rt = R - 1 - fm.ascent() * 0.62 - 2          # rayon de l'écriture
-        widths = [fm.horizontalAdvance(ch) for ch in text]
-        span = 130.0
-        per = span / sum(widths)                     # degrés par pixel de texte
-        a = -90 - span / 2                           # centré en haut, sens horaire
-        for ch, wch in zip(text, widths):
-            mid = a + wch * per / 2
+        rt = (R - 1 + rb_) / 2                       # milieu de la collerette
+        span = 150.0
+        while size > 6 and fm.horizontalAdvance("EMERGENCY") > math.radians(span) * rt:
+            size -= 1                                # rétrécit si ça ne tient pas
+            f.setPixelSize(size)
+            fm = QtGui.QFontMetricsF(f)
+        p.setFont(f)
+        p.setPen(QtGui.QColor("#c80000"))
+        yoff = fm.ascent() * 0.36
+        for top in (True, False):
+            widths = [fm.horizontalAdvance(ch) for ch in "EMERGENCY"]
+            per = span / sum(widths)
+            a = (-90.0 - span / 2) if top else (90.0 + span / 2)
+            for ch, wch in zip("EMERGENCY", widths):
+                step = wch * per
+                mid = a + step / 2 if top else a - step / 2
+                p.save()
+                p.translate(c)
+                if top:
+                    p.rotate(mid + 90)
+                    p.translate(0, -rt)
+                else:
+                    p.rotate(mid - 90)
+                    p.translate(0, rt)
+                p.drawText(QtCore.QPointF(-wch / 2, yoff), ch)
+                p.restore()
+                a = a + step if top else a - step
+        for ang in (0.0, 180.0):                     # ✱ à droite et à gauche
             p.save()
             p.translate(c)
-            p.rotate(mid + 90)
+            p.rotate(ang + 90)
             p.translate(0, -rt)
-            p.setPen(QtGui.QColor("#d40000"))
-            p.drawText(QtCore.QPointF(-wch / 2, fm.ascent() * 0.38), ch)
+            w_ = fm.horizontalAdvance("✱")
+            p.drawText(QtCore.QPointF(-w_ / 2, yoff), "✱")
             p.restore()
-            a += wch * per
         # socle noir du champignon
         rb = R * 0.56
         g = QtGui.QRadialGradient(c - QtCore.QPointF(rb * 0.3, rb * 0.3), rb * 1.3)
