@@ -71,6 +71,7 @@ from drum_display import DrumClock, DrumDisplay
 from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
+from arc_step import ArcStepWindow
 from vintage_push import RoundPush, VintagePush
 from jewel_lamp import JewelLamp
 from station_plate import StationPlate
@@ -2969,12 +2970,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.other_label.setToolTip("L'autre VFO")
         self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
         # multiplicateur au-dessus du VFO : ×1 → ×10 → ×100 → ×1000 (voir la plaque)
-        self.vfo_step_window = self._step_window()
+        self.vfo_step_window = self._step_window()      # (gardée : remplacée par l'arc)
+        self.vfo_step_arc = ArcStepWindow()             # lucarne en arc au-dessus du VFO
+        self.vfo_step_arc.chosen.connect(self._vfo_step_pick)
         step_top = QtWidgets.QHBoxLayout()
         step_top.setSpacing(8)
         step_top.addStretch()
         step_top.addSpacing(self.vfo_step_push.width() + 8)    # lucarne pile au centre
-        step_top.addWidget(self.vfo_step_window, 0, QtCore.Qt.AlignVCenter)
+        step_top.addWidget(self.vfo_step_arc, 0, QtCore.Qt.AlignBottom)
         step_top.addWidget(self.vfo_step_push, 0, QtCore.Qt.AlignVCenter)
         step_top.addStretch()
         vfo.addLayout(step_top, 0, 0, 1, 4, QtCore.Qt.AlignBottom)
@@ -7360,6 +7363,11 @@ class MainWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError, KeyError, TypeError):
             return 1000
 
+    def _vfo_step_pick(self, hz):
+        """Clic sur un pas de la lucarne en arc : ce pas directement."""
+        self.vfo_step_hz = 1000 if hz == 1 else hz // 10    # _vfo_step_next avance d'un cran
+        self._vfo_step_next()
+
     def _vfo_step_next(self):
         """Poussoir PAS : ×1 → ×10 → ×100 → ×1000 → ×1."""
         self.vfo_step_hz = 1 if self.vfo_step_hz >= 1000 else self.vfo_step_hz * 10
@@ -7387,6 +7395,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vfo_step_push.setText(f"×{self.vfo_step_hz}")
         if hasattr(self, "vfo_step_window"):
             self.vfo_step_window.setText(self._step_text(self.vfo_step_hz, self.vfo_step_hz))
+        if hasattr(self, "vfo_step_arc"):
+            self.vfo_step_arc.set_current(self.vfo_step_hz)
 
     def _vfo_step_leds(self, on_100k):
         fine = hasattr(self, "fine_switches") and self._fine_step() is not None
