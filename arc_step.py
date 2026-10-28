@@ -31,24 +31,26 @@ class ArcStepWindow(QtWidgets.QWidget):
             self.update()
 
     def _center(self):
-        return QtCore.QPointF(self.W / 2, 4 + self.RO)
+        return QtCore.QPointF(self.W / 2, 6 + self.RO)
 
     def _angles(self):
         """Angle (degrés depuis le haut) de chaque pas, de gauche à droite."""
         n = len(STEPS)
-        return [-self.SPAN * 0.74 + i * (2 * self.SPAN * 0.74) / (n - 1) for i in range(n)]
+        return [-self.SPAN * 0.66 + i * (2 * self.SPAN * 0.66) / (n - 1) for i in range(n)]
 
     def _band(self, grow=0.0):
-        c, ro, ri = self._center(), self.RO + grow, self.RO - self.BAND - grow
-        path = QtGui.QPainterPath()
-        a0, a1 = 90 - self.SPAN - grow * 0.2, 90 + self.SPAN + grow * 0.2
-        out = QtCore.QRectF(c.x() - ro, c.y() - ro, 2 * ro, 2 * ro)
-        inn = QtCore.QRectF(c.x() - ri, c.y() - ri, 2 * ri, 2 * ri)
-        path.arcMoveTo(out, a0)
-        path.arcTo(out, a0, a1 - a0)
-        path.arcTo(inn, a1, -(a1 - a0))
-        path.closeSubpath()
-        return path
+        """Bande en arc aux extrémités ARRONDIES (tracé épais à bouts ronds)."""
+        c = self._center()
+        r = self.RO - self.BAND / 2
+        line = QtGui.QPainterPath()
+        rect = QtCore.QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r)
+        span = self.SPAN - (self.BAND / 2) / r * 57.3      # place pour les bouts ronds
+        line.arcMoveTo(rect, 90 - span)
+        line.arcTo(rect, 90 - span, 2 * span)
+        st = QtGui.QPainterPathStroker()
+        st.setWidth(self.BAND + 2 * grow)
+        st.setCapStyle(QtCore.Qt.RoundCap)
+        return st.createStroke(line).simplified()
 
     def mousePressEvent(self, event):
         c = self._center()
@@ -62,26 +64,44 @@ class ArcStepWindow(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         c = self._center()
-        # cadre chromé, puis verre sombre rétroéclairé
-        frame = self._band(3.0)
+        # ombre portée du cadre sur la façade (profondeur)
+        frame = self._band(3.5)
+        for i in range(5, 0, -1):
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(0, 0, 0, 26))
+            p.drawPath(frame.translated(i * 0.4, i * 0.7))
+        # cadre chromé bombé, arête claire en haut, sombre en bas
         g = QtGui.QLinearGradient(0, 0, 0, self.H)
-        for stop, col in ((0, "#f2f3f1"), (0.4, "#8c8f8b"), (0.7, "#d5d7d3"), (1, "#5d605c")):
+        for stop, col in ((0, "#ffffff"), (0.3, "#b9bcb8"), (0.55, "#7a7e79"),
+                          (0.8, "#d2d4d0"), (1, "#4a4d49")):
             g.setColorAt(stop, QtGui.QColor(col))
         p.setBrush(g)
-        p.setPen(QtGui.QPen(QtGui.QColor("#111"), 1))
+        p.setPen(QtGui.QPen(QtGui.QColor("#151614"), 1))
         p.drawPath(frame)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 140), 1))
+        p.drawPath(self._band(2.2))
+        # vitre creusée, rétroéclairée
         glass = self._band()
         bg = QtGui.QRadialGradient(c, self.RO)
-        bg.setColorAt(1 - (self.BAND + 4) / self.RO, QtGui.QColor("#120a02"))
-        bg.setColorAt(1 - self.BAND / 2 / self.RO, QtGui.QColor("#2e1a06"))
-        bg.setColorAt(1.0, QtGui.QColor("#140b02"))
+        bg.setColorAt(1 - (self.BAND + 4) / self.RO, QtGui.QColor("#1a0d02"))
+        bg.setColorAt(1 - self.BAND / 2 / self.RO, QtGui.QColor("#3a2108"))
+        bg.setColorAt(1.0, QtGui.QColor("#0c0601"))
         p.setBrush(bg)
-        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 1.2))
         p.drawPath(glass)
+        # ombre intérieure : le bord haut de la vitre est dans l'ombre du cadre
+        p.save()
+        p.setClipPath(glass)
+        inner = QtGui.QRadialGradient(c, self.RO)
+        inner.setColorAt(1 - 7 / self.RO, QtGui.QColor(0, 0, 0, 0))
+        inner.setColorAt(1.0, QtGui.QColor(0, 0, 0, 190))
+        p.fillPath(glass, inner)
+        p.restore()
         # les 4 pas gravés le long de l'arc
         r_text = self.RO - self.BAND / 2
         f = QtGui.QFont("DejaVu Sans Condensed")
-        f.setPixelSize(15)
+        f.setPixelSize(14)
         f.setWeight(QtGui.QFont.Black)
         p.setFont(f)
         fm = QtGui.QFontMetricsF(f)
