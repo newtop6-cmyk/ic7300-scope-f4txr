@@ -186,17 +186,17 @@ def _knob(p, angle, hooked):
         for i in range(361):
             t = math.radians(i)
             bump = 0.5 + 0.5 * math.cos(lobes * (t - math.radians(angle)))
-            r = (R * (0.89 + 0.11 * bump ** 0.6) + grow) * scale
+            r = (R * (0.86 + 0.14 * bump ** 0.5) + grow) * scale
             pt = c + QtCore.QPointF(math.cos(t) * r, math.sin(t) * r)
             path.moveTo(pt) if i == 0 else path.lineTo(pt)
         path.closeSubpath()
         return path
 
     # ombre portée du bouton sur la plaque
-    for i in range(14, 0, -1):
+    for i in range(22, 0, -1):
         p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(QtGui.QColor(0, 0, 0, 20))
-        p.drawPath(skirt_path(grow=i * 0.4).translated(i * 0.5, i * 0.9))
+        p.setBrush(QtGui.QColor(0, 0, 0, 22))
+        p.drawPath(skirt_path(grow=i * 0.45).translated(i * 0.7, i * 1.2))
     if hooked:                                       # tenu à la souris : lueur ambre
         glow = QtGui.QRadialGradient(c, R + 14)
         glow.setColorAt(0.85, QtGui.QColor(255, 190, 90, 0))
@@ -220,11 +220,31 @@ def _knob(p, angle, hooked):
             continue
         pt = c + QtCore.QPointF(math.cos(t), math.sin(t)) * R * 0.86
         hl = QtGui.QRadialGradient(pt, R * 0.16)
-        hl.setColorAt(0, QtGui.QColor(255, 255, 255, int(70 * light ** 2)))
+        hl.setColorAt(0, QtGui.QColor(255, 255, 255, int(120 * light ** 2)))
         hl.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(hl)
         p.drawEllipse(pt, R * 0.16, R * 0.12)
+    # arête de lumière sur le pourtour de la jupe (haut gauche) + ombre (bas droit)
+    rim = QtGui.QConicalGradient(c, 135)
+    rim.setColorAt(0, QtGui.QColor(255, 255, 255, 150))
+    rim.setColorAt(0.2, QtGui.QColor(255, 255, 255, 0))
+    rim.setColorAt(0.45, QtGui.QColor(0, 0, 0, 0))
+    rim.setColorAt(0.55, QtGui.QColor(0, 0, 0, 200))
+    rim.setColorAt(0.7, QtGui.QColor(0, 0, 0, 0))
+    rim.setColorAt(0.8, QtGui.QColor(255, 255, 255, 0))
+    rim.setColorAt(1, QtGui.QColor(255, 255, 255, 150))
+    p.setBrush(QtCore.Qt.NoBrush)
+    p.setPen(QtGui.QPen(QtGui.QBrush(rim), 2.5))
+    p.drawPath(skirt_path(scale=0.985))
+    # gorge sombre autour du gradin (profondeur)
+    p.setPen(QtCore.Qt.NoPen)
+    gorge = QtGui.QRadialGradient(c, R * 0.8)
+    gorge.setColorAt(0.85, QtGui.QColor(0, 0, 0, 0))
+    gorge.setColorAt(0.93, QtGui.QColor(0, 0, 0, 200))
+    gorge.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+    p.setBrush(gorge)
+    p.drawEllipse(c, R * 0.8, R * 0.8)
     # gradin bombé entre la jupe et le disque d'aluminium
     step = QtGui.QRadialGradient(c - QtCore.QPointF(R * 0.25, R * 0.3), R * 0.95)
     step.setColorAt(0, QtGui.QColor("#3a3a3a"))
@@ -235,6 +255,10 @@ def _knob(p, angle, hooked):
     p.drawEllipse(c, R * 0.74, R * 0.74)
     # disque d'aluminium poli (tourné) : reflets en secteurs + trait de lumière
     ar = R * 0.6
+    for i in range(6, 0, -1):
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(0, 0, 0, 40))
+        p.drawEllipse(c + QtCore.QPointF(i * 0.6, i * 1.0), ar, ar)
     al = QtGui.QConicalGradient(c, 45)
     for stop, col in ((0, "#f2f2f0"), (0.12, "#8c8e8c"), (0.25, "#d6d7d5"),
                       (0.37, "#5e605e"), (0.5, "#e9eae8"), (0.62, "#7d7f7d"),
@@ -264,7 +288,9 @@ def _knob(p, angle, hooked):
     hr = R * 0.26
     p.setPen(QtCore.Qt.NoPen)
     p.setBrush(QtGui.QColor(0, 0, 0, 150))
-    p.drawEllipse(hc + QtCore.QPointF(5, 9), hr * 1.05, hr * 1.05)
+    for i in range(10, 0, -1):
+        p.setBrush(QtGui.QColor(0, 0, 0, 26))
+        p.drawEllipse(hc + QtCore.QPointF(i * 0.9, i * 1.5), hr * (1 + i * 0.02), hr * (1 + i * 0.02))
     base = QtGui.QRadialGradient(hc - QtCore.QPointF(hr * 0.3, hr * 0.3), hr * 1.5)
     base.setColorAt(0, QtGui.QColor("#2e2e2e"))
     base.setColorAt(1, QtGui.QColor("#020202"))

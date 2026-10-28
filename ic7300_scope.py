@@ -203,6 +203,7 @@ HOP = 1600                      # 30 spectres par seconde
 BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
+WF_ROWS_PER = 3                 # lignes de waterfall par image du scope (défilement ×3)
 MOBILE_VFO_STEP = 50_000        # VFO de l'écran MOBILE : 50 kHz par cran
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
@@ -2038,6 +2039,35 @@ class KWM2Vfo(SmoothKnob):
         c = kwm2_vfo.KNOB_C * (self.width() / kwm2_vfo.W)
         return math.degrees(math.atan2(pos.y() - c.y(), pos.x() - c.x()))
 
+    def mouseReleaseEvent(self, event):
+        """Linéaire et précis : pas de volant, le bouton s'arrête où on le lâche."""
+        self.speed = 0.0
+        self._direct = False
+        self._last = None
+        self.setCursor(QtCore.Qt.OpenHandCursor)
+        self.update()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._last is None:
+            return
+        a = self._angle_at(event.pos())
+        delta = (a - self._last + 180) % 360 - 180      # exactement l'angle tourné
+        self._last = a
+        self._rotate(delta)
+
+    def wheelEvent(self, event):
+        """Molette : un cran de molette = un cran du VFO (50 kHz), sans à-coup."""
+        self._wheel += event.angleDelta().y()
+        steps = int(self._wheel / 120)
+        if steps:
+            self._wheel -= steps * 120
+            self._accum = 0.0
+            self.angle = (self.angle + steps * 360 / self.DETENTS) % 360
+            self.tuned.emit(steps)
+            self.update()
+        event.accept()
+
     def paintEvent(self, _):
         p = QtGui.QPainter(self)
         p.scale(self.width() / kwm2_vfo.W, self.height() / kwm2_vfo.H)
@@ -3839,8 +3869,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 spin.blockSignals(True)
                 spin.setValue(value)
                 spin.blockSignals(False)
-        self.waterfall = np.roll(self.waterfall, 1, axis=0)
-        self.waterfall[0] = row
+        row = np.asarray(row, np.float32)
+        if self.waterfall[-1].max() <= -159:
+            # tout neuf (démarrage, saut de fréquence) : rempli tout de suite,
+            # pas de grande zone noire qui met une minute à se remplir
+            self.waterfall[:] = row
+        else:
+            # la radio n'envoie que ~4 images/s : chaque image donne WF_ROWS_PER
+            # lignes, fondues depuis la précédente → défilement rapide et doux
+            prev = self.waterfall[0].copy()
+            k = WF_ROWS_PER
+            self.waterfall = np.roll(self.waterfall, k, axis=0)
+            for i in range(k):
+                t = (k - i) / k
+                self.waterfall[i] = prev + (row - prev) * t
         self.wf_image.setImage(self.waterfall, autoLevels=False,
                                levels=(self.wf_low,
                                        self.wf_low + self.range_spin.value()))
