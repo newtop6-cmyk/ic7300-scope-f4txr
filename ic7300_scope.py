@@ -2308,6 +2308,9 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.step_combo)
         top.addSpacing(20)
         top.addWidget(self.mode_combo)
+        self.mode_combo.hide()                  # remplacée par la lucarne (même rôle)
+        self.mode_window = self._mode_window()
+        top.addWidget(self.mode_window)
         top.addSpacing(20)
         top.addWidget(QtWidgets.QLabel("Aller à"))
         top.addWidget(self.freq_entry)
@@ -5667,7 +5670,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mult_row = QtWidgets.QHBoxLayout()
         mult_row.setSpacing(8)
         mult_row.addStretch()
-        mult_row.addSpacing(mult_view.sizeHint().width() + 8)  # lucarne pile au centre
+        self.m_mode_window = self._mode_window()        # mode (LSB, USB…) en lucarne
+        mult_row.addWidget(self.m_mode_window, 0, QtCore.Qt.AlignVCenter)
         mult_row.addWidget(self.m_mult_window, 0, QtCore.Qt.AlignVCenter)
         mult_row.addWidget(mult_view, 0, QtCore.Qt.AlignVCenter)
         mult_row.addStretch()
@@ -7236,11 +7240,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return getattr(self, "vfo_step_hz", None)
 
     @staticmethod
-    def _step_window():
-        """Petite fenêtre rétroéclairée ambre qui affiche le pas en cours."""
+    def _step_window(width=210):
+        """Lucarne rétroéclairée ambre (pas en cours, mode…)."""
         lab = QtWidgets.QLabel()
         lab.setAlignment(QtCore.Qt.AlignCenter)
-        lab.setFixedSize(210, 40)
+        lab.setFixedSize(width, 40)
         lab.setStyleSheet(
             "QLabel { font: 900 16pt 'DejaVu Sans Condensed'; color: #ffb43a;"
             " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a0f04,"
@@ -7252,6 +7256,33 @@ class MainWindow(QtWidgets.QMainWindow):
         glow.setColor(QtGui.QColor(255, 150, 30, 200))
         lab.setGraphicsEffect(glow)
         return lab
+
+    def _mode_window(self):
+        """Lucarne du mode (LSB, USB, CW…) : suit la radio ; clic = choisir le mode."""
+        lab = self._step_window(118)
+        lab.setCursor(QtCore.Qt.PointingHandCursor)
+        lab.setToolTip("Mode de la radio : cliquer pour le changer")
+
+        def link():                         # la liste des modes peut venir après
+            lab.setText(self.mode_combo.currentText())
+            self.mode_combo.currentTextChanged.connect(lab.setText)
+        if hasattr(self, "mode_combo"):
+            link()
+        else:
+            QtCore.QTimer.singleShot(0, link)
+        lab.mousePressEvent = lambda ev, l=lab: self._mode_menu(l)
+        return lab
+
+    def _mode_menu(self, lab):
+        menu = QtWidgets.QMenu(self)
+        for name in MODE_NAMES:
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == self.mode_combo.currentText())
+        chosen = menu.exec_(lab.mapToGlobal(QtCore.QPoint(0, lab.height())))
+        if chosen and chosen.text() != self.mode_combo.currentText():
+            self.mode_combo.setCurrentText(chosen.text())
+            self.on_mode_selected(chosen.text())
 
     @staticmethod
     def _step_text(mult, hz):
