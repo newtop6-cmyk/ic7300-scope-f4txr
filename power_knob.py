@@ -77,6 +77,22 @@ class VintageKnob(QtWidgets.QWidget):
     # ses déplacements, sans tenir le bouton ; nouveau double-clic, clic droit
     # ou Échap : il se décroche.
     def mousePressEvent(self, event):
+        if self.fine:
+            # volumes : 1 clic = le bouton se COLLE au doigt (anneau lumineux) et
+            # tourne en bougeant la souris, sans tenir le bouton ; 2e clic (où que
+            # ce soit), clic droit ou Échap = lâché
+            if self._dragging:
+                self._release()
+            elif self.isEnabled() and event.button() == QtCore.Qt.LeftButton:
+                self._direct = False
+                self._dragging = True
+                self._set_anchor(event.globalPos())
+                self.setMouseTracking(True)
+                self.grabMouse(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
+                self.grabKeyboard()
+                self.update()
+            event.accept()
+            return
         if not MODE["precision"]:               # mode direct : clic + glisser
             if self.isEnabled() and event.button() == QtCore.Qt.LeftButton:
                 self._direct = True
@@ -96,6 +112,9 @@ class VintageKnob(QtWidgets.QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
+        if self.fine:
+            self.mousePressEvent(event)         # clics rapprochés : chacun compte
+            return
         if not MODE["precision"]:
             event.accept()
             return

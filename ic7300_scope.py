@@ -2645,7 +2645,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "haut-parleurs du PC, en bas = casque")
         self.volume_knob = VintageKnob(
             88, 150, "%", None, "",
-            "Volume du son de la radio sur le PC (0 à 150 %) : glisser, ou molette")
+            "Volume du son de la radio sur le PC (0 à 150 %) : 1 clic = le bouton se colle "
+            "au doigt, bouger la souris (haut/droite = plus fort), 2e clic = lâché ; ou molette")
         # GAIN MICRO : volume d'entrée du micro du PC (remplace la liste « Micro » du bas)
         self.mic_knob = ScaleBakelite(
             mic_gain_now() / 15, 88, "", lambda v: f"{round(v * 15)} %",
