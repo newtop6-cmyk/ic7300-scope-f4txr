@@ -70,6 +70,7 @@ from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
 from vintage_push import VintagePush
+from jewel_lamp import JewelLamp
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -5156,6 +5157,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_bands = BandSelector(BAND_SEL_PX)
         self.m_bands.changed.connect(self._band_selector_changed)
         top.addWidget(self._big(self.m_bands, 1.15), 0, QtCore.Qt.AlignVCenter)
+        # voyants bijoux : vert = réception, rouge = émission
+        lamps = QtWidgets.QVBoxLayout()
+        lamps.setSpacing(30)
+        self.m_rx_lamp = JewelLamp("#22e05a", 84, "Vert : la radio est en réception")
+        self.m_tx_lamp = JewelLamp("#ff2a1a", 84, "Rouge : la radio émet")
+        for lamp, name in ((self.m_rx_lamp, "RÉCEPTION"), (self.m_tx_lamp, "ÉMISSION")):
+            page.labels.append((lamp, name))
+            lamps.addWidget(lamp, 0, QtCore.Qt.AlignHCenter)
+        top.addLayout(lamps)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
         top.addStretch()
@@ -5384,6 +5394,9 @@ class MainWindow(QtWidgets.QMainWindow):
             extra = theirs.styleSheet()[len(PUSH_YELLOW_3D):]
             found = re.search(r"background:\s*(#[0-9a-fA-F]{6})", extra)
             button.set_lamp(found.group(1) if found else None)
+        tx = bool(getattr(self, "_radio_tx", False) or self.tx_active)
+        self.m_tx_lamp.set_on(tx)
+        self.m_rx_lamp.set_on(not tx and self.freq_hz is not None)
         if self.m_emergency.flashing != self.emergency_button.flashing:
             self.m_emergency.set_flashing(self.emergency_button.flashing)
 
@@ -6952,6 +6965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clocks.set_voice(level)
 
     def on_transmitting(self, tx):
+        self._radio_tx = tx                 # voyants de l'écran MOBILE
         if self.cw_station is not None:
             self.cw_station.set_tx(tx)      # cadre EMISSION plus vif pendant l'émission
         self.voice_scope.set_tx(tx)        # vobulation seulement en émission
