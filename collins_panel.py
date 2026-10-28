@@ -51,6 +51,10 @@ class CollinsPanel(QtWidgets.QWidget):
     def resizeEvent(self, event):
         self._cache = None
         super().resizeEvent(event)
+        corner = getattr(self, "corner", None)
+        if corner is not None:                  # petit poussoir du coin bas gauche
+            corner.move(46, self.height() - corner.height() - 24)
+            corner.raise_()
 
     def _split_y(self):
         if self.split_widget is None:

@@ -5300,15 +5300,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._memo_show()
         plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
-        # CL : petit poussoir qui ouvre / ferme la console (comme CONSOLE ou F12)
-        plate.addSpacing(30)
-        self.m_console = VintagePush("CL", 36, 36)
-        self.m_console.setToolTip("CL : affiche la console par-dessus, ou la renvoie "
+        # C : petit poussoir dans le coin en bas à gauche, ouvre / ferme la
+        # console (comme CONSOLE ou F12)
+        self.m_console = VintagePush("C", 30, 30)
+        self.m_console.setToolTip("C : affiche la console par-dessus, ou la renvoie "
                                   "derrière (comme CONSOLE / F12)")
         self.m_console.clicked.connect(lambda: self.console_button.toggle())
         view = self._big(self.m_console, 1.4)
-        page.labels.append((view, "CONSOLE"))
-        plate.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        view.setParent(page)                    # hors des rangées : posé dans le coin
+        page.corner = view
         row.addLayout(plate)
         box.addLayout(row)
         return page
