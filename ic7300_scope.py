@@ -68,6 +68,7 @@ from paddle_clavier import MORSE
 from drum_display import DrumClock, DrumDisplay
 from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
+from collins_panel import CollinsPanel
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -5038,12 +5039,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _big(widget, zoom):
         """Le même cadran, agrandi zoom fois (dessin et souris compris)."""
         scene = QtWidgets.QGraphicsScene()
-        scene.setBackgroundBrush(QtGui.QColor("#15181c"))      # fond de l'écran MOBILE
         widget.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         proxy = scene.addWidget(widget)
         proxy.setScale(zoom)
         view = QtWidgets.QGraphicsView(scene)
         view.setStyleSheet("background: transparent; border: none;")
+        view.viewport().setAutoFillBackground(False)
         view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         view.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
@@ -5055,17 +5056,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _mobile_page(self):
         """Écran MOBILE : l'essentiel en grand (fréquence, bandes, arrêt d'urgence,
         waterfall, S-mètre, VFO, EMISSION, QSO en français, fonctions VOX)."""
-        page = QtWidgets.QWidget()
-        page.setStyleSheet("background: #15181c;")
+        page = CollinsPanel()                       # façade KWM-2 peinte granitée
+        self.m_panel = page
         box = QtWidgets.QVBoxLayout(page)
-        box.setContentsMargins(16, 8, 16, 4)
-        box.setSpacing(6)
+        box.setContentsMargins(40, 40, 40, 14)
+        box.setSpacing(38)
         # 1re ligne : fréquence, commutateur de bandes, arrêt d'urgence
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(30)
         top.addStretch()
         self.m_smeter = VintageSMeter()             # S-mètre en haut à gauche
-        top.addWidget(self._big(self.m_smeter, 1.3), 0, QtCore.Qt.AlignVCenter)
+        view = self._big(self.m_smeter, 1.3)
+        page.labels.append((view, "SIGNAL"))
+        top.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         # fréquence : cadran Collins rétroéclairé ou tubes Nixie (clic droit = l'autre)
         self.m_collins = CollinsDial(800, 170)
         self.m_nixie = NixieDisplay(800, 170)
@@ -5080,13 +5083,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.m_freq_stack.addWidget(dial)
         self.m_freq_stack.setCurrentIndex(1 if self._mobile_conf().get("freq") == "nixie" else 0)
         self.m_freq = _Both(self.m_collins, self.m_nixie)
+        page.labels.append((self.m_freq_stack, "FRÉQUENCE"))
         top.addWidget(self.m_freq_stack, 0, QtCore.Qt.AlignVCenter)
         self.m_bands = BandSelector(BAND_SEL_PX)
         self.m_bands.changed.connect(self._band_selector_changed)
         top.addWidget(self._big(self.m_bands, 1.15), 0, QtCore.Qt.AlignVCenter)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
-        top.addWidget(self._big(self.m_emergency, 2.0), 0, QtCore.Qt.AlignVCenter)
+        view = self._big(self.m_emergency, 2.0)
+        page.labels.append((view, "ARRÊT"))
+        top.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         top.addStretch()
         box.addLayout(top)
         # 2e ligne : waterfall avec l'échelle des fréquences (kHz)
@@ -5111,6 +5117,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_wf_plot.setToolTip("Clic sur une station : la radio s'y cale ; "
                                   "molette : changer la fréquence")
         self.m_wf_plot.viewport().installEventFilter(self)     # molette
+        page.bezels.append(self.m_wf_plot)          # fenêtre chromée
+        page.split_widget = self.m_wf_plot          # bas foncé à partir d'ici
         box.addWidget(self.m_wf_plot, 1)
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
@@ -5118,13 +5126,17 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addStretch()
         self.m_knob = TuningKnob()                  # bouton VFO
         self.m_knob.tuned.connect(self.on_knob_tuned)
-        row.addWidget(self._big(self.m_knob, 1.0), 0, QtCore.Qt.AlignVCenter)
+        view = self._big(self.m_knob, 1.0)
+        page.labels.append((view, "VFO"))
+        row.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         self.m_emission = EmissionButton()
         self.m_emission.is_tx = lambda: getattr(self, "vox_tx", False)
         self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
-        row.addWidget(self._big(self.m_emission, 2.3), 0, QtCore.Qt.AlignVCenter)
+        view = self._big(self.m_emission, 2.3)
+        page.labels.append((view, "ÉMISSION"))
+        row.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         right = QtWidgets.QVBoxLayout()
-        right.setSpacing(10)
+        right.setSpacing(34)
         self.m_hunt = QtWidgets.QPushButton("QSO EN FRANÇAIS")
         self.m_hunt.setCheckable(True)
         self.m_hunt.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -5141,8 +5153,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_scan.clicked.connect(lambda: self.scan_button.click())
         hunt_row = QtWidgets.QHBoxLayout()
         hunt_row.setSpacing(12)
-        hunt_row.addWidget(self._big(self.m_scan, 1.6))
-        hunt_row.addWidget(self._big(self.m_hunt, 1.6))
+        view = self._big(self.m_scan, 1.6)
+        page.labels.append((view, "SCAN"))
+        hunt_row.addWidget(view)
+        view = self._big(self.m_hunt, 1.6)
+        page.labels.append((view, "RECHERCHE"))
+        hunt_row.addWidget(view)
         right.addLayout(hunt_row)
         vox = QtWidgets.QHBoxLayout()
         vox.setSpacing(8)
@@ -5154,7 +5170,10 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setToolTip(f"VOX{n} : message vocal n° {n} en attente de « VOX {n} »")
             button.clicked.connect(lambda _=False, n=n: self.vox_msg_buttons[n].click())
             self.m_vox[n] = button
-            vox.addWidget(self._big(button, 1.6))
+            view = self._big(button, 1.6)
+            if n == VOX_MSG_NUMBERS[0]:
+                self.m_vox_first = view
+            vox.addWidget(view)
         self.m_vox_vocal = QtWidgets.QPushButton("VOX\nVOCAL")
         self.m_vox_vocal.setCheckable(True)
         self.m_vox_vocal.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -5163,7 +5182,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_vox_vocal.setToolTip("VOX VOCAL : dire « VOX » au micro arme le VOX")
         self.m_vox_vocal.clicked.connect(lambda: self.vox_vocal_button.click())
         vox.addWidget(self._big(self.m_vox_vocal, 1.6))
-        right.addLayout(vox)
+        vox_box = QtWidgets.QWidget()               # pour l'inscription au-dessus
+        vox_box.setLayout(vox)
+        vox.setContentsMargins(0, 0, 0, 0)
+        page.labels.append((vox_box, "FONCTIONS VOX"))
+        right.addWidget(vox_box)
         row.addLayout(right)
         row.addStretch()
         box.addLayout(row)
