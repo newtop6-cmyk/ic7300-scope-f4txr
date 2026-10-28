@@ -5208,10 +5208,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # à gauche : EMISSION et ARRÊT d'urgence l'un sous l'autre
         left = QtWidgets.QHBoxLayout()
         left.setSpacing(50)
-        view = self._big(self.m_emission, 2.3)
+        view = self._big(self.m_emission, 1.2)
         page.labels.append((view, "ÉMISSION"))
         left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
-        view = self._big(self.m_emergency, 2.0)
+        view = self._big(self.m_emergency, 1.1)
         page.labels.append((view, "ARRÊT"))
         left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         left_box = QtWidgets.QWidget()               # même largeur à gauche et à
@@ -5222,7 +5222,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(knob_view, 0, QtCore.Qt.AlignVCenter)    # VFO au centre
         row.addStretch()
         right = QtWidgets.QVBoxLayout()
-        right.setSpacing(34)
+        right.setSpacing(30)
         self.m_hunt = VintagePush("QSO EN FRANÇAIS", 210, 40)
         self.m_hunt.setCheckable(True)
         self.m_hunt.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -5239,10 +5239,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_scan.clicked.connect(lambda: self.scan_button.click())
         hunt_row = QtWidgets.QHBoxLayout()
         hunt_row.setSpacing(12)
-        view = self._big(self.m_scan, 1.6)
+        view = self._big(self.m_scan, 0.9)
         page.labels.append((view, "SCAN"))
         hunt_row.addWidget(view)
-        view = self._big(self.m_hunt, 1.6)
+        view = self._big(self.m_hunt, 0.9)
         page.labels.append((view, "RECHERCHE"))
         hunt_row.addWidget(view)
         right.addLayout(hunt_row)
@@ -5256,7 +5256,7 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setToolTip(f"VOX{n} : message vocal n° {n} en attente de « VOX {n} »")
             button.clicked.connect(lambda _=False, n=n: self.vox_msg_buttons[n].click())
             self.m_vox[n] = button
-            view = self._big(button, 1.6)
+            view = self._big(button, 0.9)
             if n == VOX_MSG_NUMBERS[0]:
                 self.m_vox_first = view
             vox.addWidget(view)
@@ -5266,7 +5266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_vox_vocal.setFixedSize(60, 60)
         self.m_vox_vocal.setToolTip("VOX VOCAL : dire « VOX » au micro arme le VOX")
         self.m_vox_vocal.clicked.connect(lambda: self.vox_vocal_button.click())
-        vox.addWidget(self._big(self.m_vox_vocal, 1.6))
+        vox.addWidget(self._big(self.m_vox_vocal, 0.9))
         vox_box = QtWidgets.QWidget()               # pour l'inscription au-dessus
         vox_box.setLayout(vox)
         vox.setContentsMargins(0, 0, 0, 0)
