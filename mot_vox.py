@@ -50,6 +50,25 @@ def vox_number(text):
     return None
 
 
+# « TOP » : VOX armé jusqu'à « STOP » (comme un vrai VOX) ; « STOP » : arrêt
+TOP_WORDS = {"top", "tope", "toppe", "topp", "tops", "taupe", "thop", "tob", "tôpe"}
+STOP_WORDS = {"stop", "stoppe", "stope", "stopp", "stops", "stap", "stup", "stopé"}
+
+
+def single_word(text, words):
+    """Vrai si la parole est un seul mot de la liste (« Top ! », « stop. »)."""
+    found = re.findall(r"[a-zàâéèêëîïôöùûüç]+", text.lower())
+    return len(found) == 1 and found[0] in words
+
+
+def is_top(text):
+    return single_word(text, TOP_WORDS)
+
+
+def is_stop(text):
+    return single_word(text, STOP_WORDS)
+
+
 def is_vox(text):
     words = re.findall(r"[a-zàâéèêëîïôöùûüç]+", text.lower())
     return len(words) == 1 and words[0] in VOX_WORDS

@@ -52,7 +52,7 @@ from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
 from pot_knob import PotKnob, ScaleKnob
 from vox_pc import VoxMonitor
-from mot_vox import MotVox, vox_number
+from mot_vox import MotVox, vox_number, is_stop, is_top
 from voix_vox import LEARN_COUNT, VoiceCommands, features
 from dictee import Dictee, paste_into, split_send
 from traduction import TranslationWindow, Translator
@@ -3431,6 +3431,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.voice_cmds = VoiceCommands()   # ta voix pour « VOX 1 », « VOX 2 »…
         self.vox_learn = None               # apprentissage en cours : (n, exemples, fenêtre)
         self.vox_by_voice = False       # VOX armé par le mot « VOX »
+        # « TOP » : VOX armé jusqu'à « STOP », voyant rouge / orange à droite d'EMISSION
+        self.top_vox = False
+        self.top_blink = False
+        self.top_timer = QtCore.QTimer(self)
+        self.top_timer.timeout.connect(self._top_tick)
+        self.top_lamp = JewelLamp("#ff2a1a", 18, "TOP actif : le VOX reste armé, "
+                                  "dis « STOP » pour l'arrêter")
+        self.top_lamp.hide()                # posé à droite du bouton EMISSION (_top_tick)
         self.mot_vox_timer = QtCore.QTimer(self)
         self.mot_vox_timer.timeout.connect(self._mot_vox_tick)
         vox_row.addWidget(self.vox_vocal_button)
@@ -5601,10 +5609,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
         # à gauche : EMISSION et ARRÊT d'urgence l'un sous l'autre
         left = QtWidgets.QHBoxLayout()
-        left.setSpacing(50)
+        left.setSpacing(34)
         view = self._big(self.m_emission, 1.2)
         page.labels.append((view, "ÉMISSION"))
-        left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        emi_row = QtWidgets.QHBoxLayout()
+        emi_row.setSpacing(8)
+        emi_row.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        self.m_top_lamp = JewelLamp("#ff2a1a", 30, "TOP actif : le VOX reste armé, "
+                                    "dis « STOP » pour l'arrêter")
+        emi_row.addWidget(self.m_top_lamp, 0, QtCore.Qt.AlignVCenter)
+        left.addLayout(emi_row)
         view = self._big(self.m_emergency, 1.1)
         page.labels.append((view, "ARRÊT"))
         left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
@@ -8584,6 +8598,8 @@ class MainWindow(QtWidgets.QMainWindow):
     VOX_VOICE_MODES = ("LSB", "USB", "AM", "FM")
     VOX_HANG_S = 2.0           # fin de modulation + 2 s → retour réception ET VOX coupé
     VOX_VOCAL_HANG_S = 1.0     # VOX armé par le mot « VOX » : coupure 1 s après la parole
+    TOP_HANG_S = 1.5           # « TOP » : retour réception 1,5 s après la parole (VOX gardé)
+    TOP_IDLE_S = 300           # « TOP » : arrêt de sécurité après 5 min sans parole
 
     def _vox_threshold(self):
         """Seuil en dBFS : sensibilité 0 % → -10 dB, 100 % → -60 dB."""
@@ -8616,6 +8632,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "VOX en marche : la radio ÉMET quand tu parles dans le micro du PC", 8000)
         else:
             self.vox_by_voice = False
+            if self.top_vox:
+                self._top_off()
             if self.vox_monitor:
                 self.vox_monitor.stop()
                 self.vox_monitor = None
@@ -8651,6 +8669,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.vox_button.setStyleSheet(POWER_OFF)
                 else:
                     self.vox_tx = False
+        elif self.vox_tx and self.top_vox and now - self.vox_last_voice > self.TOP_HANG_S:
+            self.vox_tx = False                     # TOP : retour réception, VOX gardé
+            self.stop_tx()
+            self.vox_button.setText("VOX ON")
+            self.vox_button.setStyleSheet(PUSH_3D)
+            self.statusBar().showMessage("TOP : réception — parle pour émettre, "
+                                         "dis « STOP » pour arrêter", 5000)
         elif self.vox_tx and self.vox_by_voice and \
                 now - self.vox_last_voice > self.VOX_VOCAL_HANG_S:
             self.vox_tx = False
@@ -8675,6 +8700,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._mot_vox_need()
             self.statusBar().showMessage("VOX VOCAL arrêté", 4000)
+            if self.top_vox:                # plus d'écoute : « STOP » ne serait plus entendu
+                self._top_stop("VOX VOCAL arrêté : TOP arrêté, retour en réception")
 
     def _vox_rx_quiet(self):
         """Réception coupée pendant l'apprentissage, l'attente de « VOX n » et le
@@ -8714,8 +8741,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _mot_vox_tick(self):
         # pas d'écoute du mot pendant le VOX ou l'émission ; même seuil que le VOX
-        self.mot_vox.paused = self.vox_button.isChecked() or self.tx_active \
+        self.mot_vox.paused = ((self.vox_button.isChecked() or self.tx_active)
+                               and not self.top_vox) \
             or self.dictee.active             # pas de « VOX n » pendant une dictée
+        # TOP : écoute gardée même en émission, pour entendre « STOP »
         self.mot_vox.threshold = self._vox_threshold()
         if self.vox_msg_armed and (self.vox_msg_dry or self.vox_msg_armed & self.vox_msg_dry_auto) \
                 and not self.vox_msg_sending:
@@ -8746,6 +8775,15 @@ class MainWindow(QtWidgets.QMainWindow):
                                          "coupure 1 s après la fin de ta parole", 8000)
 
     def on_mot_vox_heard(self, text):
+        if self.vox_vocal_button.isChecked():
+            if is_stop(text) and self.top_vox:
+                self._vox_log(f"entendu « {text} » → STOP")
+                self._top_stop("« STOP » entendu : VOX arrêté, retour en réception")
+                return
+            if is_top(text) and not self.top_vox:
+                self._vox_log(f"entendu « {text} » → TOP")
+                self._top_start()
+                return
         n = vox_number(text)
         if n is not None and n in (self.vox_msg_armed & self.vox_msg_dry_auto) \
                 and not self.tx_active and self.vox_msg_sending is None:
@@ -8761,6 +8799,65 @@ class MainWindow(QtWidgets.QMainWindow):
             return      # VOX n : décidé par la voix (on_mot_vox_segment), pas par le texte
         if self.vox_vocal_button.isChecked() and not self.vox_button.isChecked():
             self.statusBar().showMessage(f"VOX VOCAL a entendu : « {text} »", 3000)
+
+    def _top_start(self):
+        """« TOP » : le VOX s'arme et reste armé (émission à chaque parole,
+        réception après 1,5 s de silence) jusqu'à « STOP »."""
+        if self.tx_active or not self.civ:
+            return
+        self.top_vox = True                 # avant le VOX : l'écoute continue
+        if not self.vox_button.isChecked():
+            self.vox_button.setChecked(True)
+        if not self.vox_button.isChecked():
+            self.top_vox = False
+            return
+        self.vox_by_voice = False
+        self.vox_last_voice = time.monotonic()
+        self.top_timer.start(400)
+        self._top_tick()
+        self.statusBar().showMessage("« TOP » entendu : VOX en marche, parle pour émettre ; "
+                                     "dis « STOP » pour arrêter", 8000)
+
+    def _top_stop(self, message):
+        self._top_off()
+        if self.vox_button.isChecked():
+            self.vox_button.setChecked(False)   # coupe aussi l'émission en cours
+        self.statusBar().showMessage(message, 8000)
+
+    def _top_off(self):
+        self.top_vox = False
+        self.top_timer.stop()
+        self.top_lamp.set_on(False)
+        self.top_lamp.hide()
+        if hasattr(self, "m_top_lamp"):
+            self.m_top_lamp.set_on(False)
+
+    def _top_tick(self):
+        """Pendant TOP : voyant qui alterne rouge / orange, à droite d'EMISSION."""
+        if not self.top_vox:
+            return
+        if not self.vox_tx and time.monotonic() - self.vox_last_voice > self.TOP_IDLE_S:
+            self._top_stop("TOP arrêté : 5 min sans parole (sécurité)")
+            return
+        self.top_blink = not self.top_blink
+        color = QtGui.QColor("#ff2a1a" if self.top_blink else "#ff8c00")
+        for lamp in (self.top_lamp, getattr(self, "m_top_lamp", None)):
+            if lamp is not None:
+                lamp.color = color
+                lamp.set_on(True)
+                lamp.update()
+        b = self.emission_button
+        if b.isVisible():                   # écran FIXE : posé juste à droite du bouton
+            win = self.top_lamp.parentWidget()
+            if win is not b.window():
+                self.top_lamp.setParent(b.window())
+            pos = b.mapTo(b.window(), QtCore.QPoint(b.width() + 1,
+                                                     (b.height() - self.top_lamp.height()) // 2))
+            self.top_lamp.move(pos)
+            self.top_lamp.show()
+            self.top_lamp.raise_()
+        else:
+            self.top_lamp.hide()
 
     def _vox_disarm(self, message):
         """Le VOX ne reste jamais armé après une émission : remise en marche manuelle."""
