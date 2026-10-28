@@ -60,6 +60,24 @@ def route(source, sink):
     return bool(ins), bool(outs)
 
 
+def set_levels(in_percent=None, out_percent=None, out_mute=None):
+    """Volume d'entrée (son de la radio vers RM Noise), volume et coupure de
+    sa sortie (vers les haut-parleurs). Renvoie True si RM Noise est branché."""
+    ins, outs = _streams("source-outputs"), _streams("sink-inputs")
+    if in_percent is not None:
+        for i in ins:
+            subprocess.run(["pactl", "set-source-output-volume", i, f"{round(in_percent)}%"],
+                           capture_output=True)
+    for i in outs:
+        if out_percent is not None:
+            subprocess.run(["pactl", "set-sink-input-volume", i, f"{round(out_percent)}%"],
+                           capture_output=True)
+        if out_mute is not None:
+            subprocess.run(["pactl", "set-sink-input-mute", i, "1" if out_mute else "0"],
+                           capture_output=True)
+    return bool(ins and outs)
+
+
 def window_geometry():
     """Identifiant X, position (x, y) et taille de la fenêtre RM Noise, ou None."""
     out = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True,

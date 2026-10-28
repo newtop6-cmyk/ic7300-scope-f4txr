@@ -4216,6 +4216,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.wf_low = value
 
     def on_spectrum(self, db, rms):
+        if rms > 0:                                 # niveau du son de la radio (RM Noise)
+            self.radio_rms_db = 0.8 * getattr(self, "radio_rms_db", -40.0) \
+                + 0.2 * 20 * math.log10(rms + 1e-9)
         if self.view != "audio":
             return
         self.avg = db if self.avg is None else 0.6 * self.avg + 0.4 * db
@@ -4904,6 +4907,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_direct_volume_now(self):
         """Volume du son direct : Volume PC, réduit à la part d'origine sous RNNoise."""
+        if getattr(self, "rmnoise_timer", None) and self.rmnoise_button.isChecked():
+            self._rmnoise_levels()                  # RM Noise suit aussi le volume
         volume = self.pc_volume.value() * self._preamp_factor()
         if self.rnnoise_button.isChecked():
             volume = volume * self.rnn_mix
@@ -4926,14 +4931,40 @@ class MainWindow(QtWidgets.QMainWindow):
         """RM Noise : lancé, branché sur le son de la radio, curseur à 100 %."""
         if on and self.rnnoise_button.isChecked():  # un seul filtre à la fois
             self.rnnoise_button.setChecked(False)
+        if not hasattr(self, "rmnoise_timer"):
+            self.rmnoise_timer = QtCore.QTimer(self)
+            self.rmnoise_timer.timeout.connect(self._rmnoise_levels)
+            self.rmnoise_in = 100.0
         if on:
             self.mute_check.setChecked(True)        # plus de son direct
             self.statusBar().showMessage("RM Noise : démarrage…")
             threading.Thread(target=self._rmnoise_start, daemon=True).start()
+            self.rmnoise_timer.start(500)           # niveaux adaptés en continu
         else:
+            self.rmnoise_timer.stop()
             rm_noise.stop()
             self.mute_check.setChecked(False)
             self.statusBar().showMessage("RM Noise arrêté : son direct de la radio", 4000)
+
+    RMNOISE_TARGET_DB = -20.0           # niveau visé à l'entrée de RM Noise
+
+    def _rmnoise_levels(self):
+        """RM Noise : entrée réglée sur le niveau réel de la radio, sortie qui suit
+        VOLUME PC / PRÉAMPLI BF, et coupée en émission / balayage du scan."""
+        if not self.rmnoise_button.isChecked():
+            return
+        level = getattr(self, "radio_rms_db", None)
+        if level is not None and level > -60:       # il y a du son (bruit ou voix)
+            want = 100 * 10 ** ((self.RMNOISE_TARGET_DB - level) / 20)
+            want = max(25.0, min(300.0, want))
+            self.rmnoise_in += 0.3 * (want - self.rmnoise_in)   # sans à-coup
+        out = self.pc_volume.value() * self._preamp_factor()
+        mute = bool(self.tx_active or getattr(self, "vox_rx_muted", False)
+                    or self._scan_quiet())
+        args = (self.rmnoise_in, out, mute)
+        if args != getattr(self, "_rmnoise_last", None):
+            self._rmnoise_last = args
+            threading.Thread(target=rm_noise.set_levels, args=args, daemon=True).start()
 
     def _rmnoise_start(self):
         if not rm_noise.running():
