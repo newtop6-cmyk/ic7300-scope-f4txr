@@ -72,6 +72,7 @@ from collins_panel import CollinsPanel
 from vintage_push import VintagePush
 from jewel_lamp import JewelLamp
 from station_plate import StationPlate
+from emission_check import EmissionWindow, TxAnalyzer
 from collins_knob import paint_collins_knob
 import kwm2_vfo
 from function_screen import FunctionScreen, PendingView, SstvLiveView
@@ -3974,6 +3975,8 @@ class MainWindow(QtWidgets.QMainWindow):
         step = (high - low) / n
         self.spec_curve.setData((low + (np.arange(n) + 0.5) * step) / 1000, self.avg)
         self._station_detect(low, high)             # plaque STATIONS : QSO en cours ?
+        if self.tx_active and self._emission_check_open():
+            self.emission_window.on_rf(points, low, high)     # largeur du signal émis
         self._add_waterfall_row(points, self.avg)
 
     def _update_rx_fine(self, points, low, high):
@@ -5373,6 +5376,14 @@ class MainWindow(QtWidgets.QMainWindow):
         view = self._big(self.m_emergency, 1.1)
         page.labels.append((view, "ARRÊT"))
         left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        self.m_clean = VintagePush("PROPRETÉ", 96, 40)     # contrôle de l'émission
+        self.m_clean.setToolTip("PROPRETÉ ÉMISSION : juge en direct ce que vous émettez "
+                                "(niveau, écrêtage, graves/aigus, ALC, compression, ROS, "
+                                "largeur). Marche aussi sans émettre. Touche F10.")
+        self.m_clean.clicked.connect(self._emission_check_toggle)
+        view = self._big(self.m_clean, 0.9)
+        page.labels.append((view, "CONTRÔLE"))
+        left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         left_box = QtWidgets.QWidget()               # même largeur à gauche et à
         left_box.setLayout(left)                    # droite : VFO pile au centre
         left_box.setFixedWidth(500)
@@ -5579,6 +5590,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"{slot.get('name') or f'M{i + 1}'} : {format_frequency(slot['hz'])} MHz "
             f"{slot['mode']} mémorisée", 5000)
+
+    # --- PROPRETÉ ÉMISSION ------------------------------------------------------
+    def _emission_check_toggle(self):
+        win = getattr(self, "emission_window", None)
+        if win is not None and win.isVisible():
+            win.close()
+            return
+        if win is None:
+            self.emission_window = win = EmissionWindow()
+            self.emission_analyzer = TxAnalyzer()
+            self.emission_analyzer.measured.connect(win.on_audio)
+            win.closed.connect(self._emission_check_closed)
+            self.emission_timer = QtCore.QTimer(self)
+            self.emission_timer.timeout.connect(self._emission_check_source)
+        self._emission_check_source()
+        if not self.emission_analyzer.isRunning():
+            self.emission_analyzer._running = True
+            self.emission_analyzer.start()
+        self.emission_timer.start(300)
+        win.show()
+        win.raise_()
+
+    def _emission_check_source(self):
+        """En émission : le son envoyé à la radio ; sinon : le micro après
+        l'égaliseur (on peut répéter sans émettre)."""
+        tx = bool(self.tx_active)
+        if tx != self.emission_window.tx:
+            self.emission_window.set_tx(tx)
+        self.emission_analyzer.set_source(f"{self.radio_sink}.monitor" if tx
+                                          else "ic7300_micro_eq.monitor")
+
+    def _emission_check_closed(self):
+        self.emission_timer.stop()
+        self.emission_analyzer.stop()
+
+    def _emission_check_open(self):
+        win = getattr(self, "emission_window", None)
+        return win if win is not None and win.isVisible() else None
 
     def _mobile_sync(self):
         """Écran MOBILE : poussoirs recopiés sur ceux de l'écran FIXE (état,
@@ -7261,6 +7310,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_galva.set_swr(piecewise(swr, SWR_POINTS))
         self.swr_alarm = piecewise(swr, SWR_POINTS) > self.SWR_ALARM      # strictement au-dessus de 2
         percent = alc * 100 / ALC_ZONE
+        win = self._emission_check_open()
+        if win:
+            win.on_alc(percent)
+            win.on_swr(piecewise(swr, SWR_POINTS))
         self.tx_galva.set_alc(percent)
         self.alc_meter.setValue(percent)
         self.alc_value.setText(f"{percent:.0f}")
@@ -7312,6 +7365,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._vox_silent():
             return
         db = piecewise(raw, COMP_POINTS)
+        win = self._emission_check_open()
+        if win:
+            win.on_comp(db)
         self.comp_meter.setValue(db)
         self.tx_galva.set_comp(db)
         self.comp_value.setText(f"{db:.0f}")
@@ -8301,6 +8357,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         try:
             self._tx_monitor(False)         # retour d'émission : liaison retirée
+            if getattr(self, "emission_window", None) is not None:
+                self.emission_window.close()
         except Exception:
             pass
         self._remember_band()
@@ -8437,6 +8495,7 @@ def main():
         else:
             window.showFullScreen()
     QtWidgets.QShortcut(QtGui.QKeySequence("F11"), window, toggle_full_screen)
+    QtWidgets.QShortcut(QtGui.QKeySequence("F10"), window, window._emission_check_toggle)
     QtWidgets.QShortcut(QtGui.QKeySequence("F12"), window,
                         window.console_button.toggle)
     # console visible dès le démarrage, par-dessus le plein écran
