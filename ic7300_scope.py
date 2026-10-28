@@ -6011,6 +6011,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_active = True
         self.tx_galva.set_tx(True)
         self._pactl_stream("set-sink-input-mute", "1")     # casque muet pendant l'émission
+        self._tx_monitor(True)                  # on entend ce qui part, en direct
         self._update_ssb()
         self.tx_started = time.monotonic()
         self.tx_timer.start()
@@ -6097,8 +6098,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tx_player = subprocess.Popen(
                 ["paplay", f"--device={self.radio_sink}", vox_msg_file(n)])
             # retour BF : le même message sur la sortie du PC, en même temps
-            self.vox_monitor_player = subprocess.Popen(
-                ["paplay", "--client-name=IC-7300 retour BF", vox_msg_file(n)])
+            # (sauf si le retour d'émission en direct l'apporte déjà)
+            if getattr(self, "tx_monitor_module", None) is None:
+                self.vox_monitor_player = subprocess.Popen(
+                    ["paplay", "--client-name=IC-7300 retour BF", vox_msg_file(n)])
             self._vox_log(f"VOX{n} : émission réelle du message, retour BF sur le PC")
 
     # --- TRADUCTION de la réception en français -------------------------------
@@ -6693,6 +6696,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_active = True
         self.tx_galva.set_tx(True)
         self._pactl_stream("set-sink-input-mute", "1")     # casque muet pendant l'émission
+        self._tx_monitor(True)          # on entend ce qui part, en direct
         self._update_ssb()              # pas de calage BLU en émission
         self.tx_started = time.monotonic()
         self.tx_timer.start()
@@ -6853,8 +6857,40 @@ class MainWindow(QtWidgets.QMainWindow):
             if done.returncode != 0:            # flux recréé : on le recherchera
                 self.rec_mic_input = None
 
+    def _tx_monitor(self, on):
+        """Retour d'émission en temps réel : tout ce qui part vers la radio (micro,
+        VOX, messages VOX n, fichier) est rejoué sur le casque. Pas sur les
+        haut-parleurs du PC : le micro le reprendrait (sifflement, VOX relancé)."""
+        module = getattr(self, "tx_monitor_module", None)
+        if not on:
+            if module is not None:
+                subprocess.run(["pactl", "unload-module", module], capture_output=True)
+                self.tx_monitor_module = None
+            return
+        if module is not None:
+            return
+        listing = subprocess.run(["pactl", "list", "short", "modules"],
+                                 capture_output=True, text=True).stdout
+        for line in listing.splitlines():           # restes d'une session plantée
+            if "ic7300_retour_tx" in line:
+                subprocess.run(["pactl", "unload-module", line.split("\t")[0]],
+                               capture_output=True)
+        sink = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                              text=True).stdout.strip()
+        if not sink or sink.startswith("alsa_output.pci"):
+            return                              # haut-parleurs du PC : pas de retour
+        out = subprocess.run(
+            ["pactl", "load-module", "module-loopback",
+             f"source={self.radio_sink}.monitor", f"sink={sink}", "latency_msec=30",
+             "source_dont_move=true", "sink_dont_move=true",
+             "sink_input_properties='node.name=ic7300_retour_tx "
+             "media.name=IC-7300_retour_emission'"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        self.tx_monitor_module = out if out.isdigit() else None
+
     def stop_tx(self, reason=None):
         self._backlight_tx(False)           # rétro-éclairage : retour au calme
+        self._tx_monitor(False)
         mon = getattr(self, "vox_monitor_player", None)
         if mon is not None and mon.poll() is None:
             mon.terminate()                     # retour BF coupé avec l'émission
@@ -8047,6 +8083,10 @@ class MainWindow(QtWidgets.QMainWindow):
         subprocess.Popen(["xdg-open", RECORD_DIR])
 
     def closeEvent(self, event):
+        try:
+            self._tx_monitor(False)         # retour d'émission : liaison retirée
+        except Exception:
+            pass
         self._remember_band()
         self.mot_vox.stop()
         if self.cw_station is not None and self.cw_station.isVisible():
