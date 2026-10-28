@@ -69,6 +69,7 @@ from drum_display import DrumClock, DrumDisplay
 from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
+from vintage_push import VintagePush
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -197,6 +198,7 @@ FFT_SIZE = 4096
 HOP = 1600                      # 30 spectres par seconde
 BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
+MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
 RIG_ADDR = 0x94                 # adresse CI-V par défaut de l'IC-7300
@@ -1062,6 +1064,7 @@ class CivReader(QtCore.QThread):
         n = 0
         while self._running:
             changed = False
+            freq_set = False                # fréquence seule : relecture légère
             onoff, self._pending_onoff = self._pending_onoff, None
             if onoff is not None:
                 self._power_switch(ser, onoff)
@@ -1076,7 +1079,9 @@ class CivReader(QtCore.QThread):
             hz, self._pending_freq = self._pending_freq, None
             if hz is not None:
                 self._command(ser, 0x05, *to_bcd_le(hz))
-                changed = True
+                # pas la longue série de relectures à chaque pas (SCAN : la radio
+                # resterait occupée et le scope / waterfall ralentiraient)
+                freq_set = True
             mode, self._pending_mode = self._pending_mode, None
             if mode is not None:
                 base = base_mode(mode)
@@ -1145,6 +1150,8 @@ class CivReader(QtCore.QThread):
                 queries = [(0x15, 0x02)]
                 if n % 3 == 0:              # la radio émet-elle d'elle-même ? (TUNE, PTT, VOX)
                     queries.append((0x1C, 0x00))
+            if freq_set and not changed and not (self._ptt or self._tx):
+                queries = [(0x03,)] + [q for q in queries if q != (0x03,)]
             n += 1
             for query in queries:
                 if not self._running:
@@ -3212,7 +3219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.seek_dir = 1
         self.manual_seek_hz = None
         self.scanner = QsoHunter(self, scan_only=True)
-        self.scanner.status.connect(lambda text: self.statusBar().showMessage(text))
+        self.scanner.status.connect(self._scan_status)
         self.scanner.heard.connect(self.on_station_heard)
         # QSO français repéré pendant le scan : bip + bouton rouge RESTER ICI
         self.scanner.found.connect(self.on_scan_found)
@@ -4258,6 +4265,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             if self.hunter.active:                  # une seule recherche à la fois
                 self.hunt_button.setChecked(False)
+            if self.view != "rf":                   # le waterfall de la radio tout de suite
+                self.view_combo.setCurrentIndex(0)
             self.scan_timer.start(500)
             self.scanner.start()
             self._mute_guard()                      # balayage silencieux
@@ -5145,14 +5154,14 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addStretch()
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(34)
-        self.m_hunt = QtWidgets.QPushButton("QSO EN FRANÇAIS")
+        self.m_hunt = VintagePush("QSO EN FRANÇAIS", 210, 40)
         self.m_hunt.setCheckable(True)
         self.m_hunt.setFocusPolicy(QtCore.Qt.NoFocus)
         self.m_hunt.setFixedSize(210, 40)
         self.m_hunt.setToolTip("Comme CHERCHER QSO FR : cherche un QSO en français "
                                "et s'arrête dessus ; nouvel appui = suivant / arrêt")
         self.m_hunt.clicked.connect(lambda: self.hunt_button.click())
-        self.m_scan = QtWidgets.QPushButton("SCAN")   # même effet que SCAN
+        self.m_scan = VintagePush("SCAN", 90, 40)   # même effet que SCAN
         self.m_scan.setCheckable(True)
         self.m_scan.setFocusPolicy(QtCore.Qt.NoFocus)
         self.m_scan.setFixedSize(90, 40)
@@ -5172,7 +5181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vox.setSpacing(8)
         self.m_vox = {}
         for n in VOX_MSG_NUMBERS:                   # VOX1… : même effet que les poussoirs
-            button = QtWidgets.QPushButton(f"VOX{n}")
+            button = VintagePush(f"VOX{n}", 60, 60)
             button.setFocusPolicy(QtCore.Qt.NoFocus)
             button.setFixedSize(60, 60)
             button.setToolTip(f"VOX{n} : message vocal n° {n} en attente de « VOX {n} »")
@@ -5182,11 +5191,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if n == VOX_MSG_NUMBERS[0]:
                 self.m_vox_first = view
             vox.addWidget(view)
-        self.m_vox_vocal = QtWidgets.QPushButton("VOX\nVOCAL")
+        self.m_vox_vocal = VintagePush("VOX\nVOCAL", 60, 60)
         self.m_vox_vocal.setCheckable(True)
         self.m_vox_vocal.setFocusPolicy(QtCore.Qt.NoFocus)
         self.m_vox_vocal.setFixedSize(60, 60)
-        self.m_vox_vocal.setStyleSheet(PUSH_3D + "QPushButton { font-size: 8pt; }")
         self.m_vox_vocal.setToolTip("VOX VOCAL : dire « VOX » au micro arme le VOX")
         self.m_vox_vocal.clicked.connect(lambda: self.vox_vocal_button.click())
         vox.addWidget(self._big(self.m_vox_vocal, 1.6))
@@ -5236,24 +5244,26 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _mobile_sync(self):
-        """Écran MOBILE : boutons recopiés sur ceux de l'écran FIXE (état, couleur)."""
+        """Écran MOBILE : poussoirs recopiés sur ceux de l'écran FIXE (état,
+        voyant allumé, clignotement, texte)."""
+        green, dark = "#2fd36a", "#145c30"
         for mine, theirs in ((self.m_hunt, self.hunt_button),
                              (self.m_scan, self.scan_button),
                              (self.m_vox_vocal, self.vox_vocal_button)):
             if mine.isChecked() != theirs.isChecked():
                 mine.setChecked(theirs.isChecked())
-        style = self.hunt_button.styleSheet() + "QPushButton { font-weight: bold; }"
-        if self.m_hunt.styleSheet() != style:
-            self.m_hunt.setStyleSheet(style)
-        style = self.scan_button.styleSheet() + "QPushButton { font-weight: bold; }"
-        if self.m_scan.styleSheet() != style:               # clignote comme SCAN
-            self.m_scan.setStyleSheet(style)
+            if not theirs.isChecked():
+                mine.set_lamp(None)
+            else:                                   # en marche : vert, clignote
+                mine.set_lamp(dark if theirs.styleSheet().endswith(HUNT_DARK) else green)
         for n, button in self.m_vox.items():
             theirs = self.vox_msg_buttons[n]
             if button.text() != theirs.text():
                 button.setText(theirs.text())
-            if button.styleSheet() != theirs.styleSheet():
-                button.setStyleSheet(theirs.styleSheet())
+            # couleur ajoutée au style de base : orange (attente), rouge (émet)…
+            extra = theirs.styleSheet()[len(PUSH_YELLOW_3D):]
+            found = re.search(r"background:\s*(#[0-9a-fA-F]{6})", extra)
+            button.set_lamp(found.group(1) if found else None)
         if self.m_emergency.flashing != self.emergency_button.flashing:
             self.m_emergency.set_flashing(self.emergency_button.flashing)
 
@@ -5273,11 +5283,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.pages.currentIndex() != 1 or self.waterfall is None:
             return
         x0, x1 = self.spec_plot.viewRange()[0]
-        self.m_wf_image.setImage(self.waterfall, autoLevels=False,
+        # seulement les lignes les plus récentes, étirées : défilement 3 fois
+        # plus rapide, on voit tout de suite les stations
+        rows = self.waterfall[:MOBILE_WF_ROWS]
+        self.m_wf_image.setImage(rows, autoLevels=False,
                                  levels=(self.wf_low, self.wf_low + self.range_spin.value()))
-        self.m_wf_image.setRect(QtCore.QRectF(x0, 0, x1 - x0, HISTORY))
+        self.m_wf_image.setRect(QtCore.QRectF(x0, 0, x1 - x0, len(rows)))
         self.m_wf_plot.setXRange(x0, x1, padding=0)
-        self.m_wf_plot.setYRange(0, HISTORY, padding=0)
+        self.m_wf_plot.setYRange(0, len(rows), padding=0)
         if self.view == "rf" and self.freq_hz:
             self.m_wf_tuned.setValue(self.freq_hz / 1000)
             self.m_wf_tuned.setVisible(True)
@@ -7245,11 +7258,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("MUET rétabli (le son de la réception "
                                              "était revenu tout seul)", 4000)
 
+    def _scan_status(self, text):
+        self.statusBar().showMessage(text)
+        quiet = self._scan_quiet()          # arrêt sur une station : le son revient
+        if quiet != getattr(self, "_scan_was_quiet", None):
+            self._scan_was_quiet = quiet
+            self._mute_guard()
+
     def _scan_quiet(self):
-        """SCAN en route : on n'entend que les QSO reconnus en français (le
-        balayage et l'écoute des autres stations restent silencieux)."""
+        """SCAN en route : son coupé pendant le balayage seulement ; on entend
+        chaque station où le scan s'arrête."""
         scanner = getattr(self, "scanner", None)
-        return bool(scanner and scanner.active and scanner.state != "hold")
+        return bool(scanner and scanner.active and scanner.state == "sweep")
 
     def on_mute(self, muted):
         self._pactl_stream("set-sink-input-mute", "1" if muted else "0")
