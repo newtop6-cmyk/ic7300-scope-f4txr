@@ -1,8 +1,9 @@
-"""Barregraphe LIAISON : qualité de la liaison entre le PC et le téléphone GSM
-qui lui donne Internet (modem USB ou partage Wi-Fi). Le téléphone est la
-passerelle de la route par défaut : on le pingue une fois par seconde ; sur les
-10 derniers pings, temps de réponse médian, gigue et pertes donnent une note
-de 0 à 1.
+"""Barregraphes de liaison, deux mesures :
+- LIAISON : PC ↔ téléphone GSM qui lui donne Internet (modem USB ou partage
+  Wi-Fi). Le téléphone est la passerelle de la route par défaut.
+- 4G : PC → Pi qui porte la radio, à travers le réseau 4G et Tailscale.
+Un ping par seconde ; sur les 10 derniers, temps de réponse médian, gigue et
+pertes donnent une note de 0 à 1.
 Cases allumées de gauche (rouge) à droite (vert) : plus il y en a, meilleure
 est la liaison. Liaison coupée : la première case clignote en rouge."""
 
@@ -18,8 +19,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 WINDOW = 10                 # pings pris en compte
 
 
-def quality(samples):
-    """samples : temps en ms, None = perdu. Note de 0 à 1."""
+def quality(samples, bad_ms=100):
+    """samples : temps en ms, None = perdu. Note de 0 à 1 ; bad_ms = note 0."""
     if not samples:
         return 0.0
     ok = [s for s in samples if s is not None]
@@ -28,8 +29,10 @@ def quality(samples):
         return 0.0
     rtt = statistics.median(ok)
     jitter = statistics.pstdev(ok) if len(ok) > 1 else 0.0
-    q = (100 - rtt) / 95                # ≤ 5 ms → 1 ; 50 ms → 0,5 ; 100 ms → 0
-    q -= jitter / 100                   # gigue : liaison qui hoquette
+    # téléphone (bad_ms 100) : ≤ 5 ms → 1, 50 ms → 0,5 ;
+    # Pi en 4G (bad_ms 1000) : ≤ 50 ms → 1, 400 ms → 0,6
+    q = (bad_ms - rtt) / (bad_ms * 0.95)
+    q -= jitter / bad_ms                # gigue : liaison qui hoquette
     q *= (1 - loss) ** 2                # pertes : très pénalisées
     return max(0.0, min(1.0, q))
 
@@ -53,23 +56,27 @@ def default_gateway():
 
 
 class LinkProbe(QtCore.QObject):
-    """Ping du téléphone (passerelle) en tâche de fond ;
-    signal updated(note, ms médian, % pertes)."""
+    """Ping en tâche de fond ; signal updated(note, ms médian, % pertes).
+    target=None : la passerelle (le téléphone) ; sinon l'adresse donnée.
+    target="" : rien à mesurer (radio branchée sur ce PC)."""
     updated = QtCore.pyqtSignal(float, float, float)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, target=None, name="PC ↔ téléphone", bad_ms=100):
         super().__init__(parent)
-        self.host = default_gateway()
+        self.target, self.name, self.bad_ms = target, name, bad_ms
+        self.enabled = target != ""
+        self.host = default_gateway() if target is None else target
         self.samples = deque(maxlen=WINDOW)
         self.note, self.rtt, self.loss = 0.0, -1.0, 0.0
         self.lost = False
-        threading.Thread(target=self._run, daemon=True).start()
+        if self.enabled:
+            threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
         while True:
             start = time.monotonic()
             ms = None
-            gw = default_gateway()          # la connexion peut changer
+            gw = default_gateway() if self.target is None else self.target
             if gw != self.host:
                 self.host = gw
                 self.samples.clear()
@@ -84,7 +91,7 @@ class LinkProbe(QtCore.QObject):
                 pass
             self.samples.append(ms)
             ok = [s for s in self.samples if s is not None]
-            self.note = quality(list(self.samples))
+            self.note = quality(list(self.samples), self.bad_ms)
             self.rtt = statistics.median(ok) if ok else -1.0
             self.loss = 100 * (1 - len(ok) / len(self.samples))
             last3 = list(self.samples)[-3:]
@@ -116,13 +123,15 @@ class LinkBar(QtWidgets.QWidget):
     def _tick(self):
         self.blink = not self.blink
         pr = self.probe
-        if pr.lost:
-            tip = ("Liaison PC ↔ téléphone : COUPÉE" if pr.host else
-                   "Liaison PC ↔ téléphone : aucune connexion")
+        if not pr.enabled:
+            tip = f"Liaison {pr.name} : radio branchée sur ce PC, rien à mesurer"
+        elif pr.lost:
+            tip = (f"Liaison {pr.name} : COUPÉE" if pr.host else
+                   f"Liaison {pr.name} : aucune connexion")
         elif pr.rtt < 0:
-            tip = "Liaison PC ↔ téléphone : mesure en cours…"
+            tip = f"Liaison {pr.name} : mesure en cours…"
         else:
-            tip = (f"Liaison PC ↔ téléphone ({pr.host}) : {round(pr.note * 100)} %\n"
+            tip = (f"Liaison {pr.name} ({pr.host}) : {round(pr.note * 100)} %\n"
                    f"temps de réponse {pr.rtt:.0f} ms, pertes {pr.loss:.0f} %\n"
                    "(10 dernières secondes)")
         self.setToolTip(tip)
@@ -151,23 +160,27 @@ class LinkBar(QtWidgets.QWidget):
                 r = QtCore.QRectF(pad + i * (seg_w + gap), pad, seg_w, h - 2 * pad)
             c = QtGui.QColor(color)
             on = i < lit or (i == 0 and pr.lost and self.blink)
-            if not on:
+            if not pr.enabled:
+                c = QtGui.QColor("#3a3f44")
+            elif not on:
                 c = c.darker(520)
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(c)
             p.drawRoundedRect(r, 2, 2)
-            if on:                  # reflet de la LED
+            if on and pr.enabled:       # reflet de la LED
                 p.setBrush(QtGui.QColor(255, 255, 255, 60))
                 p.drawRoundedRect(QtCore.QRectF(r.left() + 1, r.top() + 1,
                                                 r.width() - 2, r.height() * 0.35), 1, 1)
         if self.text:
-            if pr.lost:
+            if not pr.enabled:
+                label = "LOCAL"
+            elif pr.lost:
                 label = "COUPÉ"
             elif pr.rtt < 0:
                 label = "…"
             else:
                 label = f"{pr.rtt:.1f} ms" if pr.rtt < 10 else f"{pr.rtt:.0f} ms"
-            p.setFont(QtGui.QFont("DejaVu Sans", 10, QtGui.QFont.Bold))
+            p.setFont(QtGui.QFont("DejaVu Sans", 9, QtGui.QFont.Bold))
             box = QtCore.QRectF(0, h - text_h, w, text_h)
             p.setPen(QtGui.QColor(255, 255, 255, 170))      # gravé : reflet dessous
             p.drawText(box.translated(0, 1), QtCore.Qt.AlignCenter, label)

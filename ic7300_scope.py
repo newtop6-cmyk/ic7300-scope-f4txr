@@ -2244,6 +2244,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # qualité de la liaison PC ↔ téléphone GSM (ping de la passerelle)
         self.link_probe = LinkProbe(self)
+        # et liaison 4G jusqu'au Pi qui porte la radio (à travers Tailscale)
+        self.pi_probe = LinkProbe(self, getattr(args, "remote", None) or "",
+                                  "4G PC → Pi", bad_ms=1000)
         central = QtWidgets.QWidget()
         # FIXE / MOBILE : page 0 = tout l'écran actuel, page 1 = écran MOBILE
         self.pages = QtWidgets.QStackedWidget()
@@ -2303,6 +2306,9 @@ class MainWindow(QtWidgets.QMainWindow):
         net_grid.addWidget(QtWidgets.QLabel("Liaison"), 2, 0)
         self.link_bar = LinkBar(self.link_probe)
         net_grid.addWidget(self.link_bar, 2, 1)
+        net_grid.addWidget(QtWidgets.QLabel("4G Pi"), 3, 0)
+        self.pi_bar = LinkBar(self.pi_probe)
+        net_grid.addWidget(self.pi_bar, 3, 1)
         top.addLayout(net_grid)
         top.addStretch()
         top.addWidget(self.cursor_label)
@@ -5370,9 +5376,12 @@ class MainWindow(QtWidgets.QMainWindow):
             page.labels.append((lamp, name))
             lamps.addWidget(lamp, 0, QtCore.Qt.AlignHCenter)
         top.addLayout(lamps)
-        self.m_link = LinkBar(self.link_probe, 46, 190, vertical=True, text=True)
+        self.m_link = LinkBar(self.link_probe, 52, 190, vertical=True, text=True)
         page.labels.append((self.m_link, "LIAISON"))
         top.addWidget(self.m_link, 0, QtCore.Qt.AlignVCenter)
+        self.m_pi_link = LinkBar(self.pi_probe, 52, 190, vertical=True, text=True)
+        page.labels.append((self.m_pi_link, "4G PI"))
+        top.addWidget(self.m_pi_link, 0, QtCore.Qt.AlignVCenter)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
         top.addStretch()
