@@ -4219,6 +4219,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_hunt_toggled(self, on):
         if on and self.scanner.resume():            # scan verrouillé : on le libère
+            self._mute_guard()                      # reprise du balayage : silence
             self.hunt_button.blockSignals(True)
             self.hunt_button.setChecked(False)
             self.hunt_button.blockSignals(False)
@@ -4258,9 +4259,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.hunt_button.setChecked(False)
             self.scan_timer.start(500)
             self.scanner.start()
+            self._mute_guard()                      # balayage silencieux
         else:
             self.scanner.stop()
             self._scan_stopped()
+            self._mute_guard()
 
     def _scan_stopped(self):
         self.scan_timer.stop()
@@ -4525,6 +4528,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                      "station (− / + pour changer)", 6000)
 
     def on_scan_finished(self, found):
+        QtCore.QTimer.singleShot(0, self._mute_guard)
         self.scan_button.blockSignals(True)
         self.scan_button.setChecked(False)
         self.scan_button.blockSignals(False)
@@ -4533,6 +4537,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Scan arrêté : on reste sur le QSO français")
 
     def on_scan_found(self, hz, text):
+        QtCore.QTimer.singleShot(0, self._mute_guard)   # QSO français : le son revient
         QtWidgets.QApplication.beep()
         self.statusBar().showMessage(
             f"QSO français sur {hz / 1e6:.3f} MHz : écoute verrouillée — "
@@ -7179,7 +7184,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Le son de la réception suit toujours l'interrupteur MUET (et reste coupé
         en émission ou pendant l'attente d'un VOX n)."""
         want = (self.mute_check.isChecked() or self.tx_active
-                or getattr(self, "vox_rx_muted", False))
+                or getattr(self, "vox_rx_muted", False) or self._scan_quiet())
         stream = find_loopback_stream()
         if stream is None:
             return
@@ -7188,9 +7193,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if bool(stream[2]) != want:
             subprocess.run(["pactl", "set-sink-input-mute", str(stream[0]),
                             "1" if want else "0"], capture_output=True)
-            if want:
+            if want and self.mute_check.isChecked():
                 self.statusBar().showMessage("MUET rétabli (le son de la réception "
                                              "était revenu tout seul)", 4000)
+
+    def _scan_quiet(self):
+        """SCAN en route : on n'entend que les QSO reconnus en français (le
+        balayage et l'écoute des autres stations restent silencieux)."""
+        scanner = getattr(self, "scanner", None)
+        return bool(scanner and scanner.active and scanner.state != "hold")
 
     def on_mute(self, muted):
         self._pactl_stream("set-sink-input-mute", "1" if muted else "0")
