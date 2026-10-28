@@ -67,6 +67,7 @@ from push_plate import PushPlate
 from paddle_clavier import MORSE
 from drum_display import DrumClock, DrumDisplay
 from nixie_display import NixieDisplay
+from collins_dial import CollinsDial
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -1997,6 +1998,21 @@ class BarGraph(QtWidgets.QWidget):
             x = min(max(x, 24), w - 24)
             p.drawText(QtCore.QRectF(x - 24, bar_h + 1, 48, 16),
                        QtCore.Qt.AlignCenter, label)
+
+
+class _Both:
+    """Deux afficheurs de fréquence tenus à jour ensemble (écran MOBILE)."""
+
+    def __init__(self, *dials):
+        self.dials = dials
+
+    def setText(self, text):
+        for d in self.dials:
+            d.setText(text)
+
+    def set_voice(self, level):
+        for d in self.dials:
+            d.set_voice(level)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -5045,9 +5061,21 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addStretch()
         self.m_smeter = VintageSMeter()             # S-mètre en haut à gauche
         top.addWidget(self._big(self.m_smeter, 1.3), 0, QtCore.Qt.AlignVCenter)
-        self.m_freq = NixieDisplay(800, 170)        # tubes Nixie ; molette = fréquence
-        self.m_freq.tuned.connect(self.on_tuned)
-        top.addWidget(self.m_freq, 0, QtCore.Qt.AlignVCenter)
+        # fréquence : cadran Collins rétroéclairé ou tubes Nixie (clic droit = l'autre)
+        self.m_collins = CollinsDial(800, 170)
+        self.m_nixie = NixieDisplay(800, 170)
+        self.m_freq_stack = QtWidgets.QStackedWidget()
+        self.m_freq_stack.setFixedSize(800, 170)
+        for dial in (self.m_collins, self.m_nixie):
+            dial.tuned.connect(self.on_tuned)       # molette = fréquence
+            dial.setToolTip("Molette : changer la fréquence ; clic droit : "
+                            "cadran Collins ↔ tubes Nixie")
+            dial.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+            dial.customContextMenuRequested.connect(self._mobile_freq_swap)
+            self.m_freq_stack.addWidget(dial)
+        self.m_freq_stack.setCurrentIndex(1 if self._mobile_conf().get("freq") == "nixie" else 0)
+        self.m_freq = _Both(self.m_collins, self.m_nixie)
+        top.addWidget(self.m_freq_stack, 0, QtCore.Qt.AlignVCenter)
         self.m_bands = BandSelector(BAND_SEL_PX)
         self.m_bands.changed.connect(self._band_selector_changed)
         top.addWidget(self._big(self.m_bands, 1.15), 0, QtCore.Qt.AlignVCenter)
@@ -5135,6 +5163,28 @@ class MainWindow(QtWidgets.QMainWindow):
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
         box.addLayout(plate)
         return page
+
+    MOBILE_CONF = os.path.expanduser("~/.config/ic7300-scope/mobile.json")
+
+    def _mobile_conf(self):
+        try:
+            with open(self.MOBILE_CONF) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _mobile_freq_swap(self, _pos=None):
+        """Clic droit sur la fréquence MOBILE : Collins ↔ Nixie (choix gardé)."""
+        nixie = self.m_freq_stack.currentIndex() == 0
+        self.m_freq_stack.setCurrentIndex(1 if nixie else 0)
+        conf = self._mobile_conf()
+        conf["freq"] = "nixie" if nixie else "collins"
+        try:
+            os.makedirs(os.path.dirname(self.MOBILE_CONF), exist_ok=True)
+            with open(self.MOBILE_CONF, "w") as f:
+                json.dump(conf, f)
+        except OSError:
+            pass
 
     def _mobile_sync(self):
         """Écran MOBILE : boutons recopiés sur ceux de l'écran FIXE (état, couleur)."""
