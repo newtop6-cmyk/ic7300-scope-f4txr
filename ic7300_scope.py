@@ -2299,6 +2299,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "FIXE", "MOBILE", tooltip="Levier en haut = FIXE (écran complet habituel), "
             "en bas = MOBILE (écran différent, en cours de création)")
         self.mobile_toggle.toggled.connect(self._mobile_toggled)
+        self.mobile_timer = QtCore.QTimer(self)         # écran MOBILE : boutons recopiés
+        self.mobile_timer.timeout.connect(self._mobile_sync)
         # DÉMO : la souris devient un gros doigt (demo_finger.py)
         self.demo_finger = DemoFinger()
         self.demo_toggle = ToggleSwitch(
@@ -3697,6 +3699,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wf_image.setImage(self.waterfall, autoLevels=False,
                                levels=(self.wf_low,
                                        self.wf_low + self.range_spin.value()))
+        self._mobile_waterfall()
 
     def on_scope(self, points, low, high):
         if self.fr_toggle.down:
@@ -5028,43 +5031,96 @@ class MainWindow(QtWidgets.QMainWindow):
         return view
 
     def _mobile_page(self):
-        """Écran MOBILE : fréquence, S-mètre, bouton VFO et EMISSION en grand."""
+        """Écran MOBILE : l'essentiel en grand (fréquence, bandes, arrêt d'urgence,
+        waterfall, S-mètre, VFO, EMISSION, QSO en français, fonctions VOX)."""
         page = QtWidgets.QWidget()
         page.setStyleSheet("background: #15181c;")
         box = QtWidgets.QVBoxLayout(page)
-        box.setContentsMargins(20, 16, 20, 16)
-        # fréquence : compteur à tambours (molette = changer la fréquence)
-        self.m_freq = DrumDisplay()
-        self.m_freq.tuned.connect(self.on_tuned)
+        box.setContentsMargins(16, 8, 16, 4)
+        box.setSpacing(6)
+        # 1re ligne : fréquence, commutateur de bandes, arrêt d'urgence
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(50)
         top.addStretch()
-        top.addWidget(self._big(self.m_freq, 2.4), 0, QtCore.Qt.AlignVCenter)
-        # commutateur de bandes, à droite de la fréquence
+        self.m_freq = DrumDisplay()                 # molette = changer la fréquence
+        self.m_freq.tuned.connect(self.on_tuned)
+        top.addWidget(self._big(self.m_freq, 2.0), 0, QtCore.Qt.AlignVCenter)
         self.m_bands = BandSelector(BAND_SEL_PX)
         self.m_bands.changed.connect(self._band_selector_changed)
-        top.addWidget(self._big(self.m_bands, 1.5), 0, QtCore.Qt.AlignVCenter)
+        top.addWidget(self._big(self.m_bands, 1.15), 0, QtCore.Qt.AlignVCenter)
+        self.m_emergency = EmergencyButton(EMERGENCY_PX)
+        self.m_emergency.pressed.connect(self.on_emergency)
+        top.addWidget(self._big(self.m_emergency, 2.0), 0, QtCore.Qt.AlignVCenter)
         top.addStretch()
         box.addLayout(top)
-        box.addStretch()
+        # 2e ligne : waterfall avec l'échelle des fréquences (kHz)
+        self.m_wf_plot = pg.PlotWidget()
+        self.m_wf_plot.setBackground("#101418")
+        self.m_wf_plot.setMouseEnabled(x=False, y=False)
+        self.m_wf_plot.hideAxis("left")
+        self.m_wf_plot.invertY(True)
+        self.m_wf_plot.hideButtons()
+        self.m_wf_plot.setMenuEnabled(False)
+        axis = self.m_wf_plot.getAxis("bottom")
+        axis.setTickFont(QtGui.QFont("DejaVu Sans", 11, QtGui.QFont.Bold))
+        axis.setTextPen(pg.mkPen("#f0d890"))
+        self.m_wf_image = pg.ImageItem()
+        self.m_wf_image.setLookupTable(pg.colormap.get("inferno").getLookupTable(nPts=256))
+        self.m_wf_plot.addItem(self.m_wf_image)
+        self.m_wf_tuned = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
+        self.m_wf_plot.addItem(self.m_wf_tuned, ignoreBounds=True)
+        self.m_wf_plot.setMinimumHeight(180)
+        box.addWidget(self.m_wf_plot, 1)
+        # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
-        row.setSpacing(40)
+        row.setSpacing(30)
         row.addStretch()
         self.m_smeter = VintageSMeter()
-        row.addWidget(self._big(self.m_smeter, 2.0), 0, QtCore.Qt.AlignVCenter)
+        row.addWidget(self._big(self.m_smeter, 1.6), 0, QtCore.Qt.AlignVCenter)
         self.m_knob = TuningKnob()                  # bouton VFO
         self.m_knob.tuned.connect(self.on_knob_tuned)
-        row.addWidget(self._big(self.m_knob, 1.5), 0, QtCore.Qt.AlignVCenter)
+        row.addWidget(self._big(self.m_knob, 1.0), 0, QtCore.Qt.AlignVCenter)
         self.m_emission = EmissionButton()
         self.m_emission.is_tx = lambda: getattr(self, "vox_tx", False)
         self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
-        row.addWidget(self._big(self.m_emission, 2.8), 0, QtCore.Qt.AlignVCenter)
+        row.addWidget(self._big(self.m_emission, 2.3), 0, QtCore.Qt.AlignVCenter)
+        right = QtWidgets.QVBoxLayout()
+        right.setSpacing(10)
+        self.m_hunt = QtWidgets.QPushButton("QSO EN FRANÇAIS")
+        self.m_hunt.setCheckable(True)
+        self.m_hunt.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_hunt.setFixedSize(210, 40)
+        self.m_hunt.setToolTip("Comme CHERCHER QSO FR : cherche un QSO en français "
+                               "et s'arrête dessus ; nouvel appui = suivant / arrêt")
+        self.m_hunt.clicked.connect(lambda: self.hunt_button.click())
+        right.addWidget(self._big(self.m_hunt, 1.6), 0, QtCore.Qt.AlignHCenter)
+        vox = QtWidgets.QHBoxLayout()
+        vox.setSpacing(8)
+        self.m_vox = {}
+        for n in VOX_MSG_NUMBERS:                   # VOX1… : même effet que les poussoirs
+            button = QtWidgets.QPushButton(f"VOX{n}")
+            button.setFocusPolicy(QtCore.Qt.NoFocus)
+            button.setFixedSize(60, 60)
+            button.setToolTip(f"VOX{n} : message vocal n° {n} en attente de « VOX {n} »")
+            button.clicked.connect(lambda _=False, n=n: self.vox_msg_buttons[n].click())
+            self.m_vox[n] = button
+            vox.addWidget(self._big(button, 1.6))
+        self.m_vox_vocal = QtWidgets.QPushButton("VOX\nVOCAL")
+        self.m_vox_vocal.setCheckable(True)
+        self.m_vox_vocal.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_vox_vocal.setFixedSize(60, 60)
+        self.m_vox_vocal.setStyleSheet(PUSH_3D + "QPushButton { font-size: 8pt; }")
+        self.m_vox_vocal.setToolTip("VOX VOCAL : dire « VOX » au micro arme le VOX")
+        self.m_vox_vocal.clicked.connect(lambda: self.vox_vocal_button.click())
+        vox.addWidget(self._big(self.m_vox_vocal, 1.6))
+        right.addLayout(vox)
+        row.addLayout(right)
         row.addStretch()
         box.addLayout(row)
-        box.addStretch()
         # retour à l'écran FIXE
         self.mobile_back = ToggleSwitch("FIXE", "MOBILE",
                                         tooltip="Levier en haut = retour à l'écran FIXE")
+        self.mobile_back.setFixedSize(60, 60)
         self.mobile_back.setDown(True, emit=False)
         self.mobile_back.toggled.connect(self._mobile_toggled)
         plate = QtWidgets.QVBoxLayout()
@@ -5074,10 +5130,50 @@ class MainWindow(QtWidgets.QMainWindow):
         box.addLayout(plate)
         return page
 
+    def _mobile_sync(self):
+        """Écran MOBILE : boutons recopiés sur ceux de l'écran FIXE (état, couleur)."""
+        for mine, theirs in ((self.m_hunt, self.hunt_button),
+                             (self.m_vox_vocal, self.vox_vocal_button)):
+            if mine.isChecked() != theirs.isChecked():
+                mine.setChecked(theirs.isChecked())
+        style = self.hunt_button.styleSheet() + "QPushButton { font-weight: bold; }"
+        if self.m_hunt.styleSheet() != style:
+            self.m_hunt.setStyleSheet(style)
+        for n, button in self.m_vox.items():
+            theirs = self.vox_msg_buttons[n]
+            if button.text() != theirs.text():
+                button.setText(theirs.text())
+            if button.styleSheet() != theirs.styleSheet():
+                button.setStyleSheet(theirs.styleSheet())
+        if self.m_emergency.flashing != self.emergency_button.flashing:
+            self.m_emergency.set_flashing(self.emergency_button.flashing)
+
+    def _mobile_waterfall(self):
+        """Le waterfall de l'écran MOBILE recopie le grand (quand il est affiché)."""
+        if self.pages.currentIndex() != 1 or self.waterfall is None:
+            return
+        x0, x1 = self.spec_plot.viewRange()[0]
+        self.m_wf_image.setImage(self.waterfall, autoLevels=False,
+                                 levels=(self.wf_low, self.wf_low + self.range_spin.value()))
+        self.m_wf_image.setRect(QtCore.QRectF(x0, 0, x1 - x0, HISTORY))
+        self.m_wf_plot.setXRange(x0, x1, padding=0)
+        self.m_wf_plot.setYRange(0, HISTORY, padding=0)
+        if self.view == "rf" and self.freq_hz:
+            self.m_wf_tuned.setValue(self.freq_hz / 1000)
+            self.m_wf_tuned.setVisible(True)
+        else:
+            self.m_wf_tuned.setVisible(False)
+
     def _mobile_toggled(self, mobile):
         self.mobile_toggle.setDown(mobile, emit=False)
         self.mobile_back.setDown(mobile, emit=False)
         self.pages.setCurrentIndex(1 if mobile else 0)
+        if mobile:
+            self.mobile_timer.start(150)
+            self._mobile_sync()
+            self._mobile_waterfall()
+        else:
+            self.mobile_timer.stop()
 
     def _loupe_toggled(self, on):
         """Interrupteur LOUPE : levier en bas = lentille autour du pointeur."""
