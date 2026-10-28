@@ -4946,7 +4946,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mute_check.setChecked(False)
             self.statusBar().showMessage("RM Noise arrêté : son direct de la radio", 4000)
 
-    RMNOISE_TARGET_DB = -20.0           # niveau visé à l'entrée de RM Noise
+    RMNOISE_TARGET_DB = -30.0           # niveau moyen visé à l'entrée de RM Noise :
+                                        # ~18 dB de marge pour les pointes de voix
 
     def _rmnoise_levels(self):
         """RM Noise : entrée réglée sur le niveau réel de la radio, sortie qui suit
@@ -4956,9 +4957,9 @@ class MainWindow(QtWidgets.QMainWindow):
         level = getattr(self, "radio_rms_db", None)
         if level is not None and level > -60:       # il y a du son (bruit ou voix)
             want = 100 * 10 ** ((self.RMNOISE_TARGET_DB - level) / 20)
-            want = max(25.0, min(300.0, want))
+            want = max(15.0, min(100.0, want))     # jamais amplifié : pas d'écrêtage
             self.rmnoise_in += 0.3 * (want - self.rmnoise_in)   # sans à-coup
-        out = self.pc_volume.value() * self._preamp_factor()
+        out = min(100.0, self.pc_volume.value() * self._preamp_factor())   # pas de saturation
         mute = bool(self.tx_active or getattr(self, "vox_rx_muted", False)
                     or self._scan_quiet())
         args = (self.rmnoise_in, out, mute)
