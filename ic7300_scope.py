@@ -5090,9 +5090,6 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self._big(self.m_bands, 1.15), 0, QtCore.Qt.AlignVCenter)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
-        view = self._big(self.m_emergency, 2.0)
-        page.labels.append((view, "ARRÊT"))
-        top.addWidget(view, 0, QtCore.Qt.AlignVCenter)
         top.addStretch()
         box.addLayout(top)
         # 2e ligne : waterfall avec l'échelle des fréquences (kHz)
@@ -5123,18 +5120,29 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
-        row.addStretch()
         self.m_knob = TuningKnob()                  # bouton VFO
         self.m_knob.tuned.connect(self.on_knob_tuned)
-        view = self._big(self.m_knob, 1.0)
-        page.labels.append((view, "VFO"))
-        row.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        knob_view = self._big(self.m_knob, 1.3)
+        page.labels.append((knob_view, "VFO"))
         self.m_emission = EmissionButton()
         self.m_emission.is_tx = lambda: getattr(self, "vox_tx", False)
         self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
+        # à gauche : EMISSION et ARRÊT d'urgence l'un sous l'autre
+        left = QtWidgets.QHBoxLayout()
+        left.setSpacing(50)
         view = self._big(self.m_emission, 2.3)
         page.labels.append((view, "ÉMISSION"))
-        row.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        view = self._big(self.m_emergency, 2.0)
+        page.labels.append((view, "ARRÊT"))
+        left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        left_box = QtWidgets.QWidget()               # même largeur à gauche et à
+        left_box.setLayout(left)                    # droite : VFO pile au centre
+        left_box.setFixedWidth(570)
+        row.addWidget(left_box, 0, QtCore.Qt.AlignVCenter)
+        row.addStretch()
+        row.addWidget(knob_view, 0, QtCore.Qt.AlignVCenter)    # VFO au centre
+        row.addStretch()
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(34)
         self.m_hunt = QtWidgets.QPushButton("QSO EN FRANÇAIS")
@@ -5187,9 +5195,10 @@ class MainWindow(QtWidgets.QMainWindow):
         vox.setContentsMargins(0, 0, 0, 0)
         page.labels.append((vox_box, "FONCTIONS VOX"))
         right.addWidget(vox_box)
-        row.addLayout(right)
-        row.addStretch()
-        box.addLayout(row)
+        right_box = QtWidgets.QWidget()
+        right_box.setLayout(right)
+        right_box.setFixedWidth(570)
+        row.addWidget(right_box, 0, QtCore.Qt.AlignVCenter)
         # retour à l'écran FIXE
         self.mobile_back = ToggleSwitch("FIXE", "MOBILE",
                                         tooltip="Levier en haut = retour à l'écran FIXE")
@@ -5200,7 +5209,8 @@ class MainWindow(QtWidgets.QMainWindow):
         plate.setSpacing(1)
         plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
-        box.addLayout(plate)
+        row.addLayout(plate)
+        box.addLayout(row)
         return page
 
     MOBILE_CONF = os.path.expanduser("~/.config/ic7300-scope/mobile.json")
