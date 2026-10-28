@@ -103,5 +103,29 @@
     "thr": -32.0,
     "ratio": 6.5,
     "makeup": 13.0
+  },
+  "Net DX F4TXR": {
+    "hp": 250,
+    "lp": 2900,
+    "gain": 2,
+    "q": 1.0,
+    "bands": [
+      -12,
+      -8,
+      -4,
+      -1,
+      1,
+      3,
+      4,
+      3,
+      0
+    ],
+    "comp_on": true,
+    "thr": -26.0,
+    "ratio": 4.0,
+    "makeup": 9,
+    "attack": 10.0,
+    "release": 200.0,
+    "gate": -50.0
   }
 }
