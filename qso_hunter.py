@@ -32,7 +32,8 @@ PHONE = {"160m": (1_843_000, 1_997_000, "LSB"),
          "6m": (50_103_000, 50_497_000, "USB")}
 SWEEP_STEP = 1000               # balayage : 1 kHz par pas…
 SWEEP_MS = 150                  # … toutes les 0,15 s (on voit la fréquence défiler)
-SCAN_SWEEP_MS = 400             # SCAN : plus lent, arrêt dès qu'une station passe
+SCAN_SWEEP_MS = 100             # SCAN : petits pas rapprochés, défilement continu…
+SCAN_STEP = 250                 # … de 250 Hz (même vitesse qu'avant : 2,5 kHz/s)
 BIN_HZ = 250                    # finesse de la carte de la bande
 SETTLE_MS = 2500                # après un changement de fréquence (calage, réseau)
 LISTEN_S = 10                   # arrêt de 10 s sur chaque signal BLU (son pour Whisper)
@@ -277,7 +278,7 @@ class QsoHunter(QtCore.QObject):
                 self._say(f"Recherche : balayage {self.pos / 1e6:.3f} MHz "
                                  f"({self.low / 1e6:.3f} → {self.high / 1e6:.3f})")
                 self._tune(self.pos)
-                self.pos += SWEEP_STEP
+                self.pos += SCAN_STEP if self.scan_only else SWEEP_STEP
                 self.timer.start(SCAN_SWEEP_MS if self.scan_only else SWEEP_MS)
                 return
             self.queue = self._candidates()
