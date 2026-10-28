@@ -72,6 +72,7 @@ from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
 from arc_step import ArcStepWindow
+from drake_display import DrakeClock, DrakeDisplay
 from backlit_window import BacklitWindow
 from vintage_push import RoundPush, VintagePush
 from jewel_lamp import JewelLamp
@@ -2294,7 +2295,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Fréquence, mode et état
         top = QtWidgets.QHBoxLayout()
-        self.freq_label = DrumDisplay()         # compteur à tambours mécaniques
+        self.freq_label = DrakeDisplay()        # LED rouges façon Drake (avant : DrumDisplay)
         self.freq_label.tuned.connect(self.on_tuned)
         self.step_combo = QtWidgets.QComboBox()
         for label, hz in STEPS:
@@ -2315,7 +2316,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.freq_label)
         top.addWidget(QtWidgets.QLabel("MHz"))
         top.addSpacing(8)
-        self.clocks = DrumClock()               # horloges à tambours, assorties
+        self.clocks = DrakeClock()              # horloges LED Drake (avant : DrumClock)
         self.backlight_on_air = False
         self.backlight_timer = QtCore.QTimer(self)    # émission : lumière = voix
         self.backlight_timer.timeout.connect(self._backlight_voice)
