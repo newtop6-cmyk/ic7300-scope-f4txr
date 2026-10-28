@@ -14,7 +14,7 @@ class ArcStepWindow(QtWidgets.QWidget):
     chosen = QtCore.pyqtSignal(int)
 
     W, H = 250, 50
-    RO, BAND = 360.0, 25.0              # rayon extérieur de l'arc, épaisseur
+    RO, BAND = 360.0, 22.0              # rayon extérieur de l'arc, épaisseur
     SPAN = 17.5                          # demi-ouverture (degrés)
 
     def __init__(self):
@@ -31,7 +31,7 @@ class ArcStepWindow(QtWidgets.QWidget):
             self.update()
 
     def _center(self):
-        return QtCore.QPointF(self.W / 2, 6 + self.RO)
+        return QtCore.QPointF(self.W / 2, 9 + self.RO)
 
     def _angles(self):
         """Angle (degrés depuis le haut) de chaque pas, de gauche à droite."""
@@ -64,39 +64,52 @@ class ArcStepWindow(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         c = self._center()
-        # ombre portée du cadre sur la façade (profondeur)
-        frame = self._band(3.5)
-        for i in range(5, 0, -1):
+        # ombre portée marquée du cadre sur la façade
+        frame = self._band(6.5)
+        for i in range(8, 0, -1):
             p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(QtGui.QColor(0, 0, 0, 26))
-            p.drawPath(frame.translated(i * 0.4, i * 0.7))
-        # cadre chromé bombé, arête claire en haut, sombre en bas
+            p.setBrush(QtGui.QColor(0, 0, 0, 24))
+            p.drawPath(frame.translated(i * 0.35, i * 0.6))
+        # cadre chromé ÉPAIS, bombé : lumière en haut, sombre en bas
         g = QtGui.QLinearGradient(0, 0, 0, self.H)
-        for stop, col in ((0, "#ffffff"), (0.3, "#b9bcb8"), (0.55, "#7a7e79"),
-                          (0.8, "#d2d4d0"), (1, "#4a4d49")):
+        for stop, col in ((0, "#ffffff"), (0.22, "#c7cac6"), (0.45, "#6f736e"),
+                          (0.7, "#dadcd8"), (1, "#3c3f3b")):
             g.setColorAt(stop, QtGui.QColor(col))
         p.setBrush(g)
-        p.setPen(QtGui.QPen(QtGui.QColor("#151614"), 1))
+        p.setPen(QtGui.QPen(QtGui.QColor("#0f100e"), 1.2))
         p.drawPath(frame)
-        p.setBrush(QtCore.Qt.NoBrush)
-        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 140), 1))
-        p.drawPath(self._band(2.2))
+        p.setBrush(QtCore.Qt.NoBrush)                   # arête de lumière extérieure
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 170), 1.1))
+        p.drawPath(self._band(5.4))
+        # gorge sombre entre le cadre et la vitre (la vitre est enfoncée)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor("#050505"))
+        p.drawPath(self._band(1.8))
+        p.setBrush(QtCore.Qt.NoBrush)                   # lèvre claire au fond de la gorge
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 40), 0.8))
+        p.drawPath(self._band(1.0))
         # vitre creusée, rétroéclairée
         glass = self._band()
         bg = QtGui.QRadialGradient(c, self.RO)
         bg.setColorAt(1 - (self.BAND + 4) / self.RO, QtGui.QColor("#1a0d02"))
-        bg.setColorAt(1 - self.BAND / 2 / self.RO, QtGui.QColor("#3a2108"))
+        bg.setColorAt(1 - self.BAND / 2 / self.RO, QtGui.QColor("#3e2309"))
         bg.setColorAt(1.0, QtGui.QColor("#0c0601"))
         p.setBrush(bg)
         p.setPen(QtGui.QPen(QtGui.QColor("#000"), 1.2))
         p.drawPath(glass)
-        # ombre intérieure : le bord haut de la vitre est dans l'ombre du cadre
+        # ombre intérieure forte : haut de la vitre et bouts dans l'ombre du cadre
         p.save()
         p.setClipPath(glass)
         inner = QtGui.QRadialGradient(c, self.RO)
-        inner.setColorAt(1 - 7 / self.RO, QtGui.QColor(0, 0, 0, 0))
-        inner.setColorAt(1.0, QtGui.QColor(0, 0, 0, 190))
+        inner.setColorAt(1 - 11 / self.RO, QtGui.QColor(0, 0, 0, 0))
+        inner.setColorAt(1.0, QtGui.QColor(0, 0, 0, 235))
         p.fillPath(glass, inner)
+        for side in (-1, 1):                            # bouts assombris
+            x = self.W / 2 + side * self.W / 2
+            sg = QtGui.QLinearGradient(x, 0, self.W / 2, 0)
+            sg.setColorAt(0, QtGui.QColor(0, 0, 0, 200))
+            sg.setColorAt(0.16, QtGui.QColor(0, 0, 0, 0))
+            p.fillPath(glass, sg)
         p.restore()
         # les 4 pas gravés le long de l'arc
         r_text = self.RO - self.BAND / 2
