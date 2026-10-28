@@ -22,7 +22,7 @@ import wave
 
 import numpy as np
 import serial
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtNetwork, QtWidgets
 import pyqtgraph as pg
 
 from cw_decoder import CwDecoder
@@ -5626,6 +5626,38 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{slot.get('name') or f'M{i + 1}'} : {format_frequency(slot['hz'])} MHz "
             f"{slot['mode']} mémorisée", 5000)
 
+    # --- commandes venues de l'extérieur (Claude, scripts) ---------------------
+    COMMAND_SOCKET = "ic7300-scope-commandes"
+
+    def _command_server(self):
+        """Petite porte locale : « egaliseur », « proprete », « mobile », « fixe »…
+        (socket Unix dans /tmp, une commande par ligne)."""
+        QtNetwork.QLocalServer.removeServer(self.COMMAND_SOCKET)
+        self.cmd_server = QtNetwork.QLocalServer(self)
+        self.cmd_server.newConnection.connect(self._command_connection)
+        self.cmd_server.listen(self.COMMAND_SOCKET)
+
+    def _command_connection(self):
+        sock = self.cmd_server.nextPendingConnection()
+        sock.readyRead.connect(lambda: self._command_read(sock))
+
+    def _command_read(self, sock):
+        for raw in bytes(sock.readAll()).decode("utf-8", "ignore").split("\n"):
+            cmd = raw.strip().lower()
+            actions = {
+                "egaliseur": self.on_eq_button,
+                "proprete": self._emission_check_toggle,
+                "mobile": lambda: self._mobile_toggled(True),
+                "fixe": lambda: self._mobile_toggled(False),
+                "console": self.console_button.toggle,
+            }
+            if cmd in actions:
+                actions[cmd]()
+                sock.write(b"ok\n")
+            elif cmd:
+                sock.write(b"inconnu\n")
+        sock.flush()
+
     # --- PROPRETÉ ÉMISSION ------------------------------------------------------
     def _emission_check_toggle(self):
         win = getattr(self, "emission_window", None)
@@ -8531,6 +8563,8 @@ def main():
             window.showFullScreen()
     QtWidgets.QShortcut(QtGui.QKeySequence("F11"), window, toggle_full_screen)
     QtWidgets.QShortcut(QtGui.QKeySequence("F10"), window, window._emission_check_toggle)
+    QtWidgets.QShortcut(QtGui.QKeySequence("F9"), window, window.on_eq_button)
+    window._command_server()
     QtWidgets.QShortcut(QtGui.QKeySequence("F12"), window,
                         window.console_button.toggle)
     # console visible dès le démarrage, par-dessus le plein écran
