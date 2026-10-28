@@ -66,6 +66,7 @@ from loupe import AltWheel, Loupe
 from push_plate import PushPlate
 from paddle_clavier import MORSE
 from drum_display import DrumClock, DrumDisplay
+from nixie_display import NixieDisplay
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -5040,11 +5041,13 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setSpacing(6)
         # 1re ligne : fréquence, commutateur de bandes, arrêt d'urgence
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(50)
+        top.setSpacing(30)
         top.addStretch()
-        self.m_freq = DrumDisplay()                 # molette = changer la fréquence
+        self.m_smeter = VintageSMeter()             # S-mètre en haut à gauche
+        top.addWidget(self._big(self.m_smeter, 1.3), 0, QtCore.Qt.AlignVCenter)
+        self.m_freq = NixieDisplay(800, 170)        # tubes Nixie ; molette = fréquence
         self.m_freq.tuned.connect(self.on_tuned)
-        top.addWidget(self._big(self.m_freq, 2.0), 0, QtCore.Qt.AlignVCenter)
+        top.addWidget(self.m_freq, 0, QtCore.Qt.AlignVCenter)
         self.m_bands = BandSelector(BAND_SEL_PX)
         self.m_bands.changed.connect(self._band_selector_changed)
         top.addWidget(self._big(self.m_bands, 1.15), 0, QtCore.Qt.AlignVCenter)
@@ -5080,8 +5083,6 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
         row.addStretch()
-        self.m_smeter = VintageSMeter()
-        row.addWidget(self._big(self.m_smeter, 1.6), 0, QtCore.Qt.AlignVCenter)
         self.m_knob = TuningKnob()                  # bouton VFO
         self.m_knob.tuned.connect(self.on_knob_tuned)
         row.addWidget(self._big(self.m_knob, 1.0), 0, QtCore.Qt.AlignVCenter)
