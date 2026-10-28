@@ -5132,7 +5132,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_hunt.setToolTip("Comme CHERCHER QSO FR : cherche un QSO en français "
                                "et s'arrête dessus ; nouvel appui = suivant / arrêt")
         self.m_hunt.clicked.connect(lambda: self.hunt_button.click())
-        right.addWidget(self._big(self.m_hunt, 1.6), 0, QtCore.Qt.AlignHCenter)
+        self.m_scan = QtWidgets.QPushButton("SCAN")   # même effet que SCAN
+        self.m_scan.setCheckable(True)
+        self.m_scan.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_scan.setFixedSize(90, 40)
+        self.m_scan.setToolTip("SCAN : balaye la bande ; on n'entend que les QSO "
+                               "en français. Nouvel appui = arrêt")
+        self.m_scan.clicked.connect(lambda: self.scan_button.click())
+        hunt_row = QtWidgets.QHBoxLayout()
+        hunt_row.setSpacing(12)
+        hunt_row.addWidget(self._big(self.m_scan, 1.6))
+        hunt_row.addWidget(self._big(self.m_hunt, 1.6))
+        right.addLayout(hunt_row)
         vox = QtWidgets.QHBoxLayout()
         vox.setSpacing(8)
         self.m_vox = {}
@@ -5194,12 +5205,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _mobile_sync(self):
         """Écran MOBILE : boutons recopiés sur ceux de l'écran FIXE (état, couleur)."""
         for mine, theirs in ((self.m_hunt, self.hunt_button),
+                             (self.m_scan, self.scan_button),
                              (self.m_vox_vocal, self.vox_vocal_button)):
             if mine.isChecked() != theirs.isChecked():
                 mine.setChecked(theirs.isChecked())
         style = self.hunt_button.styleSheet() + "QPushButton { font-weight: bold; }"
         if self.m_hunt.styleSheet() != style:
             self.m_hunt.setStyleSheet(style)
+        style = self.scan_button.styleSheet() + "QPushButton { font-weight: bold; }"
+        if self.m_scan.styleSheet() != style:               # clignote comme SCAN
+            self.m_scan.setStyleSheet(style)
         for n, button in self.m_vox.items():
             theirs = self.vox_msg_buttons[n]
             if button.text() != theirs.text():
