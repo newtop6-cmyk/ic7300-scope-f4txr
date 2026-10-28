@@ -199,6 +199,7 @@ HOP = 1600                      # 30 spectres par seconde
 BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
+MOBILE_VFO_STEP = 50_000        # VFO de l'écran MOBILE : 50 kHz par cran
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
 RIG_ADDR = 0x94                 # adresse CI-V par défaut de l'IC-7300
@@ -5130,7 +5131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
         self.m_knob = TuningKnob()                  # bouton VFO
-        self.m_knob.tuned.connect(self.on_knob_tuned)
+        self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
         knob_view = self._big(self.m_knob, 1.3)
         page.labels.append((knob_view, "VFO"))
         self.m_emission = EmissionButton()
@@ -6391,6 +6392,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.freq_hz is None:
             return
         step = self._fine_step() or self.step_combo.currentData()   # sinon : pas du menu
+        base = self.freq_hz // step * step
+        if steps < 0 and base != self.freq_hz:
+            steps += 1                      # on s'aligne d'abord sur le pas
+        self.tune_to(base + steps * step)
+
+    def _mobile_knob_tuned(self, steps):
+        """VFO de l'écran MOBILE : chaque cran avance de 50 kHz."""
+        self._manual_tuning()
+        if self.freq_hz is None:
+            return
+        step = MOBILE_VFO_STEP
         base = self.freq_hz // step * step
         if steps < 0 and base != self.freq_hz:
             steps += 1                      # on s'aligne d'abord sur le pas
