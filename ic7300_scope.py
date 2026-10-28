@@ -5342,7 +5342,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError:
             pass
 
-    STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_708_000, "mode": "LSB"}]
+    STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_708_000, "mode": "LSB"},
+                        {"name": "F6GMO", "hz": 3_785_000, "mode": "LSB"}]
 
     def _stations_load(self):
         slots = self._mobile_conf().get("stations") or [dict(x) for x in self.STATIONS_DEFAULT]

@@ -126,6 +126,8 @@ class StationPlate(QtWidgets.QWidget):
 
     def _refresh_tips(self):
         for b, s in zip(self.buttons, self.slots):
+            b.cap = QtGui.QColor("#b11d12" if s.get("name") else "#2b2b2b")   # nommée : rouge
+            b.update()
             if s.get("hz"):
                 b.setToolTip(f"{s.get('name') or 'Mémoire'} : {s['hz'] / 1e6:.3f} MHz "
                              f"{s.get('mode', '')}\nClic = y aller tout de suite ; "
