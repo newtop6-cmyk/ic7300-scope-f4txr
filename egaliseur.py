@@ -107,6 +107,12 @@ PRESETS = {
                               bands=[2, 3, 1, -1, 0, 1, 1, 0, -2]),
     "Clair": dict(hp=150, lp=2900, gain=0,
                   bands=[-3, -2, -1, -2, 0, 2, 3, 3, 1]),
+    # moins métallique : présence (2–3 kHz) adoucie, un peu de chaleur
+    # (400–700 Hz), compression douce et lente (la compression forte durcit)
+    "Naturel (anti-métallique)": dict(hp=150, lp=2700, gain=0, q=0.9,
+                                      bands=[-4, -1, 1, 1, 0, 0, -2, -4, -6],
+                                      comp_on=True, thr=-26.0, ratio=3.0, makeup=7.0,
+                                      attack=12.0, release=250.0, gate=-50.0),
 }
 
 
@@ -447,6 +453,31 @@ class EqEngine:
             return True
         return False
 
+    def playback_received(self):
+        """L'enregistrement « après », passé dans un filtre de récepteur BLU
+        (300–2700 Hz, flancs raides) : à peu près ce qu'entend le correspondant."""
+        src = getattr(self, "rec_files", {}).get("apres")
+        if not src or not os.path.exists(src):
+            return False
+        import wave
+        with wave.open(src) as w:
+            rate = w.getframerate()
+            x = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32)
+        sos = signal.butter(8, [300, 2700], btype="bandpass", fs=rate, output="sos")
+        y = signal.sosfilt(sos, x)
+        peak = float(np.abs(y).max()) or 1.0
+        y = (y / peak * 0.7 * 32767).astype(np.int16)        # même niveau d'écoute
+        out = os.path.join(self.REC_DIR, "ic7300_voix_recu.wav")
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(y.tobytes())
+        if getattr(self, "player", None):
+            self.player.kill()
+        self.player = subprocess.Popen(["paplay", out], stderr=subprocess.DEVNULL)
+        return True
+
     # s'écouter dans le casque
     def listen(self, on):
         if on and not self.listen_module:
@@ -708,12 +739,19 @@ class EqWindow(QtWidgets.QWidget):
         self.play_after.setStyleSheet(big % "#2e7d32")
         self.play_after.setToolTip("Voix passée dans l'égaliseur, telle qu'elle part à la radio")
         self.play_after.clicked.connect(lambda: self.engine.playback("apres"))
-        for b in (self.play_before, self.play_after):
+        self.play_rx = QtWidgets.QPushButton("▶ COMME REÇU")
+        self.play_rx.setStyleSheet(big % "#6a4a14")
+        self.play_rx.setToolTip("Ta voix « après », passée dans un filtre de récepteur BLU "
+                                "(300–2700 Hz) : à peu près ce qu'entend le correspondant. "
+                                "Le compresseur de la radio (NIVEAU COMP) n'y est pas.")
+        self.play_rx.clicked.connect(self.engine.playback_received)
+        for b in (self.play_before, self.play_after, self.play_rx):
             b.setEnabled(False)
         self.rec_info = QtWidgets.QLabel("")
         cmp_row.addWidget(self.rec_button)
         cmp_row.addWidget(self.play_before)
         cmp_row.addWidget(self.play_after)
+        cmp_row.addWidget(self.play_rx)
         cmp_row.addWidget(self.rec_info, stretch=1)
         close = QtWidgets.QPushButton("FERMER")
         close.setFixedSize(78, 78)
@@ -823,6 +861,7 @@ class EqWindow(QtWidgets.QWidget):
             self.rec_button.setEnabled(True)
             self.play_before.setEnabled(True)
             self.play_after.setEnabled(True)
+            self.play_rx.setEnabled(True)
             self.rec_info.setText("Compare AVANT / APRÈS. Change un réglage, puis "
                                   "réenregistre-toi.")
             return
@@ -891,6 +930,15 @@ class EqWindow(QtWidgets.QWidget):
                 self._loading = False
         else:
             p = PRESETS.get(name)
+            if p and "comp_on" in p:            # réglage tout prêt avec compresseur
+                self._loading = True
+                self.q.setValue(p.get("q", 1.2))
+                self.comp_box.setChecked(p["comp_on"])
+                for key, (sl, _, _) in self.comp_sliders.items():
+                    sl.setValue(round(p[key] / sl.step))
+                self.comp_extra = dict(attack=p["attack"], release=p["release"],
+                                       gate=p["gate"])     # attaque / relâchement doux
+                self._loading = False
         if not p:
             return
         self._loading = True
