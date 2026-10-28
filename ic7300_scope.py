@@ -4217,8 +4217,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_spectrum(self, db, rms):
         if rms > 0:                                 # niveau du son de la radio (RM Noise)
-            self.radio_rms_db = 0.8 * getattr(self, "radio_rms_db", -40.0) \
-                + 0.2 * 20 * math.log10(rms + 1e-9)
+            self.radio_rms_db = 0.97 * getattr(self, "radio_rms_db", -40.0) \
+                + 0.03 * 20 * math.log10(rms + 1e-9)        # moyenne sur ~5 s
         if self.view != "audio":
             return
         self.avg = db if self.avg is None else 0.6 * self.avg + 0.4 * db
@@ -4958,11 +4958,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if level is not None and level > -60:       # il y a du son (bruit ou voix)
             want = 100 * 10 ** ((self.RMNOISE_TARGET_DB - level) / 20)
             want = max(15.0, min(100.0, want))     # jamais amplifié : pas d'écrêtage
-            self.rmnoise_in += 0.3 * (want - self.rmnoise_in)   # sans à-coup
+            # très lissé : on ne bouge que pour un écart de plus de 3 dB, et
+            # par tout petits pas (pas de « pompage » du son)
+            if abs(20 * math.log10(want / self.rmnoise_in)) > 3:
+                self.rmnoise_in += 0.05 * (want - self.rmnoise_in)
         out = min(100.0, self.pc_volume.value() * self._preamp_factor())   # pas de saturation
         mute = bool(self.tx_active or getattr(self, "vox_rx_muted", False)
                     or self._scan_quiet())
-        args = (self.rmnoise_in, out, mute)
+        args = (round(self.rmnoise_in), round(out), mute)
         if args != getattr(self, "_rmnoise_last", None):
             self._rmnoise_last = args
             threading.Thread(target=rm_noise.set_levels, args=args, daemon=True).start()
