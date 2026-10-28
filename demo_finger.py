@@ -131,6 +131,7 @@ class DemoFinger(QtWidgets.QWidget):
         self.ripples = []               # instants des clics
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._follow)
+        self.ticks = 0
 
     def _build(self):
         self.pix, self.tip = _finger_pixmap(SIZES[self.size_name])
@@ -174,6 +175,13 @@ class DemoFinger(QtWidgets.QWidget):
         return QtCore.QPoint(self.tip.x() + self.margin // 2, self.tip.y() + self.margin // 2)
 
     def _follow(self):
+        # une fenêtre ouverte après coup (loupe, écran plein, notification…)
+        # peut se poser sur le doigt : il se remet devant ~3 fois par seconde
+        self.ticks += 1
+        if self.timer.isActive() and self.ticks % 25 == 0:
+            if not self.isVisible():
+                self.show()
+            self.raise_()
         pos = QtGui.QCursor.pos()
         self.move(pos - self._origin())
         pressed = self.x11.buttons()
