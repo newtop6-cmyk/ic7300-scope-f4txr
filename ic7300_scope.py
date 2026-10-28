@@ -2951,7 +2951,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.other_label.setToolTip("L'autre VFO")
         self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
         # multiplicateur au-dessus du VFO : ×1 → ×10 → ×100 → ×1000 (voir la plaque)
-        vfo.addWidget(self.vfo_step_push, 0, 0, 1, 4, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignBottom)
+        self.vfo_step_window = self._step_window()
+        step_top = QtWidgets.QHBoxLayout()
+        step_top.setSpacing(8)
+        step_top.addStretch()
+        step_top.addWidget(self.vfo_step_push, 0, QtCore.Qt.AlignVCenter)
+        step_top.addWidget(self.vfo_step_window, 0, QtCore.Qt.AlignVCenter)
+        step_top.addStretch()
+        vfo.addLayout(step_top, 0, 0, 1, 4, QtCore.Qt.AlignBottom)
+        self._vfo_step_show()
         vfo.addWidget(self.knob, 1, 0, 1, 4, QtCore.Qt.AlignCenter)
         # à droite du VFO : plaque des pas, et dessous l'interrupteur VERROU QRG
         plate_col = QtWidgets.QVBoxLayout()
@@ -5639,7 +5647,15 @@ class MainWindow(QtWidgets.QMainWindow):
         knob_col.setSpacing(2)
         mult_view = self._big(self.m_mult_push, 1.0)
         page.labels.append((mult_view, "PAS"))
-        knob_col.addWidget(mult_view, 0, QtCore.Qt.AlignHCenter)
+        self.m_mult_window = self._step_window()
+        self.m_mult_window.setText(self._step_text(self.m_mult, MOBILE_VFO_STEP * self.m_mult))
+        mult_row = QtWidgets.QHBoxLayout()
+        mult_row.setSpacing(8)
+        mult_row.addStretch()
+        mult_row.addWidget(mult_view, 0, QtCore.Qt.AlignVCenter)
+        mult_row.addWidget(self.m_mult_window, 0, QtCore.Qt.AlignVCenter)
+        mult_row.addStretch()
+        knob_col.addLayout(mult_row)
         knob_col.addWidget(knob_view, 0, QtCore.Qt.AlignHCenter)
         row.addLayout(knob_col)                                 # VFO au centre
         row.addStretch()
@@ -7203,6 +7219,28 @@ class MainWindow(QtWidgets.QMainWindow):
         """Pas du bouton VFO choisi sur la plaque (Hz)."""
         return getattr(self, "vfo_step_hz", None)
 
+    @staticmethod
+    def _step_window():
+        """Petite fenêtre rétroéclairée ambre qui affiche le pas en cours."""
+        lab = QtWidgets.QLabel()
+        lab.setAlignment(QtCore.Qt.AlignCenter)
+        lab.setFixedSize(146, 30)
+        lab.setStyleSheet(
+            "QLabel { font: 900 12pt 'DejaVu Sans Condensed'; color: #ffb43a;"
+            " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a0f04,"
+            " stop:0.5 #2e1a06, stop:1 #120a02); border: 2px solid #9a9d98;"
+            " border-top-color: #4a4c48; border-left-color: #4a4c48; border-radius: 6px; }")
+        glow = QtWidgets.QGraphicsDropShadowEffect(lab)
+        glow.setOffset(0, 0)
+        glow.setBlurRadius(12)
+        glow.setColor(QtGui.QColor(255, 150, 30, 200))
+        lab.setGraphicsEffect(glow)
+        return lab
+
+    @staticmethod
+    def _step_text(mult, hz):
+        return f"×{mult} = {hz / 1000:g} kHz" if hz >= 1000 else f"×{mult} = {hz} Hz"
+
     def _vfo_step_load(self):
         try:
             with open(VFO_STEP_FILE) as f:
@@ -7236,6 +7274,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 name.setStyleSheet(f"font: 900 {pt}pt 'DejaVu Sans Condensed'; color: {color}; "
                                    "background: transparent;")
         self.vfo_step_push.setText(f"×{self.vfo_step_hz}")
+        if hasattr(self, "vfo_step_window"):
+            self.vfo_step_window.setText(self._step_text(self.vfo_step_hz, self.vfo_step_hz))
 
     def _vfo_step_leds(self, on_100k):
         fine = hasattr(self, "fine_switches") and self._fine_step() is not None
@@ -7258,6 +7298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Multiplicateur du VFO MOBILE : ×1 → ×10 → ×100 → ×1000 → ×1."""
         self.m_mult = 1 if self.m_mult >= 1000 else self.m_mult * 10
         self.m_mult_push.setText(f"×{self.m_mult}")
+        self.m_mult_window.setText(self._step_text(self.m_mult, MOBILE_VFO_STEP * self.m_mult))
         conf = self._mobile_conf()
         conf["multiplicateur"] = self.m_mult
         try:
