@@ -1,5 +1,5 @@
 """Bouton d'arrêt d'urgence : champignon rouge très en relief, sur une
-collerette jaune où « EMERGENCY » est écrit en rouge tout autour (360°).
+collerette jaune où « EMERGENCY » est écrit en rouge en arc de 130° sur le haut.
 
 Signal pressed() à l'appui. set_flashing(True) : le champignon flashe par
 cycles de 3 éclairs à intervalles réguliers (jusqu'à set_flashing(False))."""
@@ -74,23 +74,26 @@ class EmergencyButton(QtWidgets.QWidget):
         p.setBrush(ring)
         p.setPen(QtGui.QPen(QtGui.QColor("#1a1a1a"), 1.4))
         p.drawEllipse(c, R - 1, R - 1)
-        # « EMERGENCY » en rouge, lettres posées tout autour du cercle
-        text = "EMERGENCY✱"                         # 10 signes, 36° chacun : tout le tour
+        # « EMERGENCY » en rouge, serré en arc de 130° sur le haut de la collerette
+        text = "EMERGENCY"
         f = QtGui.QFont("DejaVu Sans", max(6, round(s * 0.105)), QtGui.QFont.Black)
         p.setFont(f)
         fm = QtGui.QFontMetricsF(f)
         rt = R - 1 - fm.ascent() * 0.62 - 2          # rayon de l'écriture
-        n = len(text)
-        for i, ch in enumerate(text):
-            a = -90 + 360 * i / n                    # départ en haut, sens horaire
+        widths = [fm.horizontalAdvance(ch) for ch in text]
+        span = 130.0
+        per = span / sum(widths)                     # degrés par pixel de texte
+        a = -90 - span / 2                           # centré en haut, sens horaire
+        for ch, wch in zip(text, widths):
+            mid = a + wch * per / 2
             p.save()
             p.translate(c)
-            p.rotate(a + 90)
+            p.rotate(mid + 90)
             p.translate(0, -rt)
             p.setPen(QtGui.QColor("#d40000"))
-            wch = fm.horizontalAdvance(ch)
             p.drawText(QtCore.QPointF(-wch / 2, fm.ascent() * 0.38), ch)
             p.restore()
+            a += wch * per
         # socle noir du champignon
         rb = R * 0.56
         g = QtGui.QRadialGradient(c - QtCore.QPointF(rb * 0.3, rb * 0.3), rb * 1.3)
