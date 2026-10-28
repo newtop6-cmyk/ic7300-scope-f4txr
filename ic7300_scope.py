@@ -213,6 +213,8 @@ MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapi
 WF_TICK_MS = 50                 # waterfall : une ligne toutes les 50 ms (20/s : fluide, moins lourd)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
+CLAR_FINE_HZ = 40              # CLARIFIER : affinage voix à ± 40 Hz du kHz rond (mesure biaisée ~+240 Hz vue le 28/10)
+CLAR_PICK_S = 15               # CLARIFIER : 15 s pour choisir le bon kHz rond à la voix
 CLAR_MAX_HZ = 1500             # CLARIFIER : correction maximale du RIT
 DEFIL_RESTART_MS = 10_000      # SCAN DÉFILEMENT : relance 10 s après un arrêt
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
@@ -4409,7 +4411,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_frequency(hz)
 
     def _apply_frequency(self, hz):
-        if hz != self.freq_hz and getattr(self, "rit_hz", 0):
+        if hz != self.freq_hz and getattr(self, "clar_on", False):
+            QtCore.QTimer.singleShot(0, lambda h=hz: self.clar_on and self._clar_rebase(h))
+        elif hz != self.freq_hz and getattr(self, "rit_hz", 0):
             self._clar_apply(0, quiet=True)         # autre station : le RIT repart de 0
         if hz != self.freq_hz:
             self.audio.ssb_tuner.request_reset()    # le son d'avant ne vaut plus
@@ -4931,13 +4935,61 @@ class MainWindow(QtWidgets.QMainWindow):
         """Poussoir CLARIFIER : RIT recalé sur la voix ; arrêt = RIT à 0."""
         self.clar_on = on
         self.clar_button.setStyleSheet(PUSH_3D)
+        self._update_ssb()
         if on and self.civ:
-            self._clar_apply(0, quiet=True)
-            self.statusBar().showMessage("CLARIFIER : j'écoute la voix du correspondant…", 5000)
+            self._clar_rebase(self.freq_hz)         # tout de suite : le kHz rond le plus proche
+            hz = (self.freq_hz or 0) + self.rit_hz
+            self.statusBar().showMessage(
+                f"CLARIFIER : réception sur {format_frequency(hz)} MHz ; la voix choisit le "
+                "bon kHz rond puis affine", 6000)
         elif self.civ:
+            self._clar_pick_end()
+            self.audio.ssb_tuner.fast = False
             self._clar_apply(0, quiet=True)
             self.statusBar().showMessage("CLARIFIER arrêté : RIT remis à 0", 4000)
-        self._update_ssb()
+
+    def _clar_rebase(self, hz):
+        """RIT posé tout de suite sur le kHz rond le plus proche de la fréquence :
+        les stations BLU y sont presque toujours (la mesure de la voix seule
+        peut se tromper de 200 Hz sur certaines voix)."""
+        if not hz:
+            self.clar_base = 0
+            return
+        self.clar_base = round(hz / 1000) * 1000 - hz
+        self._clar_apply(self.clar_base, quiet=True)
+        self._clar_pick_start()
+
+    def _clar_picking(self):
+        return time.monotonic() < getattr(self, "clar_pick_until", 0.0)
+
+    def _clar_pick_start(self):
+        """15 s : la voix compare les kHz ronds voisins de la réception (plus sûr
+        qu'une mesure libre) ; le meilleur l'emporte, même s'il n'est pas le plus
+        proche (scan arrêté sur 3,761 pour un QSO sur 3,760)."""
+        sign = self._ssb_sign()
+        tuner = self.audio.ssb_tuner
+        if not sign or not self.freq_hz:
+            return
+        rx = self.freq_hz + self.rit_hz
+        base = round(rx / 1000) * 1000
+        tuner.candidates = [(k - rx) * sign for k in (base - 1000, base, base + 1000)]
+        tuner.d_limit = D_WIDE
+        tuner.fast = True
+        self.clar_pick_until = time.monotonic() + CLAR_PICK_S
+        QtCore.QTimer.singleShot(CLAR_PICK_S * 1000 + 50, self._clar_pick_end_if_due)
+
+    def _clar_pick_end_if_due(self):
+        if not self._clar_picking():
+            self._clar_pick_end()
+
+    def _clar_pick_end(self):
+        if getattr(self, "clar_pick_until", 0.0) == 0.0:
+            return
+        self.clar_pick_until = 0.0
+        tuner = self.audio.ssb_tuner
+        if not self._pulling():
+            tuner.candidates = None
+            tuner.d_limit = D_MAX
 
     def _clar_apply(self, hz, quiet=False):
         hz = max(-CLAR_MAX_HZ, min(CLAR_MAX_HZ, int(hz)))
@@ -5395,6 +5447,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Rattrapage : kHz ronds à ± D_WIDE de hz, en écarts d pour le calage voix."""
         sign = self._ssb_sign()
         tuner = self.audio.ssb_tuner
+        if getattr(self, "clar_pick_until", 0.0) and self._clar_picking():
+            return                          # CLARIFIER : il gère lui-même ses kHz ronds
         if not hz or not sign:
             tuner.candidates = None
             tuner.round_ds = []
@@ -5449,8 +5503,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if not sign or self.audio.ssb is None or self.tx_active or self.freq_hz is None:
             return
         if self.clar_on:                    # CLARIFIER : le RIT corrige, pas le VFO
+            if kind == "shift" and self._clar_picking():
+                rx = self.freq_hz + self.rit_hz
+                target = rx + sign * round(shift)
+                khz = round(target / 1000) * 1000
+                if abs(target - khz) <= 60:         # la voix a choisi un kHz rond
+                    self.clar_base = khz - self.freq_hz
+                    self._log_calage(f"clarifier : kHz rond choisi {khz}")
+                    self._clar_pick_end()
+                    self._clar_apply(self.clar_base)
+                return
             if kind == "shift" and abs(shift) >= 10:
-                self._clar_apply(self.rit_hz + sign * round(shift))
+                base = getattr(self, "clar_base", 0)
+                want = self.rit_hz + sign * round(shift)
+                new = max(base - CLAR_FINE_HZ, min(base + CLAR_FINE_HZ, want))
+                if new != want:
+                    self._log_calage(f"clarifier borné {want - base:+d} → {new - base:+d} "
+                                     "autour du kHz rond")
+                self._clar_apply(new)
             return
         if kind == "flip":
             if not self.sideband_button.isChecked():
