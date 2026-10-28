@@ -5626,6 +5626,89 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{slot.get('name') or f'M{i + 1}'} : {format_frequency(slot['hz'])} MHz "
             f"{slot['mode']} mémorisée", 5000)
 
+    # --- MODULATION FIGÉE : réglages d'émission maintenus -----------------------
+    MODULATION_FILE = os.path.expanduser("~/.config/ic7300-scope/modulation.json")
+    MODULATION_KEYS = ("usb_mod", "comp_on", "comp_level", "power")
+
+    def _radio_tx_seen(self, key, value):
+        """Valeur lue dans la radio (niveau TX, compresseur, puissance)."""
+        if not hasattr(self, "radio_tx"):
+            self.radio_tx = {}
+        self.radio_tx[key] = value
+
+    def _mic_volume(self):
+        mic = self._vox_mic()
+        if not mic:
+            return None, None
+        out = subprocess.run(["pactl", "get-source-volume", mic], capture_output=True,
+                             text=True, env=PACTL_ENV).stdout
+        m = re.search(r"(\d+)%", out)
+        return mic, (int(m.group(1)) if m else None)
+
+    def _modulation_ref(self):
+        try:
+            with open(self.MODULATION_FILE) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def _modulation_save(self):
+        """Fige les réglages d'émission du moment comme référence."""
+        seen = getattr(self, "radio_tx", {})
+        if not all(k in seen for k in self.MODULATION_KEYS):
+            return False
+        ref = {k: seen[k] for k in self.MODULATION_KEYS}
+        ref["mic_volume"] = self._mic_volume()[1]
+        ref["saved"] = time.strftime("%Y-%m-%d %H:%M")
+        os.makedirs(os.path.dirname(self.MODULATION_FILE), exist_ok=True)
+        with open(self.MODULATION_FILE, "w") as f:
+            json.dump(ref, f, indent=1)
+        self._mod_log(f"référence figée : {ref}")
+        return True
+
+    def _mod_log(self, text):
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "modulation.log"), "a") as f:
+                f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {text}\n")
+        except OSError:
+            pass
+
+    def _modulation_enforce(self):
+        """Remet la référence si un réglage d'émission a bougé (radio ou micro)."""
+        if not self.civ:
+            return
+        ref = self._modulation_ref()
+        if ref is None:
+            self._modulation_save()             # 1re fois : les réglages du moment
+            return
+        seen = getattr(self, "radio_tx", {})
+        fixed = []
+        if "usb_mod" in seen and seen["usb_mod"] != ref["usb_mod"]:
+            self.civ.set_usb_mod(ref["usb_mod"])
+            fixed.append(f"NIVEAU TX {seen['usb_mod']}→{ref['usb_mod']}")
+        if "comp_on" in seen and seen["comp_on"] != ref["comp_on"]:
+            self.civ.set_comp(ref["comp_on"])
+            fixed.append(f"COMP {'ON' if ref['comp_on'] else 'OFF'}")
+        if "comp_level" in seen and seen["comp_level"] != ref["comp_level"]:
+            self.civ.set_comp_level(ref["comp_level"])
+            fixed.append(f"NIVEAU COMP {seen['comp_level']}→{ref['comp_level']}")
+        if "power" in seen and abs(seen["power"] - ref["power"]) > 1:
+            self.civ.set_power(ref["power"])
+            fixed.append(f"PUISSANCE {seen['power']}→{ref['power']}")
+        mic, vol = self._mic_volume()
+        if mic and vol is not None and ref.get("mic_volume") and vol != ref["mic_volume"]:
+            subprocess.run(["pactl", "set-source-volume", mic, f"{ref['mic_volume']}%"],
+                           capture_output=True, env=PACTL_ENV)
+            fixed.append(f"GAIN MICRO {vol}→{ref['mic_volume']} %")
+        if fixed:
+            for k in ("usb_mod", "comp_on", "comp_level", "power"):
+                if k in ref:
+                    self.radio_tx[k] = ref[k]
+            self._mod_log("rétabli : " + ", ".join(fixed))
+            self.statusBar().showMessage("Modulation rétablie comme la référence : "
+                                         + ", ".join(fixed), 6000)
+
     # --- commandes venues de l'extérieur (Claude, scripts) ---------------------
     COMMAND_SOCKET = "ic7300-scope-commandes"
 
@@ -5650,6 +5733,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mobile": lambda: self._mobile_toggled(True),
                 "fixe": lambda: self._mobile_toggled(False),
                 "console": self.console_button.toggle,
+                "figer_modulation": self._modulation_save,
             }
             if cmd in actions:
                 actions[cmd]()
@@ -6335,6 +6419,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         length = self._wav_seconds(vox_msg_file(n))
         self.vox_msg_sending = n
+        self._modulation_enforce()              # réglages d'émission : la référence
         self.civ.set_ptt(True)
         self.tx_limit = max(TX_TIMEOUT, length + 15)
         self.tx_active = True
@@ -6919,6 +7004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.civ.vfo_operation(code)
 
     def on_power(self, raw):
+        self._radio_tx_seen("power", raw)
         self.power_slider.setEnabled(True)
         self.power_knob.setEnabled(True)
         # bouton POWER tourné il y a moins de 2 s : la radio renvoie encore
@@ -6941,6 +7027,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.civ.set_power(round(percent * 255 / 100))
 
     def on_usb_mod(self, raw):
+        self._radio_tx_seen("usb_mod", raw)
         self.alc_slider.setEnabled(True)
         self.alc_knob.setEnabled(True)
         if not self.alc_slider.isSliderDown():
@@ -7007,6 +7094,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(problem)
             self._set_ptt_button(False)
             return
+        self._modulation_enforce()              # réglages d'émission : la référence
         self.civ.set_ptt(True, data=self.tx_digital)
         if source == "file":
             # un temps pour que la radio passe en émission avant le son
@@ -8340,12 +8428,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.civ.set_comp_level(level)
 
     def on_radio_comp(self, on):
+        self._radio_tx_seen("comp_on", bool(on))
         self.comp_button.blockSignals(True)
         self.comp_button.setChecked(on)
         self.comp_button.blockSignals(False)
         self.comp_button.setText("COMP ON" if on else "COMP OFF")
 
     def on_radio_comp_level(self, level):
+        self._radio_tx_seen("comp_level", level)
         if time.monotonic() - getattr(self, "comp_knob_touched", 0) < 3:
             return                      # on vient de le tourner : la radio n'a pas fini
         self.comp_knob.setValue(level)
@@ -8565,6 +8655,9 @@ def main():
     QtWidgets.QShortcut(QtGui.QKeySequence("F10"), window, window._emission_check_toggle)
     QtWidgets.QShortcut(QtGui.QKeySequence("F9"), window, window.on_eq_button)
     window._command_server()
+    window.modulation_timer = QtCore.QTimer(window)          # modulation maintenue
+    window.modulation_timer.timeout.connect(window._modulation_enforce)
+    window.modulation_timer.start(5000)
     QtWidgets.QShortcut(QtGui.QKeySequence("F12"), window,
                         window.console_button.toggle)
     # console visible dès le démarrage, par-dessus le plein écran
