@@ -446,8 +446,8 @@ class EqEngine:
 
     @staticmethod
     def _loud(path):
-        """Copie d'écoute bien audible : parole amenée vers −11 dB, limiteur doux
-        (les enregistrements bruts sont trop faibles à l'écoute)."""
+        """Copie d'écoute bien audible et propre : parole vers −14 dB, crêtes
+        sous −1 dBFS, sans aucune saturation."""
         import wave
         with wave.open(path) as w:
             rate = w.getframerate()
@@ -457,7 +457,10 @@ class EqEngine:
         rms = np.sqrt((blocks ** 2).mean(axis=1)) if len(blocks) else np.array([1e-3])
         voice = rms[rms > 10 ** (-45 / 20)]
         level = float(np.median(voice)) if len(voice) else float(rms.max() or 1e-3)
-        y = np.tanh(x * (10 ** (-11 / 20) / level) * 1.2) / np.tanh(1.2) * 0.92
+        # mise à niveau PROPRE (pas de limiteur qui déforme) : parole vers −14 dB
+        # sans que les crêtes dépassent −1 dBFS
+        peak = float(np.abs(x).max()) or 1e-3
+        y = x * min(10 ** (-14 / 20) / level, 10 ** (-1 / 20) / peak)
         out = path[:-4] + "_ecoute.wav"
         with wave.open(out, "wb") as w:
             w.setnchannels(1)
