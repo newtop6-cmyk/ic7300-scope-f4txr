@@ -203,7 +203,7 @@ HOP = 1600                      # 30 spectres par seconde
 BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
-WF_ROWS_PER = 3                 # lignes de waterfall par image du scope (défilement ×3)
+WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (~30/s, fluide)
 MOBILE_VFO_STEP = 50_000        # VFO de l'écran MOBILE : 50 kHz par cran
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
@@ -3064,6 +3064,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wf_plot.invertY(True)
         self.wf_plot.hideButtons()
         self.wf_image = pg.ImageItem()
+        self.wf_timer = QtCore.QTimer(self)     # défilement fluide du waterfall
+        self.wf_timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self.wf_timer.timeout.connect(self._wf_tick)
         self.wf_image.setLookupTable(
             pg.colormap.get("inferno").getLookupTable(nPts=256))
         self.wf_plot.addItem(self.wf_image)
@@ -3870,19 +3873,38 @@ class MainWindow(QtWidgets.QMainWindow):
                 spin.setValue(value)
                 spin.blockSignals(False)
         row = np.asarray(row, np.float32)
-        if self.waterfall[-1].max() <= -159:
+        self._wf_target = row                   # la dernière image de la radio
+        self._wf_target_at = time.monotonic()
+        if self.waterfall[-1].max() <= -159 or self.waterfall.shape[1] != len(row):
             # tout neuf (démarrage, saut de fréquence) : rempli tout de suite,
             # pas de grande zone noire qui met une minute à se remplir
-            self.waterfall[:] = row
-        else:
-            # la radio n'envoie que ~4 images/s : chaque image donne WF_ROWS_PER
-            # lignes, fondues depuis la précédente → défilement rapide et doux
-            prev = self.waterfall[0].copy()
-            k = WF_ROWS_PER
-            self.waterfall = np.roll(self.waterfall, k, axis=0)
-            for i in range(k):
-                t = (k - i) / k
-                self.waterfall[i] = prev + (row - prev) * t
+            if self.waterfall.shape[1] == len(row):
+                self.waterfall[:] = row
+            self._wf_cur = row.copy()
+            self._wf_show()
+        if not self.wf_timer.isActive():
+            self.wf_timer.start(WF_TICK_MS)
+
+    def _wf_tick(self):
+        """Défilement fluide : une ligne toutes les WF_TICK_MS, qui glisse en
+        douceur vers la dernière image de la radio (elle n'en envoie que ~4/s)."""
+        target = getattr(self, "_wf_target", None)
+        if target is None or self.waterfall is None \
+                or self.waterfall.shape[1] != len(target):
+            return
+        if time.monotonic() - self._wf_target_at > 1.5:
+            self.wf_timer.stop()                # plus rien ne vient : on s'arrête
+            return
+        cur = getattr(self, "_wf_cur", None)
+        if cur is None or len(cur) != len(target):
+            cur = target.copy()
+        cur = cur + (target - cur) * 0.35       # glissement doux d'une image à l'autre
+        self._wf_cur = cur
+        self.waterfall = np.roll(self.waterfall, 1, axis=0)
+        self.waterfall[0] = cur
+        self._wf_show()
+
+    def _wf_show(self):
         self.wf_image.setImage(self.waterfall, autoLevels=False,
                                levels=(self.wf_low,
                                        self.wf_low + self.range_spin.value()))
@@ -3904,6 +3926,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # la fréquence a bougé : on décale l'historique d'autant
                 shift = round((old[0] - low) / ((high - low) / n))
                 self.waterfall = np.roll(self.waterfall, shift, axis=1)
+                self._wf_cur = None                 # glissement : repart de la nouvelle image
                 if shift > 0:
                     self.waterfall[:, :shift] = -160
                 elif shift < 0:
@@ -3918,6 +3941,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.avg = points if self.avg is None else 0.5 * self.avg + 0.5 * points
         step = (high - low) / n
         self.spec_curve.setData((low + (np.arange(n) + 0.5) * step) / 1000, self.avg)
+        self._station_detect(low, high)             # plaque STATIONS : QSO en cours ?
         self._add_waterfall_row(points, self.avg)
 
     def _update_rx_fine(self, points, low, high):
@@ -5389,6 +5413,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # tout de suite ; appui long = y mettre la fréquence du moment)
         self.m_stations = StationPlate(6)
         self.m_stations.set_slots(self._stations_load())
+        self._stations_save()                       # doublon F6GMO fusionné : gardé
         self.m_stations.tune.connect(self._station_tune)
         self.m_stations.store.connect(self._station_store)
         plate.addWidget(self.m_stations, 0, QtCore.Qt.AlignHCenter)
@@ -5430,16 +5455,55 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError:
             pass
 
-    STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_708_000, "mode": "LSB"},
-                        {"name": "F6GMO", "hz": 3_785_000, "mode": "LSB"}]
+    STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_708_000, "alt": [3_785_000], "mode": "LSB"}]
+    BUSY_HOLD_S = 15            # occupé : gardé 15 s après le dernier signal vu
 
     def _stations_load(self):
         slots = self._mobile_conf().get("stations") or [dict(x) for x in self.STATIONS_DEFAULT]
+        slots = [dict(x) for x in slots]
+        # doublon F6GMO (3,708 et 3,785 sur deux poussoirs) : un seul poussoir
+        first = next((x for x in slots if x.get("name") == "F6GMO"), None)
+        if first:
+            for x in slots:
+                if x is not first and x.get("name") == "F6GMO" and x.get("hz"):
+                    alt = first.setdefault("alt", [])
+                    if x["hz"] not in alt and x["hz"] != first.get("hz"):
+                        alt.append(x["hz"])
+                    x.clear()
+                    x.update({"name": "", "hz": None, "mode": ""})
+        self.station_busy = {}          # (poussoir, fréquence) → dernier signal vu
         return (slots + [{"name": "", "hz": None, "mode": ""}] * 6)[:6]
+
+    def _station_detect(self, low, high):
+        """Occupation des stations nommées : un signal BLU vu sur le scope à leur
+        fréquence (seulement si elle est dans la largeur affichée)."""
+        now = time.monotonic()
+        if now - getattr(self, "_detect_at", 0) < 0.5 or self.avg is None:
+            return
+        self._detect_at = now
+        found = {}
+        for i, slot in enumerate(self.m_stations.slots):
+            if not slot.get("name"):
+                continue
+            side = slot.get("mode") if slot.get("mode") in ("LSB", "USB") else "LSB"
+            for f in StationPlate.freqs(slot):
+                if not (low + 2000 < f < high - 2000):
+                    continue                    # hors de la vue du scope : inconnu
+                if side not in found:
+                    found[side] = find_signals(self.avg, low, high, side)
+                if any(abs(hz - f) <= 1500 for hz in found[side]):
+                    self.station_busy[(i, f)] = now
+
+    def _station_busy_freq(self, i):
+        now = time.monotonic()
+        seen = [(t, f) for (j, f), t in self.station_busy.items()
+                if j == i and now - t < self.BUSY_HOLD_S]
+        return max(seen)[1] if seen else None
 
     def _stations_save(self):
         conf = self._mobile_conf()
-        conf["stations"] = self.m_stations.slots
+        conf["stations"] = [{k: v for k, v in x.items() if not k.startswith("_")}
+                            for x in self.m_stations.slots]
         try:
             os.makedirs(os.path.dirname(self.MOBILE_CONF), exist_ok=True)
             with open(self.MOBILE_CONF, "w") as f:
@@ -5457,7 +5521,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._manual_tuning()
         name = slot.get("name") or f"M{i + 1}"
-        if not self.tune_to(slot["hz"]):
+        target = self._station_busy_freq(i) or slot["hz"]     # la fréquence occupée
+        if not self.tune_to(target):
             self.statusBar().showMessage(f"{name} : la radio ne répond pas", 5000)
             return
         mode = slot.get("mode")
@@ -5465,7 +5530,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mode_combo.setCurrentText(mode)
             self.on_mode_selected(mode)
         self.statusBar().showMessage(
-            f"{name} : {format_frequency(slot['hz'])} MHz {mode or ''}", 5000)
+            f"{name} : {format_frequency(target)} MHz {mode or ''}", 5000)
 
     def _station_store(self, i):
         """Appui long : la fréquence (et le mode) du moment va sur ce poussoir."""
@@ -5504,6 +5569,9 @@ class MainWindow(QtWidgets.QMainWindow):
             button.set_lamp(found.group(1) if found else None)
         self.m_console.set_lamp("#2fd36a" if self.console_button.isChecked() else None)
         self.m_stations.set_current(self.freq_hz)
+        blink = int(time.monotonic() / 0.35) % 2 == 0
+        for i in range(len(self.m_stations.slots)):
+            self.m_stations.set_busy(i, self._station_busy_freq(i), blink)
         self.m_knob.set_freq(self.freq_hz)              # échelle de l'arc du VFO
         tx = bool(getattr(self, "_radio_tx", False) or self.tx_active)
         self.m_tx_lamp.set_on(tx)

@@ -8,6 +8,10 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
+GRAY = "#7d807b"                  # station au repos
+RED, RED_DARK = "#ff2414", "#4a0a06"   # QSO en cours : clignote
+
+
 class MicroPush(QtWidgets.QAbstractButton):
     """Tout petit poussoir rond : bague chromée, capuchon bombé."""
 
@@ -124,13 +128,20 @@ class StationPlate(QtWidgets.QWidget):
         self._refresh_tips()
         self.update()
 
+    @staticmethod
+    def freqs(slot):
+        """Toutes les fréquences d'une station (principale + autres)."""
+        return [f for f in [slot.get("hz")] + list(slot.get("alt") or []) if f]
+
     def _refresh_tips(self):
         for b, s in zip(self.buttons, self.slots):
-            b.cap = QtGui.QColor("#b11d12" if s.get("name") else "#2b2b2b")   # nommée : rouge
+            b.cap = QtGui.QColor(GRAY if s.get("name") else "#2b2b2b")   # nommée : gris au repos
             b.update()
             if s.get("hz"):
-                b.setToolTip(f"{s.get('name') or 'Mémoire'} : {s['hz'] / 1e6:.3f} MHz "
-                             f"{s.get('mode', '')}\nClic = y aller tout de suite ; "
+                where = " ou ".join(f"{f / 1e6:.3f}" for f in self.freqs(s))
+                b.setToolTip(f"{s.get('name') or 'Mémoire'} : {where} MHz "
+                             f"{s.get('mode', '')}\nGris = libre ; rouge clignotant = QSO "
+                             "en cours (vu sur le scope)\nClic = y aller tout de suite ; "
                              "appui long = y mettre la fréquence du moment")
             else:
                 b.setToolTip("Libre : appui long (1 s) = mémoriser la fréquence du moment")
@@ -138,7 +149,20 @@ class StationPlate(QtWidgets.QWidget):
     def set_current(self, hz):
         """Allume le poussoir de la station où se trouve la radio."""
         for b, s in zip(self.buttons, self.slots):
-            b.set_lit(bool(hz and s.get("hz") and abs(s["hz"] - hz) < 500))
+            b.set_lit(bool(hz and any(abs(f - hz) < 500 for f in self.freqs(s))))
+
+    def set_busy(self, i, busy, blink):
+        """Occupation détectée : rouge clignotant ; sinon gris (station nommée)."""
+        s, b = self.slots[i], self.buttons[i]
+        if not s.get("name"):
+            return
+        color = (RED if blink else RED_DARK) if busy else GRAY
+        if b.cap.name() != QtGui.QColor(color).name():
+            b.cap = QtGui.QColor(color)
+            b.update()
+        if s.get("_busy") != busy:
+            s["_busy"] = busy
+            self.update()
 
     def _press(self, i):
         self._held, self._stored = i, False
@@ -215,8 +239,16 @@ class StationPlate(QtWidgets.QWidget):
             y = 30 + row * self.CELL_H + 31
             name = s.get("name") or (f"M{i + 1}" if s.get("hz") else "—")
             engrave(QtCore.QRectF(x, y, self.CELL_W, 14), name, 11, spacing=0.5)
-            if s.get("hz"):
+            fs = self.freqs(s)
+            if len(fs) > 1:                     # plusieurs fréquences : la occupée en gras
+                text = "·".join(f"{f / 1e6:.3f}" for f in fs)
+                busy = s.get("_busy")
+                if busy:
+                    text = f"► {busy / 1e6:.3f}"
+                engrave(QtCore.QRectF(x - 8, y + 13, self.CELL_W + 16, 12), text,
+                        9 if busy else 8, bold=bool(busy), spacing=0)
+            elif fs:
                 engrave(QtCore.QRectF(x, y + 13, self.CELL_W, 12),
-                        f"{s['hz'] / 1e6:.3f} {s.get('mode', '')}".strip(), 9,
+                        f"{fs[0] / 1e6:.3f} {s.get('mode', '')}".strip(), 9,
                         bold=False, spacing=0)
         p.end()
