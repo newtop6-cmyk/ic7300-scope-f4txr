@@ -209,6 +209,7 @@ MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapi
 WF_TICK_MS = 50                 # waterfall : une ligne toutes les 50 ms (20/s : fluide, moins lourd)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
+CLAR_MAX_HZ = 1500             # CLARIFIER : correction maximale du RIT
 DEFIL_RESTART_MS = 10_000      # SCAN DÉFILEMENT : relance 10 s après un arrêt
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
@@ -920,6 +921,16 @@ class CivReader(QtCore.QThread):
 
     def set_comp_level(self, level):
         self._pending_comp_level = level
+
+    def set_rit(self, hz):
+        """RIT (clarifier) de la radio : décalage de la RÉCEPTION seule, en Hz
+        (±9 999) ; 0 = RIT coupé. L'émission reste sur la fréquence du VFO."""
+        hz = max(-9999, min(9999, int(round(hz))))
+        a = abs(hz)
+        lo, hi = a % 100, a // 100
+        self._commands.put((0x21, 0x00, (lo // 10) << 4 | lo % 10,
+                            (hi // 10) << 4 | hi % 10, 0x01 if hz < 0 else 0x00))
+        self._commands.put((0x21, 0x01, 0x01 if hz else 0x00))
 
     def set_dial_lock(self, on):
         """LOCK de la radio : son bouton de fréquence ne fait plus rien."""
@@ -3414,6 +3425,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mot_vox_timer.timeout.connect(self._mot_vox_tick)
         vox_row.addWidget(self.vox_vocal_button)
         extras.addWidget(vox_box, 0, 7)
+        # CLARIFIER : la voix du correspondant recalée par le RIT de la radio
+        self.clar_on = False
+        self.rit_hz = 0
+        self.clar_button = QtWidgets.QPushButton("CLARIFIER")
+        self.clar_button.setCheckable(True)
+        self.clar_button.setMinimumWidth(58)
+        self.clar_button.setStyleSheet(PUSH_3D)
+        self.clar_button.setToolTip(
+            "CLARIFIER automatique (LSB/USB) : écoute la voix du correspondant et la "
+            "rend claire avec le RIT de la radio. Seule la RÉCEPTION bouge : votre "
+            "fréquence d'émission reste la même (marche aussi avec VERROU QRG). "
+            f"Correction maximale ±{CLAR_MAX_HZ} Hz. Recliquer = RIT remis à 0.")
+        self.clar_button.toggled.connect(self._clar_set)
+        extras.addWidget(self.clar_button, 0, 8)
         # ÉGALISEUR : timbre de la voix d'émission (egaliseur.py, egaliseur-voix.ini)
         self.eq_engine = EqEngine()
         self.eq_window = None
@@ -4330,6 +4355,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_frequency(hz)
 
     def _apply_frequency(self, hz):
+        if hz != self.freq_hz and getattr(self, "rit_hz", 0):
+            self._clar_apply(0, quiet=True)         # autre station : le RIT repart de 0
         if hz != self.freq_hz:
             self.audio.ssb_tuner.request_reset()    # le son d'avant ne vaut plus
             self._set_khz_candidates(hz)
@@ -4454,7 +4481,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sign = self._ssb_sign()
         if not hasattr(self, "ssb_auto"):
             return                      # fenêtre pas encore construite
-        active = bool(sign and self.ssb_auto.isChecked()
+        active = bool(sign and (self.ssb_auto.isChecked() or getattr(self, "clar_on", False))
                       and not getattr(self, "tx_active", False))
         if active and self.audio.ssb is None:
             self.audio.ssb_tuner.request_reset()
@@ -4845,6 +4872,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scan_stopped()
         if found:
             self.statusBar().showMessage("Scan arrêté : on reste sur le QSO français")
+
+    def _clar_set(self, on):
+        """Poussoir CLARIFIER : RIT recalé sur la voix ; arrêt = RIT à 0."""
+        self.clar_on = on
+        self.clar_button.setStyleSheet(PUSH_3D)
+        if on and self.civ:
+            self._clar_apply(0, quiet=True)
+            self.statusBar().showMessage("CLARIFIER : j'écoute la voix du correspondant…", 5000)
+        elif self.civ:
+            self._clar_apply(0, quiet=True)
+            self.statusBar().showMessage("CLARIFIER arrêté : RIT remis à 0", 4000)
+        self._update_ssb()
+
+    def _clar_apply(self, hz, quiet=False):
+        hz = max(-CLAR_MAX_HZ, min(CLAR_MAX_HZ, int(hz)))
+        changed = hz != self.rit_hz
+        self.rit_hz = hz
+        if self.civ:
+            self.civ.set_rit(hz)
+        self.clar_button.setText(f"CLAR. {hz:+d} Hz" if self.clar_on and hz else "CLARIFIER")
+        if changed:
+            self.audio.ssb_tuner.request_reset()    # le son d'avant ne vaut plus
+            self._log_calage(f"clarifier RIT {hz:+d}")
+            if not quiet:
+                self.statusBar().showMessage(f"CLARIFIER : voix recalée, RIT {hz:+d} Hz", 4000)
 
     def _qrg_set(self, on):
         """Interrupteur VERROU QRG (levier en bas = verrouillé)."""
@@ -5303,6 +5355,10 @@ class MainWindow(QtWidgets.QMainWindow):
         sign = self._ssb_sign()
         if not sign or self.audio.ssb is None or self.tx_active or self.freq_hz is None:
             return
+        if self.clar_on:                    # CLARIFIER : le RIT corrige, pas le VFO
+            if kind == "shift" and abs(shift) >= 10:
+                self._clar_apply(self.rit_hz + sign * round(shift))
+            return
         if kind == "flip":
             if not self.sideband_button.isChecked():
                 return
@@ -5529,7 +5585,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row.setSpacing(30)
         self.m_knob = KWM2Vfo()                     # ensemble VFO du KWM-2, à volant
         self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
-        knob_view = self._big(self.m_knob, 0.86)
+        knob_view = self._big(self.m_knob, 0.80)   # 0,86 avant le multiplicateur
         self.m_emission = EmissionButton()
         self.m_emission.is_tx = lambda: getattr(self, "vox_tx", False)
         self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
@@ -5549,13 +5605,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_clean.clicked.connect(self._emission_check_toggle)
         view = self._big(self.m_clean, 0.9)
         page.labels.append((view, "CONTRÔLE"))
-        left.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        clean_col = QtWidgets.QVBoxLayout()
+        clean_col.setSpacing(30)
+        clean_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        self.m_clar = VintagePush("CLARIFIER", 96, 40)    # = CLARIFIER de l'écran FIXE
+        self.m_clar.setCheckable(True)
+        self.m_clar.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_clar.setFixedSize(96, 40)
+        self.m_clar.setToolTip("CLARIFIER automatique : la voix du correspondant rendue "
+                               "claire par le RIT, votre émission ne bouge pas")
+        self.m_clar.clicked.connect(lambda: self.clar_button.toggle())
+        view = self._big(self.m_clar, 0.9)
+        page.labels.append((view, "CLARTÉ"))
+        clean_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        left.addLayout(clean_col)
         left_box = QtWidgets.QWidget()               # même largeur à gauche et à
         left_box.setLayout(left)                    # droite : VFO pile au centre
         left_box.setFixedWidth(500)
         row.addWidget(left_box, 0, QtCore.Qt.AlignVCenter)
         row.addStretch()
-        row.addWidget(knob_view, 0, QtCore.Qt.AlignVCenter)    # VFO au centre
+        # multiplicateur au-dessus du VFO MOBILE : 50 Hz × 1 / 10 / 100 / 1000 par cran
+        self.m_mult = self._mobile_conf().get("multiplicateur", 1)
+        if self.m_mult not in (1, 10, 100, 1000):
+            self.m_mult = 1
+        self.m_mult_push = RoundPush(f"×{self.m_mult}", 44)
+        self.m_mult_push.setToolTip("Multiplicateur du VFO : chaque appui passe au suivant, "
+                                    "×1 (50 Hz par cran) → ×10 (500 Hz) → ×100 (5 kHz) → "
+                                    "×1000 (50 kHz) → ×1")
+        self.m_mult_push.clicked.connect(self._mobile_mult_next)
+        knob_col = QtWidgets.QVBoxLayout()
+        knob_col.setSpacing(2)
+        mult_view = self._big(self.m_mult_push, 1.0)
+        page.labels.append((mult_view, "PAS"))
+        knob_col.addWidget(mult_view, 0, QtCore.Qt.AlignHCenter)
+        knob_col.addWidget(knob_view, 0, QtCore.Qt.AlignHCenter)
+        row.addLayout(knob_col)                                 # VFO au centre
         row.addStretch()
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(30)
@@ -5953,6 +6037,11 @@ class MainWindow(QtWidgets.QMainWindow):
             found = re.search(r"background:\s*(#[0-9a-fA-F]{6})", extra)
             button.set_lamp(found.group(1) if found else None)
         self.m_console.set_lamp("#2fd36a" if self.console_button.isChecked() else None)
+        if self.m_clar.isChecked() != self.clar_on:
+            self.m_clar.setChecked(self.clar_on)
+        self.m_clar.set_lamp("#2fd36a" if self.clar_on else None)
+        if self.m_clar.text() != self.clar_button.text():
+            self.m_clar.setText(self.clar_button.text())
         if self.m_qrg.isChecked() != self.qrg_locked:
             self.m_qrg.setChecked(self.qrg_locked)
         self.m_qrg.set_lamp("#e03030" if self.qrg_locked else None)
@@ -7163,13 +7252,29 @@ class MainWindow(QtWidgets.QMainWindow):
             steps += 1                      # on s'aligne d'abord sur le pas
         self.tune_to(base + steps * step)
 
+    def _mobile_mult_next(self):
+        """Multiplicateur du VFO MOBILE : ×1 → ×10 → ×100 → ×1000 → ×1."""
+        self.m_mult = 1 if self.m_mult >= 1000 else self.m_mult * 10
+        self.m_mult_push.setText(f"×{self.m_mult}")
+        conf = self._mobile_conf()
+        conf["multiplicateur"] = self.m_mult
+        try:
+            os.makedirs(os.path.dirname(self.MOBILE_CONF), exist_ok=True)
+            with open(self.MOBILE_CONF, "w") as f:
+                json.dump(conf, f)
+        except OSError:
+            pass
+        step = MOBILE_VFO_STEP * self.m_mult
+        txt = f"{step / 1000:g} kHz" if step >= 1000 else f"{step} Hz"
+        self.statusBar().showMessage(f"VFO MOBILE : ×{self.m_mult} = {txt} par cran", 4000)
+
     def _mobile_knob_tuned(self, steps):
         """VFO de l'écran MOBILE : chaque cran avance de 50 Hz (5 kHz par tour) ;
         pas d'arrondi automatique au kHz, qui défairait le réglage fin."""
         self._manual_tuning()
         if self.freq_hz is None:
             return
-        step = MOBILE_VFO_STEP
+        step = MOBILE_VFO_STEP * getattr(self, "m_mult", 1)    # multiplicateur
         base = self.freq_hz // step * step
         if steps < 0 and base != self.freq_hz:
             steps += 1                      # on s'aligne d'abord sur le pas
