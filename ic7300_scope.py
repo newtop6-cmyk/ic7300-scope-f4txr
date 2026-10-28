@@ -2940,7 +2940,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fine_switches.append((hz, None, led))
         self.vfo_step_push = RoundPush("PAS", 44)
         self.vfo_step_push.setToolTip("Pas du bouton VFO : chaque appui passe au suivant, "
-                                      "×1 (1 Hz) → ×10 → ×100 → ×1000 (1 kHz) → ×1")
+                                      "×1 (1 Hz) → ×10 (10 Hz) → ×100 (100 Hz) → "
+                                      "×1000 (1 kHz) → ×1")
         self.vfo_step_push.clicked.connect(self._vfo_step_next)
         self.vfo_step_hz = self._vfo_step_load()
         self._vfo_step_show()
@@ -2955,8 +2956,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # à droite du VFO : plaque des pas, et dessous l'interrupteur VERROU QRG
         plate_col = QtWidgets.QVBoxLayout()
         plate_col.setSpacing(1)
-        plate_col.addWidget(self.fine_plate, 0, QtCore.Qt.AlignHCenter)
-        plate_col.addSpacing(10)
+        # plaque des pas retirée à la demande (le poussoir au-dessus du VFO
+        # porte le pas en cours) : gardée cachée pour ses voyants
+        self.fine_plate.hide()
         plate_col.addWidget(NamePlate("VERROU QRG", 80), 0, QtCore.Qt.AlignHCenter)
         self.qrg_toggle.setFixedSize(60, 60)
         plate_col.addWidget(self.qrg_toggle, 0, QtCore.Qt.AlignHCenter)
