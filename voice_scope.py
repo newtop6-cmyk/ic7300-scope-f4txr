@@ -83,7 +83,9 @@ class VoiceScope(QtWidgets.QWidget):
         self.cw_env = collections.deque([0.0] * CW_POINTS, maxlen=CW_POINTS)
         # vobulation
         self.vobu = self._load_mode()       # vobulation choisie (clic sur l'écran)
-        self.tx = False                     # elle ne s'affiche qu'en émission
+        self.tx = False                     # émission : micro ; réception : son reçu
+        self.rx_reader = None               # son de la radio (vobulation en réception)
+        self.rx_buf = np.zeros(4096, np.float32)
         self._win = np.hanning(VOBU_FFT).astype(np.float32)
         freqs = np.fft.rfftfreq(VOBU_FFT, 1 / RATE)
         edges = np.geomspace(VOBU_FMIN, VOBU_FMAX, VOBU_POINTS + 1)
@@ -111,7 +113,7 @@ class VoiceScope(QtWidgets.QWidget):
             self.update()
 
     def _vobu_on(self):
-        return self.vobu and self.tx and not self.cw_mode
+        return self.vobu and not self.cw_mode       # en permanence (émission ET réception)
 
     @staticmethod
     def _load_mode():
@@ -125,11 +127,11 @@ class VoiceScope(QtWidgets.QWidget):
         if self.cw_mode:
             return
         self.setToolTip(
-            "Oscilloscope : forme d'onde de ta voix ; EN ÉMISSION, vobulation (spectre de "
-            "la voix 100 Hz à 4 kHz balayé par le spot, très sensible). "
-            "Clic : vobulation en émission arrêtée." if self.vobu else
+            "Oscilloscope en VOBULATEUR : spectre 100 Hz à 4 kHz balayé par le spot ; "
+            "en réception = son reçu (voix du correspondant), en émission = ta voix au "
+            "micro. Clic : forme d'onde de ta voix." if self.vobu else
             "Oscilloscope : la forme d'onde de ta voix au micro. "
-            "Clic : vobulation en émission.")
+            "Clic : mode vobulateur.")
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton and not self.cw_mode:
@@ -182,16 +184,36 @@ class VoiceScope(QtWidgets.QWidget):
     def set_source(self, source):
         if self.reader and self.reader.source == source:
             return
-        self.stop()
+        if self.reader:                     # seulement le micro (le son reçu continue)
+            self.reader.stop()
+            self.reader = None
         if source and source != "file":
             self.reader = MicReader(source)
             self.reader.samples.connect(self._on_samples)
             self.reader.start()
 
+    def set_rx_source(self, source):
+        """Son de la radio : vobulation en réception."""
+        if self.rx_reader:
+            self.rx_reader.stop()
+            self.rx_reader = None
+        if source:
+            self.rx_reader = MicReader(source)
+            self.rx_reader.samples.connect(self._on_rx_samples)
+            self.rx_reader.start()
+
+    def _on_rx_samples(self, x):
+        n = len(x)
+        self.rx_buf = np.roll(self.rx_buf, -n)
+        self.rx_buf[-n:] = x
+
     def stop(self):
         if self.reader:
             self.reader.stop()
             self.reader = None
+        if self.rx_reader:
+            self.rx_reader.stop()
+            self.rx_reader = None
 
     def voice_level(self):
         """Niveau de la voix 0 à 1, très sensible (≈ -55 dBFS → 0, -15 dBFS → 1),
@@ -241,7 +263,8 @@ class VoiceScope(QtWidgets.QWidget):
     def _tick_vobu(self):
         """Spectre du son le plus récent ; le spot avance et redessine la courbe
         avec ce spectre : la trace est toujours celle de la voix de l'instant."""
-        x = self.buf[-VOBU_FFT:] * self._win
+        src = self.buf if self.tx else self.rx_buf      # émission : micro ; sinon radio
+        x = src[-VOBU_FFT:] * self._win
         mag = np.abs(np.fft.rfft(x)) / (self._win.sum() / 2)
         db_bins = 20 * np.log10(np.array([mag[a:b].max() for a, b in self._bins]) + 1e-9)
         # montée immédiate, descente douce (comme le phosphore)
@@ -329,8 +352,8 @@ class VoiceScope(QtWidgets.QWidget):
             x = screen.left() + 4 + np.log(f / VOBU_FMIN) / span * (screen.width() - 8)
             p.drawLine(QtCore.QPointF(x, bottom), QtCore.QPointF(x, bottom + 3))
             p.drawText(QtCore.QRectF(x - 14, bottom + 2, 28, 10), QtCore.Qt.AlignCenter, label)
-        p.drawText(QtCore.QRectF(screen.left() + 8, screen.top() + 5, 100, 10),
-                   QtCore.Qt.AlignLeft, "VOBULATION")
+        p.drawText(QtCore.QRectF(screen.left() + 8, screen.top() + 5, 190, 10),
+                   QtCore.Qt.AlignLeft, "VOBULATION · " + ("ÉMISSION" if self.tx else "RÉCEPTION"))
         p.drawText(QtCore.QRectF(screen.right() - 80, screen.top() + 5, 72, 10),
                    QtCore.Qt.AlignRight, f"{self.noise_db:.0f} dB")
 
@@ -566,7 +589,7 @@ class VoiceScope(QtWidgets.QWidget):
         if self.cw_mode:                        # réception CW : manipulation
             self._paint_cw(p, screen, cy)
             self.traces = []
-        elif self._vobu_on():                   # en émission : spectre balayé
+        elif self._vobu_on():                   # spectre balayé (émission ou réception)
             self._paint_vobu(p, screen)
             self.traces = []
         # traces : les plus anciennes pâlissent (rémanence)

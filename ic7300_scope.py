@@ -3785,6 +3785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tx_source.findData(default_mic) >= 0:
             self.tx_source.setCurrentIndex(self.tx_source.findData(default_mic))
         self.voice_scope.set_source(self.tx_source.currentData())
+        self.voice_scope.set_rx_source(args.source)     # vobulation en réception : son reçu
         self.tx_source.currentIndexChanged.connect(
             lambda _: self.voice_scope.set_source(self.tx_source.currentData()))
         self.tx_source.setToolTip("Ce qui part à l'émission")
