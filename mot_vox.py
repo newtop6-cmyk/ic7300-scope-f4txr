@@ -95,6 +95,7 @@ class MotVox(QtCore.QObject):
                 self._start_worker()            # sinon chargé au premier besoin
             pre = deque(maxlen=PRE_BLOCKS)
             speech, quiet = [], 0
+            noise = -90.0                       # bruit de fond du micro (suivi lent)
             while self.running:
                 data = self.proc.stdout.read(BLOCK * 2)
                 if len(data) < BLOCK * 2:
@@ -106,7 +107,14 @@ class MotVox(QtCore.QObject):
                 x = np.frombuffer(data, "<i2").astype(np.float32) / 32768
                 db = 20 * np.log10(float(np.sqrt(np.mean(x * x))) + 1e-9)
                 self.last_db = max(db, self.last_db - 1.5)   # niveau affiché (retombe doucement)
-                loud = db > self.threshold
+                # bruit de fond : descend tout de suite, remonte de 1,7 dB/s.
+                # Le seuil reste 12 dB au-dessus : avec du bruit (radio sur les
+                # haut-parleurs, ventilation) la parole a encore une fin et le
+                # mot « VOX » est entendu au lieu d'une « phrase trop longue »
+                noise = db if db < noise else noise + 0.05
+                level = max(self.threshold, noise + 12)
+                self.effective = level
+                loud = db > level
                 if not speech:
                     pre.append(data)
                     if loud:
@@ -121,8 +129,9 @@ class MotVox(QtCore.QObject):
                         if len(data) < BLOCK * 2:
                             return
                         x = np.frombuffer(data, "<i2").astype(np.float32) / 32768
-                        if 20 * np.log10(float(np.sqrt(np.mean(x * x))) + 1e-9) \
-                                < self.threshold:
+                        db = 20 * np.log10(float(np.sqrt(np.mean(x * x))) + 1e-9)
+                        noise = db if db < noise else noise + 0.05
+                        if db < max(self.threshold, noise + 12):
                             quiet += 1
                             if quiet >= END_SILENCE:
                                 break

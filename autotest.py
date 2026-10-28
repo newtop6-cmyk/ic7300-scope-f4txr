@@ -61,7 +61,7 @@ add("Logiciel", "Fichiers Python", not bad,
     "tous corrects" if not bad else "erreur : " + ", ".join(bad))
 
 # 2. processus
-for name, pattern in (("Scope", "^python3 .*ic7300_scope.py"),
+for name, pattern in (("Scope", "^(/usr/bin/)?python3 .*ic7300_scope.py"),
                       ("Relais réception", "rx_relay.py"),
                       ("Flux émission", "^parec --device=ic7300_distant_tx.monitor")):
     found = bool(run(["pgrep", "-f", pattern]).strip())

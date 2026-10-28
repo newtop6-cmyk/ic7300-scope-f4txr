@@ -17,6 +17,7 @@ class PanelFrame(QtWidgets.QFrame):
         layout.setContentsMargins(MARGIN + 2, MARGIN - 1, MARGIN + 2, MARGIN + 1)
         self._sparkles = []
         self._size = None
+        self._cache = None
 
     def _make_sparkles(self):
         """Paillettes fixes (même tirage à chaque fois pour une taille donnée)."""
@@ -29,9 +30,21 @@ class PanelFrame(QtWidgets.QFrame):
         self._size = (w, h)
 
     def paintEvent(self, event):
-        if self._size != (self.width(), self.height()):
+        # dessin complet une seule fois par taille (des milliers de paillettes),
+        # ensuite on recopie l'image : l'interface reste réactive
+        if self.width() < 8 or self.height() < 8:
+            return
+        if self._size != (self.width(), self.height()) or self._cache is None:
             self._make_sparkles()
+            self._cache = QtGui.QPixmap(self.size())
+            self._cache.fill(QtCore.Qt.transparent)
+            self._paint(self._cache)
         p = QtGui.QPainter(self)
+        p.drawPixmap(event.rect(), self._cache, event.rect())
+        p.end()
+
+    def _paint(self, device):
+        p = QtGui.QPainter(device)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         w, h = self.width(), self.height()
         p.setPen(QtCore.Qt.NoPen)

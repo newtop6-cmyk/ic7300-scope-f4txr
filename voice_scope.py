@@ -96,7 +96,7 @@ class VoiceScope(QtWidgets.QWidget):
         self.sweep = 0                                # position du spot (points)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
-        self.timer.start(16)
+        self.timer.start(40)             # 25 images/s : fluide sans saturer l'interface
         self._update_tooltip()
 
     # --- vobulation / forme d'onde (clic sur l'écran) -------------------------
@@ -485,12 +485,13 @@ class VoiceScope(QtWidgets.QWidget):
         p.drawLine(QtCore.QPointF(x + 4 * np.cos(a), y + 4 * np.sin(a)),
                    QtCore.QPointF(x + 11 * np.cos(a), y + 11 * np.sin(a)))
 
-    def paintEvent(self, _):
+    def _make_layers(self):
+        """Décor fixe en deux images : dessous (écran + quadrillage), dessus (reflet)."""
         if self._case is None:
             self._paint_case()
-        p = QtGui.QPainter(self)
+        self._under = QtGui.QPixmap(self._case)
+        p = QtGui.QPainter(self._under)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
-        p.drawPixmap(0, 0, self._case)
 
         # écran : verre légèrement bombé, phosphore vert
         screen = QtCore.QRectF(26, 24, 222, self.H - 48)
@@ -501,8 +502,6 @@ class VoiceScope(QtWidgets.QWidget):
         g.setColorAt(0.7, QtGui.QColor("#06180f"))
         g.setColorAt(1, QtGui.QColor("#020805"))
         p.fillPath(path, g)
-        p.save()
-        p.setClipPath(path)
 
         # quadrillage 8 × 6 divisions, sous-graduations sur les axes
         cols, rows = 8, 6
@@ -524,6 +523,46 @@ class VoiceScope(QtWidgets.QWidget):
             y = screen.top() + k * dy / 5
             p.drawLine(QtCore.QPointF(cx - 2.5, y), QtCore.QPointF(cx + 2.5, y))
 
+        p.end()
+        self._over = QtGui.QPixmap(self.size())
+        self._over.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(self._over)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        screen = QtCore.QRectF(26, 24, 222, self.H - 48)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(screen, 14, 14)
+        p.setClipPath(path)
+        # reflet du verre et vignettage
+        g = QtGui.QLinearGradient(screen.topLeft(), screen.center())
+        g.setColorAt(0, QtGui.QColor(255, 255, 255, 38))
+        g.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        refl = QtGui.QPainterPath()
+        refl.addEllipse(QtCore.QRectF(screen.left() - 40, screen.top() - 60,
+                                      screen.width() * 0.9, screen.height() * 0.75))
+        p.fillPath(refl, g)
+        p.setClipping(False)
+        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 2))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawPath(path)
+
+        p.end()
+
+    def paintEvent(self, _):
+        if self._case is None:
+            self._paint_case()
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        # décor fixe (boîtier, écran, quadrillage) peint une seule fois
+        if getattr(self, "_under", None) is None or self._under.size() != self.size():
+            self._make_layers()
+        p.drawPixmap(0, 0, self._under)
+        screen = QtCore.QRectF(26, 24, 222, self.H - 48)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(screen, 14, 14)
+        cy = screen.center().y()
+        p.save()
+        p.setClipPath(path)
+
         if self.cw_mode:                        # réception CW : manipulation
             self._paint_cw(p, screen, cy)
             self.traces = []
@@ -536,29 +575,22 @@ class VoiceScope(QtWidgets.QWidget):
         n = len(self.traces)
         for idx, y in enumerate(self.traces):
             age = n - 1 - idx                     # 0 = trace actuelle
-            poly = QtGui.QPolygonF([QtCore.QPointF(float(a), float(cy - b * amp))
-                                    for a, b in zip(xs, y)])
+            ys = cy - np.asarray(y) * amp
+            # 1 point sur 2 (≈ 1 par pixel de l'écran) : même dessin, 2 × moins cher
+            poly = QtGui.QPolygonF([QtCore.QPointF(a, b)
+                                    for a, b in zip(xs[::2].tolist(), ys[::2].tolist())])
             fade = 0.45 ** age
-            for width, color, alpha in ((7, (60, 255, 140), 30), (3.5, (90, 255, 160), 80),
-                                        (1.4, (215, 255, 225), 230)):
-                if age and width < 3:
-                    continue                      # les anciennes : seulement le halo
+            # trace actuelle : halo + cœur ; anciennes : un trait pâle
+            # (traits épais à coins ronds = très coûteux, l'interface ramait)
+            passes = (((2.0, (90, 255, 160), 110),) if age else
+                      ((4.0, (70, 255, 150), 70), (1.4, (215, 255, 225), 230)))
+            for width, color, alpha in passes:
                 p.setPen(QtGui.QPen(QtGui.QColor(*color, int(alpha * fade)), width,
-                                    cap=QtCore.Qt.RoundCap, join=QtCore.Qt.RoundJoin))
+                                    cap=QtCore.Qt.FlatCap, join=QtCore.Qt.BevelJoin))
                 p.drawPolyline(poly)
 
-        # reflet du verre et vignettage
-        g = QtGui.QLinearGradient(screen.topLeft(), screen.center())
-        g.setColorAt(0, QtGui.QColor(255, 255, 255, 38))
-        g.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
-        refl = QtGui.QPainterPath()
-        refl.addEllipse(QtCore.QRectF(screen.left() - 40, screen.top() - 60,
-                                      screen.width() * 0.9, screen.height() * 0.75))
-        p.fillPath(refl, g)
         p.restore()
-        p.setPen(QtGui.QPen(QtGui.QColor("#000"), 2))
-        p.setBrush(QtCore.Qt.NoBrush)
-        p.drawPath(path)
+        p.drawPixmap(0, 0, self._over)          # reflet du verre + bord (fixe)
 
         # voyant ambre : brille avec la voix
         lx, ly = 299, 82

@@ -6,6 +6,7 @@ S-mètre, écoute quelques secondes et fait reconnaître la langue par Whisper
 (langue_worker.py, hors ligne). S'arrête sur le premier QSO en français."""
 
 import collections
+import datetime
 import json
 import os
 import subprocess
@@ -42,6 +43,8 @@ STRONG = 6.0                    # signal : au moins 6 unités au-dessus du fond 
 SSB_FILL = 0.45                 # forme BLU : ≥ 45 % des 2,4 kHz au-dessus du fond
 FR_PROB = 0.55                  # Whisper doit être assez sûr que c'est du français
 HOLD_S = 20                     # QSO français : on reste 20 s dessus avant de reprendre
+SCAN_STOP_S = 10                # SCAN : arrêt de 10 s tout rond sur chaque station
+EMPTY_SWEEPS = 3                # CHERCHER : 3 balayages sans rien → arrêt (plus de boucle sans fin)
 
 
 class LangueWorker(QtCore.QObject):
@@ -135,6 +138,8 @@ class QsoHunter(QtCore.QObject):
         self.saved = None
         self.band = band
         self.visited = set()
+        self.empty_sweeps = 0
+        self.lang_pending = None        # SCAN : fréquence dont Whisper cherche la langue
         self.active = True
         if w.mode_combo.currentText() != self.side:
             w.set_mode_by_hunter(self.side)
@@ -202,9 +207,16 @@ class QsoHunter(QtCore.QObject):
         return hz in self.recent
 
     def _tune(self, hz):
+        if self._transmitting():
+            return
         self.target = hz
         self.recent.append(hz)
         self.w.tune_to(hz)
+
+    def _transmitting(self):
+        """En émission (bouton, VOX, TUNE…) la fréquence ne doit JAMAIS bouger."""
+        w = self.w
+        return bool(getattr(w, "tx_active", False) or getattr(w, "_radio_tx", False))
 
     def _start_sweep(self):
         """Balayage visible de toute la portion phonie, kHz après kHz."""
@@ -259,15 +271,17 @@ class QsoHunter(QtCore.QObject):
     def _step(self):
         if not self.active:
             return
+        if self._transmitting():                # sécurité : on ne touche à rien
+            self.stop()
+            return
         if self.state == "sweep":
             if self.scan_only and self.pos > self.low:
                 hz = self._signal_here()
-                if hz:                          # station sous le curseur : on s'arrête
-                    self.resume_pos = self.pos + 2000
+                if hz:                          # station repérée : arrêt 10 s dessus
+                    self.resume_pos = max(self.pos, hz) + 2000
                     self.visited.add(hz)
-                    self.state = "settle"
                     self._tune(hz)
-                    self.timer.start(SETTLE_MS)
+                    self._scan_listen()
                     return
             if self.scan_only and self.pos > self.high:
                 self.visited.clear()            # bout de la portion : on recommence
@@ -283,11 +297,21 @@ class QsoHunter(QtCore.QObject):
                 return
             self.queue = self._candidates()
             if not self.queue:
+                self.empty_sweeps += 1
+                seen = int((self.map_count > 0).sum())
+                self._log(f"balayage sans signal n° {self.empty_sweeps} "
+                          f"({seen} cases du scope reçues)")
+                if self.empty_sweeps >= EMPTY_SWEEPS:
+                    self._say("Recherche : aucun QSO BLU trouvé après "
+                              f"{EMPTY_SWEEPS} balayages — arrêt")
+                    self.stop()
+                    return
                 if self.visited:
                     self.visited.clear()            # les stations changent : on recommence
                 self._say("Recherche : aucun signal BLU nouveau, nouveau balayage…")
                 self._start_sweep()
                 return
+            self.empty_sweeps = 0
             self._say(f"Recherche : {len(self.queue)} signal(aux) BLU à écouter")
             self._next_candidate()
         elif self.state == "settle":
@@ -306,6 +330,20 @@ class QsoHunter(QtCore.QObject):
                 self.timer.start(1000)
                 return
             self._say("Recherche : reprise du balayage…")
+            self._next_candidate()
+        elif self.state == "listen" and self.scan_only:
+            self.listen_left -= 1
+            if self.listen_left > 0:
+                self._listen_status()
+                self.timer.start(1000)
+                return
+            # 10 s écoulées : la langue est cherchée en parallèle, le scan repart
+            chunks = self.w.audio.capture or []
+            self.w.audio.capture = None
+            if chunks and self.language and self.lang_pending is None:
+                (np.concatenate(chunks) * 32767).astype("<i2").tofile(self.wavfile)
+                self.lang_pending = self.target
+                self.worker.ask(self.wavfile)
             self._next_candidate()
         elif self.state == "listen":
             self.listen_left -= 1
@@ -330,6 +368,25 @@ class QsoHunter(QtCore.QObject):
             self._say(f"Recherche : quelle langue sur {self.target / 1e6:.3f} MHz ?")
             self.worker.ask(self.wavfile)
 
+    def _scan_listen(self):
+        """SCAN : arrêt sur la station, 10 s comptées dès l'arrivée."""
+        self.state = "listen"
+        self.heard.emit(self.target or self.pos, self.side)
+        self.s_peak = 0
+        self.listen_left = SCAN_STOP_S
+        self.listened = 0
+        self.w.audio.capture = []
+        self._listen_status()
+        self.timer.start(1000)
+
+    def _log(self, text):
+        try:
+            with open(os.path.join(HERE, "recherche.log"), "a") as fh:
+                fh.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
+                         f"{self.label} : {text}\n")
+        except OSError:
+            pass
+
     def _listen_status(self, calibrating=False):
         where = self.w.freq_hz or self.target
         if calibrating:
@@ -344,8 +401,10 @@ class QsoHunter(QtCore.QObject):
         if w.avg is None or not w.scope_edges:
             return None
         cur = w.freq_hz or self.pos
+        # du curseur jusqu'à 3 kHz devant (le scope a un peu de retard sur le
+        # curseur : sinon des stations passaient sans arrêt)
         near = [hz for hz in find_signals(w.avg, *w.scope_edges, self.side)
-                if abs(hz - cur) <= 1000 and self.low - 3000 <= hz <= self.high + 3000
+                if cur - 1000 <= hz <= cur + 3000 and self.low - 3000 <= hz <= self.high + 3000
                 and all(abs(hz - v) > 2000 for v in self.visited)]
         return min(near, key=lambda hz: abs(hz - cur)) if near else None
 
@@ -365,7 +424,19 @@ class QsoHunter(QtCore.QObject):
         self.timer.start(SETTLE_MS)
 
     def _on_language(self, res):
-        if res.get("ready") or not self.active or self.state != "whisper":
+        if res.get("ready"):
+            return
+        if self.scan_only:
+            # SCAN : la langue n'arrête jamais le scan, simple information
+            where_hz, self.lang_pending = self.lang_pending, None
+            if not self.active or where_hz is None:
+                return
+            lang, prob = res.get("lang"), res.get("prob", 0.0)
+            self._log(f"{where_hz / 1e6:.3f} MHz = {lang or '?'} ({prob:.0%})")
+            if lang == "fr" and prob >= FR_PROB:
+                self.found.emit(where_hz, res.get("text", ""))
+            return
+        if not self.active or self.state != "whisper":
             return
         lang, prob = res.get("lang"), res.get("prob", 0.0)
         where = f"{self.target / 1e6:.3f} MHz"

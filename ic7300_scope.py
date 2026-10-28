@@ -38,6 +38,7 @@ from wf_france import WaterfallFrance
 from screen_rec import ScreenRecorder
 from sstv_window import SstvWindow
 import sstv as sstv_modes
+import veille_blocages
 from sstv_watch import SstvWatch
 from ssb_tuner import SsbTuner, D_MAX, D_WIDE
 import console
@@ -205,7 +206,7 @@ HOP = 1600                      # 30 spectres par seconde
 BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
-WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (~30/s, fluide)
+WF_TICK_MS = 50                 # waterfall : une ligne toutes les 50 ms (20/s : fluide, moins lourd)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
@@ -4786,8 +4787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._mute_guard)   # QSO français : le son revient
         QtWidgets.QApplication.beep()
         self.statusBar().showMessage(
-            f"QSO français sur {hz / 1e6:.3f} MHz : écoute verrouillée — "
-            "appuyer sur CHERCHER QSO FR pour reprendre le scan")
+            f"QSO français entendu sur {hz / 1e6:.3f} MHz (le scan continue)", 15000)
 
     # --- décodage CW -------------------------------------------------
     def on_cw_toggled(self, on):
@@ -5752,6 +5752,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "fixe": lambda: self._mobile_toggled(False),
                 "console": self.console_button.toggle,
                 "figer_modulation": self._modulation_save,
+                "profil": veille_blocages.profile,      # 20 s → profil.txt
             }
             if cmd in actions:
                 actions[cmd]()
@@ -6437,8 +6438,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         length = self._wav_seconds(vox_msg_file(n))
         self.vox_msg_sending = n
+        self._stop_searches("Émission : SCAN / recherche arrêtés")
+        self.civ.set_ptt(True)                  # PTT d'abord : départ immédiat
         self._modulation_enforce()              # réglages d'émission : la référence
-        self.civ.set_ptt(True)
         self.tx_limit = max(TX_TIMEOUT, length + 15)
         self.tx_active = True
         self.tx_galva.set_tx(True)
@@ -6910,6 +6912,37 @@ class MainWindow(QtWidgets.QMainWindow):
         return (time.monotonic() - chosen[1] <= CALAGE_WINDOW_S
                 and abs(hz - chosen[0]) <= CALAGE_MAX_HZ)
 
+    def _stop_searches(self, why=""):
+        """Arrête tout de suite SCAN, CHERCHER QSO FR et DÉCODAGE CW balayé.
+        Appelé dès qu'on émet (bouton, VOX, VOX1, TUNE) et par Échap."""
+        stopped = False
+        if self.cw_hunter.active:
+            self.cw_hunter.stop()
+            stopped = True
+        if self.scanner.active or self.scan_button.isChecked():
+            self.scanner.stop()
+            self.scan_button.blockSignals(True)
+            self.scan_button.setChecked(False)
+            self.scan_button.blockSignals(False)
+            self._scan_stopped()
+            stopped = True
+        if self.hunter.active or self.hunt_button.isChecked():
+            self.hunter.stop()
+            self.hunt_button.blockSignals(True)
+            self.hunt_button.setChecked(False)
+            self.hunt_button.blockSignals(False)
+            if hasattr(self, "_hunt_blinking"):
+                self._hunt_blinking(False)
+            stopped = True
+        for push in (getattr(self, "m_scan", None), getattr(self, "m_hunt", None)):
+            if push is not None and push.isChecked():
+                push.setChecked(False)
+        if stopped:
+            self._mute_guard()
+            if why:
+                self.statusBar().showMessage(why, 5000)
+        return stopped
+
     def _manual_tuning(self):
         """L'opérateur règle la fréquence lui-même : toute recherche automatique
         (DÉCODAGE CW, SCAN, CHERCHER QSO FR) s'arrête et la fréquence reste là."""
@@ -7112,8 +7145,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(problem)
             self._set_ptt_button(False)
             return
+        # la fréquence ne doit plus bouger : scan / recherche arrêtés AVANT l'émission
+        self._stop_searches("Émission : SCAN / recherche arrêtés")
+        self.civ.set_ptt(True, data=self.tx_digital)    # PTT d'abord : départ immédiat
         self._modulation_enforce()              # réglages d'émission : la référence
-        self.civ.set_ptt(True, data=self.tx_digital)
         if source == "file":
             # un temps pour que la radio passe en émission avant le son
             QtCore.QTimer.singleShot(400, self._play_tx_file)
@@ -7440,6 +7475,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_transmitting(self, tx):
         self._radio_tx = tx                 # voyants de l'écran MOBILE
+        if tx:
+            self._stop_searches("La radio émet : SCAN / recherche arrêtés")
         if self.cw_station is not None:
             self.cw_station.set_tx(tx)      # cadre EMISSION plus vif pendant l'émission
         self.voice_scope.set_tx(tx)        # vobulation seulement en émission
@@ -7547,6 +7584,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_emergency(self):
         """ARRÊT D'URGENCE : coupe tout ce qui peut émettre, tout de suite."""
+        self._stop_searches()
         acknowledge = self.emergency_button.flashing   # appui pendant les flashs : fin
         if acknowledge:
             self.emergency_button.set_flashing(False)
@@ -7579,6 +7617,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not acknowledge:
             QtCore.QTimer.singleShot(5000, self._emergency_flash)
 
+    def on_escape(self):
+        """Touche Échap : scan / recherche arrêtés et retour en réception."""
+        self._stop_searches()
+        if self.tx_active or getattr(self, "_radio_tx", False):
+            self.on_emergency()
+        else:
+            self.statusBar().showMessage("Échap : tout est arrêté", 4000)
+
     def _emergency_flash(self):
         """5 s après l'arrêt d'urgence : flashs par séries de 3 (nouvel appui = fin)."""
         if time.monotonic() - getattr(self, "emergency_at", 0) >= 4.9:
@@ -7586,6 +7632,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_tune(self):
         if self.civ:
+            self._stop_searches("Accord : SCAN / recherche arrêtés")
             self.civ.tune()
             # flash dès l'appui ; la radio peut répondre « pas d'accord » juste
             # avant de commencer : on attend qu'elle annonce l'accord (3 s au
@@ -8630,7 +8677,11 @@ def main():
 
     pg.setConfigOptions(imageAxisOrder="row-major", antialias=True,
                         background="#101418")
-    app = QtWidgets.QApplication(sys.argv)
+    # les fils de calcul du son gardaient Python jusqu'à 5 ms d'affilée : chaque
+    # dessin, touche ou clic attendait son tour → interface figée. 1 ms : réactif
+    sys.setswitchinterval(0.001)
+    app = (veille_blocages.TimedApp(sys.argv) if os.environ.get("SCOPE_MESURE")
+           else QtWidgets.QApplication(sys.argv))
     # un seul IC-7300 Scope à la fois : deux se disputeraient la radio (CAT)
     # et le second démonterait le son du premier (relais orphelins)
     lock = QtCore.QLockFile(os.path.join(tempfile.gettempdir(), "ic7300-scope.lock"))
@@ -8672,7 +8723,10 @@ def main():
     QtWidgets.QShortcut(QtGui.QKeySequence("F11"), window, toggle_full_screen)
     QtWidgets.QShortcut(QtGui.QKeySequence("F10"), window, window._emission_check_toggle)
     QtWidgets.QShortcut(QtGui.QKeySequence("F9"), window, window.on_eq_button)
+    # Échap : tout arrêter (scan, recherche, émission)
+    QtWidgets.QShortcut(QtGui.QKeySequence("Esc"), window, window.on_escape)
     window._command_server()
+    veille_blocages.start(window)       # blocages.log + profil.txt
     window.modulation_timer = QtCore.QTimer(window)          # modulation maintenue
     window.modulation_timer.timeout.connect(window._modulation_enforce)
     window.modulation_timer.start(5000)
