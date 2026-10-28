@@ -101,22 +101,56 @@ def paint_frame(p, rect):
     p.setBrush(QtCore.Qt.NoBrush)
     p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 80), 1))
     p.drawRoundedRect(r.adjusted(1.5, 1.5, -1.5, -1.5), 8, 8)
-    # biseau chromé autour de la vitre
-    bez = r.adjusted(6, 6, -6, -6)
-    bg = QtGui.QLinearGradient(0, bez.top(), 0, bez.bottom())
-    for stop, col in ((0, "#3a3c3a"), (0.5, "#bfc2be"), (1, "#f4f5f3")):
+    # biseau chromé ÉPAIS autour de la vitre (lumière en haut-gauche)
+    bez = r.adjusted(5, 5, -5, -5)
+    bg = QtGui.QLinearGradient(bez.topLeft(), bez.bottomRight())
+    for stop, col in ((0, "#2e302e"), (0.35, "#8e918d"), (0.6, "#e7e9e5"), (1, "#ffffff")):
         bg.setColorAt(stop, QtGui.QColor(col))
     p.setBrush(bg)
     p.setPen(QtGui.QPen(QtGui.QColor("#0b0b0b"), 1))
-    p.drawRoundedRect(bez, 6, 6)
-    glass = bez.adjusted(3, 3, -3, -3)
+    p.drawRoundedRect(bez, 7, 7)
+    # gorge noire : la vitre est enfoncée sous le biseau
+    groove = bez.adjusted(4, 4, -4, -4)
+    p.setBrush(QtGui.QColor("#030303"))
+    p.setPen(QtCore.Qt.NoPen)
+    p.drawRoundedRect(groove, 5, 5)
+    glass = groove.adjusted(2, 2, -2, -2)
     gg = QtGui.QLinearGradient(0, glass.top(), 0, glass.bottom())
-    gg.setColorAt(0, QtGui.QColor("#070101"))
-    gg.setColorAt(0.5, QtGui.QColor("#1c0403"))
-    gg.setColorAt(1, QtGui.QColor("#0d0201"))
+    gg.setColorAt(0, QtGui.QColor("#060101"))
+    gg.setColorAt(0.55, QtGui.QColor("#220503"))
+    gg.setColorAt(1, QtGui.QColor("#100201"))
     p.setBrush(gg)
-    p.setPen(QtGui.QPen(QtGui.QColor("#000"), 1))
     p.drawRoundedRect(glass, 4, 4)
+    # rétroéclairage rouge : lueur au centre de la vitre…
+    p.save()
+    clip = QtGui.QPainterPath()
+    clip.addRoundedRect(glass, 4, 4)
+    p.setClipPath(clip)
+    glow = QtGui.QRadialGradient(glass.center(), glass.width() * 0.6)
+    glow.setColorAt(0, QtGui.QColor(255, 40, 15, 60))
+    glow.setColorAt(1, QtGui.QColor(255, 40, 15, 0))
+    p.fillRect(glass, glow)
+    # …et ombre intérieure (haut et côtés dans l'ombre du biseau : profondeur)
+    depth = 7.0
+    for edge in ("top", "left", "right", "bottom"):
+        if edge == "top":
+            g2 = QtGui.QLinearGradient(0, glass.top(), 0, glass.top() + depth * 1.4)
+        elif edge == "bottom":
+            g2 = QtGui.QLinearGradient(0, glass.bottom(), 0, glass.bottom() - depth * 0.6)
+        elif edge == "left":
+            g2 = QtGui.QLinearGradient(glass.left(), 0, glass.left() + depth, 0)
+        else:
+            g2 = QtGui.QLinearGradient(glass.right(), 0, glass.right() - depth, 0)
+        alpha = 230 if edge == "top" else 120 if edge != "bottom" else 70
+        g2.setColorAt(0, QtGui.QColor(0, 0, 0, alpha))
+        g2.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+        p.fillRect(glass, g2)
+    p.restore()
+    # la lueur rouge déborde sur le bord intérieur du biseau
+    p.setBrush(QtCore.Qt.NoBrush)
+    for i, a in ((1, 90), (2, 50), (3, 25)):
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 50, 20, a), 1))
+        p.drawRoundedRect(groove.adjusted(-i, -i, i, i), 5 + i, 5 + i)
     return glass
 
 
