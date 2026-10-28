@@ -322,6 +322,9 @@ PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO B
 # choisie que peu après le choix, et jamais loin ; ensuite elle ne bouge plus.
 CALAGE_WINDOW_S = 60            # s après le choix de la fréquence
 CALAGE_MAX_HZ = 3000            # Hz d'écart maximal avec la fréquence choisie
+STUCK_MIN_HZ = 150              # calage refusé : écart minimal qui compte
+STUCK_COUNT = 3                 # refus de suite dans le même sens → kHz voisin
+STUCK_MAX_HZ = 2000             # au plus 2 kHz de la fréquence d'arrivée
 CALAGE_FINE_HZ = 350            # au-delà de la fenêtre : affinage permis à ± 350 Hz du choix
 ECHO_TIMEOUT_S = 3.0            # s : attente de la confirmation de la radio
 PULL_SECONDS = 45               # durée du rattrapage
@@ -5265,6 +5268,43 @@ class MainWindow(QtWidgets.QMainWindow):
             self.whistle.precise = False            # recherche : suit l'aiguille
             self.whistle.offset = meter.needle_hz()
 
+    def _calage_stuck(self, target):
+        """Corrections refusées, toujours dans le même sens (≥ 150 Hz) : la station
+        est sur le kHz rond voisin (ex. scan arrêté sur 3,761 pour un QSO sur
+        3,760). Après 3 refus de suite, on y saute ; au plus 2 kHz de l'arrivée."""
+        move = target - self.freq_hz
+        if abs(move) < STUCK_MIN_HZ or self.tx_active or getattr(self, "qrg_locked", False):
+            self._stuck = None
+            return
+        way = 1 if move > 0 else -1
+        st = getattr(self, "_stuck", None)
+        if not st or st["way"] != way or st["freq"] != self.freq_hz:
+            st = self._stuck = {"way": way, "count": 0, "freq": self.freq_hz}
+        origin = getattr(self, "_calage_origin", None) or self.freq_hz
+        st["count"] += 1
+        if st["count"] < STUCK_COUNT:
+            return
+        new = round(self.freq_hz / 1000) * 1000
+        if (new - self.freq_hz) * way <= 0:
+            new += way * 1000                       # le kHz rond suivant dans ce sens
+        if abs(new - origin) > STUCK_MAX_HZ:
+            self._log_calage(f"saut refusé vers {new} (trop loin de {origin})")
+            st["count"] = 0
+            return
+        self._log_calage(f"voix insistante : saut au kHz {new}")
+        self.statusBar().showMessage(
+            f"Calage BLU : la voix est sur {format_frequency(new)} MHz, j'y vais", 6000)
+        st.update(count=0, freq=new)
+        self.ssb_anchor = new
+        self.ssb_target = new
+        self.ssb_recentred = False
+        self._stuck_jump = True                     # l'arrivée reste la même
+        try:
+            self.tune_to(new)                       # nouveau choix : fenêtre de calage neuve
+        finally:
+            self._stuck_jump = False
+        self.ssb_meter.set_state("search", status="kHz voisin, recalage…")
+
     def _log_calage(self, text):
         try:                            # journal pour vérifier les corrections
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -5413,6 +5453,7 @@ class MainWindow(QtWidgets.QMainWindow):
         target = self.freq_hz + sign * round(shift)
         if not self._calage_ok(target):
             self._log_calage(f"verrou {shift:+.0f}")
+            self._calage_stuck(target)
             return
         if self._pulling():
             # rattrapage : on suit la voix du correspondant, même hors du kHz rond
@@ -5429,9 +5470,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage(
                     f"Calage auto BLU : station trouvée sur {format_frequency(target)} MHz", 6000)
         elif self.ssb_anchor is None or abs(target - self.ssb_anchor) > FINE_MAX:
-            # trop loin du kHz rond : sans doute une erreur, on ne bouge pas
+            # trop loin du kHz rond : sans doute une erreur, on ne bouge pas…
             self._log_calage(f"refus {shift:+.0f}")
+            self._calage_stuck(target)          # …sauf si la voix insiste (kHz voisin)
             return
+        self._stuck = None
         self._log_calage(f"affinage {shift:+.0f}")
         self.ssb_meter.set_state("measure", shift, f"correction {shift:+.0f} Hz")
         self.statusBar().showMessage(f"Calage BLU : correction de {shift:+.0f} Hz", 4000)
@@ -5510,6 +5553,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         else:
             self._chosen = (hz, now)            # nouvelle fréquence choisie
+            if not getattr(self, "_stuck_jump", False):
+                self._calage_origin = hz        # arrivée (scan, VFO, station…)
         self._pending = (hz, now)               # en attente de confirmation radio
         self._spy(f"SCOPE {self.freq_hz} -> {hz}{' calage' if calage else ''}", stack=True)
         self._apply_frequency(hz)
