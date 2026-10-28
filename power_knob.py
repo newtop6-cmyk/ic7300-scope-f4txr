@@ -143,18 +143,37 @@ class VintageKnob(QtWidgets.QWidget):
         event.accept()
 
     def _set_anchor(self, gpos):
-        self._anchor = (gpos.x(), gpos.y(), float(self.value),
+        self._anchor = [gpos.x(), gpos.y(), float(self.value),
                         bool(QtWidgets.QApplication.keyboardModifiers()
-                             & QtCore.Qt.ControlModifier))
+                             & QtCore.Qt.ControlModifier), self._angle_at(gpos)]
+
+    def _angle_at(self, gpos):
+        """Angle (degrés, sens horaire) du pointeur autour du centre du bouton,
+        ou None s'il est trop près du centre pour être fiable."""
+        c = self.mapToGlobal(self.rect().center())
+        dx, dy = gpos.x() - c.x(), gpos.y() - c.y()
+        if dx * dx + dy * dy < (self.width() * 0.3) ** 2:
+            return None
+        return math.degrees(math.atan2(dy, dx))
 
     def _fine_value(self, gpos):
-        """Valeur d'après le déplacement depuis le point de départ (relatif)."""
+        """Valeur suivie pas à pas : en tournant autour du bouton, il suit le
+        doigt (sens horaire = plus) ; près du centre, glisser vers le haut ou
+        la droite = plus. Ctrl = 4 fois plus fin."""
         ctrl = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ControlModifier)
-        if self._anchor is None or ctrl != self._anchor[3]:
-            self._set_anchor(gpos)              # Ctrl appuyé/lâché : repart d'ici, sans saut
-        x0, y0, v0, ctrl = self._anchor
-        rate = self.maximum / 400 / (4 if ctrl else 1)
-        return v0 + ((y0 - gpos.y()) + (gpos.x() - x0)) * rate
+        if self._anchor is None:
+            self._set_anchor(gpos)
+        x0, y0, v, _, a0 = self._anchor
+        fine = 4 if ctrl else 1
+        a1 = self._angle_at(gpos)
+        if a0 is not None and a1 is not None:
+            d = (a1 - a0 + 180) % 360 - 180            # tour complet sans saut
+            v += d / SWEEP * self.maximum / fine
+        else:
+            v += ((y0 - gpos.y()) + (gpos.x() - x0)) * self.maximum / 250 / fine
+        v = max(0.0, min(float(self.maximum), v))
+        self._anchor = [gpos.x(), gpos.y(), v, ctrl, a1]
+        return v
 
     def _release(self):
         if not self._dragging:
