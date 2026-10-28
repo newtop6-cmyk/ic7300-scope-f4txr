@@ -208,6 +208,7 @@ HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
 WF_TICK_MS = 50                 # waterfall : une ligne toutes les 50 ms (20/s : fluide, moins lourd)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
+VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
 DEFIL_RESTART_MS = 10_000      # SCAN DÉFILEMENT : relance 10 s après un arrêt
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
@@ -2883,42 +2884,47 @@ class MainWindow(QtWidgets.QMainWindow):
         # plaque argentée à droite du VFO : 4 interrupteurs de pas fin, un seul actif
         self.fine_plate = RustPlate()           # tôle rouillée militaire
         plate_grid = QtWidgets.QGridLayout(self.fine_plate)
-        plate_grid.setContentsMargins(14, 12, 10, 12)
-        plate_grid.setVerticalSpacing(3)           # inscription juste au-dessus du levier
-        plate_grid.setHorizontalSpacing(4)
-        self.fine_switches = []             # (pas en Hz, interrupteur, LED)
-        for row, (hz, text) in enumerate(((1, "1 Hz"), (10, "10 Hz"),
-                                          (100, "100 Hz"), (1000, "1 kHz"))):
-            name = QtWidgets.QLabel(text)           # inscription en relief, au-dessus
-            name.setAlignment(QtCore.Qt.AlignCenter)
-            name.setStyleSheet("font: 900 10pt 'DejaVu Sans Condensed'; color: #1a1206; "
-                               "letter-spacing: 1px; background: transparent;")
-            relief = QtWidgets.QGraphicsDropShadowEffect(name)
-            relief.setOffset(1, 1)                  # pochoir noir, liseré clair
-            relief.setBlurRadius(0)
-            relief.setColor(QtGui.QColor(255, 240, 215, 200))
-            name.setGraphicsEffect(relief)
-            sw = MilitaryLever("", "", width=84, height=34)   # levier acier gauche ↔ droite
-            sw.setToolTip(f"Pas du bouton VFO : {text} (levier à droite = enclenché)")
-            led = AmberLed(size=20, period_ms=70)       # voyant ambre, flash très rapide
-            plate_grid.addWidget(name, 2 * row, 0, QtCore.Qt.AlignHCenter)   # pile au-dessus du levier
-            plate_grid.addWidget(sw, 2 * row + 1, 0)
-            plate_grid.addWidget(led, 2 * row + 1, 1)
-            sw.toggled.connect(lambda on, h=hz: self._fine_step_toggled(h, on))
-            self.fine_switches.append((hz, sw, led))
-        self._vfo_step_leds(False)
+        plate_grid.setContentsMargins(11, 14, 9, 12)
+        plate_grid.setVerticalSpacing(6)
+        plate_grid.setHorizontalSpacing(3)
+        # UN seul visuel : les 4 pas dans l'ordre, un voyant chacun, et un
+        # poussoir rond dessous ; chaque appui passe au pas suivant
+        # ×1 (1 Hz) → ×10 → ×100 → ×1000 (1 kHz) → ×1
+        self.fine_switches = []             # (pas en Hz, None, LED)
+        self.vfo_step_labels = {}           # pas → inscriptions (mise en évidence)
+        for row, (hz, mult, text) in enumerate(((1, "×1", "1 Hz"), (10, "×10", "10 Hz"),
+                                                (100, "×100", "100 Hz"),
+                                                (1000, "×1000", "1 kHz"))):
+            for col, (txt, pt) in enumerate(((mult, 11), (text, 8))):
+                name = QtWidgets.QLabel(txt)        # inscription pochoir en relief
+                name.setAlignment(QtCore.Qt.AlignVCenter
+                                  | (QtCore.Qt.AlignLeft if col == 0 else QtCore.Qt.AlignRight))
+                name.setStyleSheet(f"font: 900 {pt}pt 'DejaVu Sans Condensed'; color: #1a1206; "
+                                   "letter-spacing: 1px; background: transparent;")
+                relief = QtWidgets.QGraphicsDropShadowEffect(name)
+                relief.setOffset(1, 1)
+                relief.setBlurRadius(0)
+                relief.setColor(QtGui.QColor(255, 240, 215, 200))
+                name.setGraphicsEffect(relief)
+                name.setProperty("pt", pt)
+                plate_grid.addWidget(name, row, col)
+                self.vfo_step_labels.setdefault(hz, []).append(name)
+            led = AmberLed(size=20, period_ms=70)
+            led.setToolTip(f"Pas du bouton VFO : {text} par cran")
+            plate_grid.addWidget(led, row, 2)
+            self.fine_switches.append((hz, None, led))
+        self.vfo_step_push = RoundPush("PAS", 56)
+        self.vfo_step_push.setToolTip("Pas du bouton VFO : chaque appui passe au suivant, "
+                                      "×1 (1 Hz) → ×10 → ×100 → ×1000 (1 kHz) → ×1")
+        self.vfo_step_push.clicked.connect(self._vfo_step_next)
+        plate_grid.addWidget(self.vfo_step_push, 4, 0, 1, 3, QtCore.Qt.AlignHCenter)
+        self.vfo_step_hz = self._vfo_step_load()
+        self._vfo_step_show()
         self.other_label = QtWidgets.QLabel("")
         self.other_label.setAlignment(QtCore.Qt.AlignCenter)
         self.other_label.setStyleSheet("font: 11pt monospace; color: #90a4ae;")
         self.other_label.setToolTip("L'autre VFO")
         self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
-        # micro poussoir rond au-dessus du VFO : pas × 1 → × 10 → × 100 → × 1000
-        self.vfo_mult = 1
-        self.vfo_mult_push = RoundPush("×1", 40)
-        self.vfo_mult_push.setToolTip("Multiplie le pas du bouton VFO : chaque appui passe "
-                                      "à ×1 → ×10 → ×100 → ×1000 → ×1")
-        self.vfo_mult_push.clicked.connect(self._vfo_mult_next)
-        vfo.addWidget(self.vfo_mult_push, 0, 0, 1, 4, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignBottom)
         vfo.addWidget(self.knob, 1, 0, 1, 4, QtCore.Qt.AlignCenter)
         vfo.addWidget(self.fine_plate, 1, 4, QtCore.Qt.AlignVCenter)   # à droite du VFO
         vfo.setColumnMinimumWidth(5, BAND_SEL_GAP)
@@ -7042,19 +7048,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_to(base + steps * step)
 
     def _fine_step(self):
-        """Pas fin enclenché sur la plaque (Hz), ou None."""
-        return next((hz for hz, sw, _ in self.fine_switches if sw.isChecked()), None)
+        """Pas du bouton VFO choisi sur la plaque (Hz)."""
+        return getattr(self, "vfo_step_hz", None)
 
-    def _fine_step_toggled(self, hz, on):
-        if on:                              # un seul pas fin à la fois
-            for other, sw, _ in self.fine_switches:
-                if other != hz and sw.isChecked():
-                    sw.blockSignals(True)
-                    sw.setChecked(False)
-                    sw.blockSignals(False)
-        for other, sw, led in self.fine_switches:
-            led.set_mode("blink" if sw.isChecked() else "off")
-        self._vfo_step_leds(self.vfo_step_switch.isChecked())
+    def _vfo_step_load(self):
+        try:
+            with open(VFO_STEP_FILE) as f:
+                hz = json.load(f)["pas"]
+            return hz if hz in (1, 10, 100, 1000) else 1000
+        except (OSError, ValueError, KeyError, TypeError):
+            return 1000
+
+    def _vfo_step_next(self):
+        """Poussoir PAS : ×1 → ×10 → ×100 → ×1000 → ×1."""
+        self.vfo_step_hz = 1 if self.vfo_step_hz >= 1000 else self.vfo_step_hz * 10
+        self._vfo_step_show()
+        try:
+            os.makedirs(os.path.dirname(VFO_STEP_FILE), exist_ok=True)
+            with open(VFO_STEP_FILE, "w") as f:
+                json.dump({"pas": self.vfo_step_hz}, f)
+        except OSError:
+            pass
+        txt = "1 kHz" if self.vfo_step_hz == 1000 else f"{self.vfo_step_hz} Hz"
+        self.statusBar().showMessage(f"VFO : pas ×{self.vfo_step_hz} = {txt} par cran", 4000)
+
+    def _vfo_step_show(self):
+        """Pas en cours bien visible : voyant allumé fixe, inscription rouge vif
+        et plus grosse, les autres pâlies ; le poussoir porte le facteur."""
+        for hz, _, led in self.fine_switches:
+            cur = hz == self.vfo_step_hz
+            led.set_mode("on" if cur else "off")
+            for name in self.vfo_step_labels.get(hz, []):
+                pt = name.property("pt") + (1 if cur else 0)
+                color = "#d40000" if cur else "rgba(26, 18, 6, 110)"
+                name.setStyleSheet(f"font: 900 {pt}pt 'DejaVu Sans Condensed'; color: {color}; "
+                                   "background: transparent;")
+        self.vfo_step_push.setText(f"×{self.vfo_step_hz}")
 
     def _vfo_step_leds(self, on_100k):
         fine = hasattr(self, "fine_switches") and self._fine_step() is not None
@@ -7068,19 +7097,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.freq_hz is None:
             return
         step = self._fine_step() or self.step_combo.currentData()   # sinon : pas du menu
-        step *= self.vfo_mult                       # micro poussoir ×1…×1000
         base = self.freq_hz // step * step
         if steps < 0 and base != self.freq_hz:
             steps += 1                      # on s'aligne d'abord sur le pas
         self.tune_to(base + steps * step)
-
-    def _vfo_mult_next(self):
-        """Micro poussoir au-dessus du VFO : ×1 → ×10 → ×100 → ×1000 → ×1."""
-        self.vfo_mult = 1 if self.vfo_mult >= 1000 else self.vfo_mult * 10
-        self.vfo_mult_push.setText(f"×{self.vfo_mult}")
-        step = (self._fine_step() or self.step_combo.currentData()) * self.vfo_mult
-        txt = f"{step / 1000:g} kHz" if step >= 1000 else f"{step} Hz"
-        self.statusBar().showMessage(f"VFO : pas ×{self.vfo_mult} = {txt} par cran", 4000)
 
     def _mobile_knob_tuned(self, steps):
         """VFO de l'écran MOBILE : chaque cran avance de 50 Hz (5 kHz par tour) ;
