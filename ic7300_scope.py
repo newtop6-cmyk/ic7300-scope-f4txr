@@ -53,6 +53,7 @@ from vox_pc import VoxMonitor
 from mot_vox import MotVox, vox_number
 from voix_vox import LEARN_COUNT, VoiceCommands, features
 from dictee import Dictee, paste_into, split_send
+from traduction import TranslationWindow, Translator
 import timbre_qso
 from voice_scope import VoiceScope
 from power_knob import MODE as KNOB_MODE, NamePlate, PowerKnob, VintageKnob, ScaleBakelite
@@ -2350,6 +2351,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "Nouvel appui pendant l'écoute = fin tout de suite. Mots mal compris : "
             "dictee-corrections.txt ; vocabulaire : dictee-vocabulaire.txt.")
         self.dictee_button.clicked.connect(self._dictee_click)
+        # TRADUCTION : la réception traduite en français, en direct, dans une fenêtre
+        self.translator = Translator()
+        self.translation_window = None
+        self.translate_button = QtWidgets.QPushButton("TRADUC-\nTION")
+        self.translate_button.setCheckable(True)
+        self.translate_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.translate_button.setStyleSheet(PUSH_YELLOW_3D + "QPushButton { font-size: 7pt; }")
+        self.translate_button.setToolTip(
+            "TRADUCTION : appui = une fenêtre s'ouvre et traduit en français, en direct, "
+            "ce que dit la station reçue (langue reconnue, texte d'origine, français en "
+            "gros). Hors ligne ; 5 à 10 s de décalage. Nouvel appui = fermer.")
+        self.translate_button.toggled.connect(self._translate_toggled)
         # REC BF : son seul (réception + émission + micro) ; VDO+BF : écran + son
         self.rec_bf = ScreenRecorder(audio_only=True)
         self.rec_bf.changed.connect(lambda on, msg: self.statusBar().showMessage(msg, 8000))
@@ -2428,7 +2441,8 @@ class MainWindow(QtWidgets.QMainWindow):
         others2 = ((self.rec_bf_toggle, "REC BF"),
                    (self.vdo_toggle, "VDO+BF"),
                    *((self.vox_msg_buttons[n], f"VOX{n}") for n in VOX_MSG_NUMBERS),
-                   (self.dictee_button, "DICTÉE"))
+                   (self.dictee_button, "DICTÉE"),
+                   (self.translate_button, "TRADUCTION"))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
@@ -5641,6 +5655,42 @@ class MainWindow(QtWidgets.QMainWindow):
                 ["paplay", "--client-name=IC-7300 retour BF", vox_msg_file(n)])
             self._vox_log(f"VOX{n} : émission réelle du message, retour BF sur le PC")
 
+    # --- TRADUCTION de la réception en français -------------------------------
+    def _translate_toggled(self, on):
+        if on:
+            if self.translation_window is None:
+                win = TranslationWindow(self)
+                win.closed.connect(lambda: self.translate_button.setChecked(False))
+                self.translator.result.connect(win.add)
+                self.translator.status.connect(win.set_status)
+                self.translator.level.connect(win.set_level)
+                self.translation_window = win
+            self.translation_window.show()
+            self.translation_window.raise_()
+            self.translator.start(self.audio.source)
+            if getattr(self, "translate_pause_timer", None) is None:
+                self.translate_pause_timer = QtCore.QTimer(self)
+                self.translate_pause_timer.timeout.connect(self._translate_pause)
+            self.translate_pause_timer.start(300)
+            self.translate_button.setStyleSheet(
+                PUSH_YELLOW_3D + "QPushButton, QPushButton:checked { background: #4ade80;"
+                " color: #0b0f1a; font-size: 7pt; }")
+            self.statusBar().showMessage("TRADUCTION : écoute de la réception (premier "
+                                         "résultat après ≈ 15 s de chargement)", 6000)
+        else:
+            self.translator.stop()
+            if getattr(self, "translate_pause_timer", None):
+                self.translate_pause_timer.stop()
+            if self.translation_window is not None and self.translation_window.isVisible():
+                self.translation_window.blockSignals(True)
+                self.translation_window.hide()
+                self.translation_window.blockSignals(False)
+            self.translate_button.setStyleSheet(PUSH_YELLOW_3D + "QPushButton { font-size: 7pt; }")
+
+    def _translate_pause(self):
+        """Pas de traduction de sa propre émission."""
+        self.translator.paused = self.tx_active
+
     # --- DICTÉE vers le terminal --------------------------------------------
     def _dictee_click(self):
         if self.dictee.active:
@@ -7519,6 +7569,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.screen_rec.stop(wait=True)     # vidéo en cours : refermée et assemblée
         self.rec_bf.stop(wait=True)         # son REC BF en cours : fichier fermé
         self.dictee.shutdown()
+        self.translator.stop()
         self.loupe.stop()
         self.loupe.close()
         self.demo_finger.stop()             # la flèche de la souris revient
