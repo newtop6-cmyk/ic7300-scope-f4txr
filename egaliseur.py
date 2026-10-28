@@ -55,6 +55,20 @@ relachement_ms = {release:g}
 # pour ne pas remonter le bruit de fond entre les phrases. Plus haut = plus de silence.
 porte_db = {gate:g}
 """
+PORTE_TEXT = """
+[porte]
+# Porte anti-souffle : quand on ne parle pas, le souffle de fond est baissé
+# en douceur ; dès qu'on parle, la voix passe entière (rien ne change au timbre).
+# oui = en service ; non = coupée
+actif = {on}
+# seuil en dB (-75 à -30) : sous ce niveau, c'est du souffle. Plus haut = coupe plus.
+seuil_db = {thr}
+# baisse du souffle en dB (6 à 40)
+attenuation_db = {floor}
+"""
+GATE_HOLD_MS = 250              # porte : reste ouverte 250 ms après la voix (fins de mots)
+GATE_RELEASE_MS = 120           # … puis se referme en douceur
+
 COMP_DEFAULT = dict(comp_on=True, thr=-28.0, ratio=4.0, makeup=10.0, attack=5.0, release=150.0,
                     gate=-50.0)
 
@@ -152,7 +166,11 @@ def load_settings():
         attack=max(1.0, min(50.0, num("compresseur", "attaque_ms", COMP_DEFAULT["attack"]))),
         release=max(20.0, min(1000.0, num("compresseur", "relachement_ms",
                                           COMP_DEFAULT["release"]))),
-        gate=max(-70.0, min(-30.0, num("compresseur", "porte_db", COMP_DEFAULT["gate"]))))
+        gate=max(-70.0, min(-30.0, num("compresseur", "porte_db", COMP_DEFAULT["gate"]))),
+        gate_on=cp.get("porte", "actif", fallback="oui").strip().lower() in (
+            "oui", "yes", "1", "on", "vrai", "true"),
+        gate_thr=max(-75.0, min(-30.0, num("porte", "seuil_db", -50.0))),
+        gate_floor=max(6.0, min(40.0, num("porte", "attenuation_db", 24.0))))
 
 
 def save_settings(s):
@@ -167,17 +185,22 @@ def save_settings(s):
             "taux": f"{s['ratio']:g}", "rattrapage_db": f"{s['makeup']:g}",
             "attaque_ms": f"{s['attack']:g}", "relachement_ms": f"{s['release']:g}",
             "porte_db": f"{s.get('gate', -50):g}"}
+    porte = {"actif": "oui" if s.get("gate_on", True) else "non",
+             "seuil_db": f"{s.get('gate_thr', -50):g}",
+             "attenuation_db": f"{s.get('gate_floor', 24):g}"}
     out = []
     section = ""
     found_comp = False
+    found_porte = False
     with open(CONFIG) as f:
         for line in f:
             stripped = line.strip()
             if stripped.startswith("[") and stripped.endswith("]"):
                 section = stripped[1:-1]
                 found_comp = found_comp or section == "compresseur"
+                found_porte = found_porte or section == "porte"
             key = line.split("=", 1)[0].strip()
-            table = comp if section == "compresseur" else values
+            table = comp if section == "compresseur" else porte if section == "porte" else values
             if "=" in line and not line.lstrip().startswith("#") and key in table:
                 out.append(f"{key} = {table.pop(key)}\n")
             else:
@@ -187,6 +210,9 @@ def save_settings(s):
                                     ratio=s["ratio"], makeup=s["makeup"],
                                     attack=s["attack"], release=s["release"],
                                     gate=s.get("gate", -50)))
+    if not found_porte:             # porte anti-souffle : section ajoutée
+        out.append(PORTE_TEXT.format(on=porte["actif"], thr=porte["seuil_db"],
+                                     floor=porte["attenuation_db"]))
     tmp = CONFIG + ".tmp"
     with open(tmp, "w") as f:
         f.writelines(out)
@@ -264,6 +290,8 @@ class EqEngine:
         self.reduction = 0.0            # compression en cours (dB) pour l'affichage
         self.lim_gain = 1.0             # gain du limiteur (1 = rien)
         self.lim_hits = 0.0             # part du temps où le limiteur agit (0..1)
+        self.gate_g = 1.0               # porte anti-souffle : gain en cours (0..1)
+        self.gate_hold = 0.0            # temps restant porte ouverte (s)
 
     @staticmethod
     def _mtime():
@@ -363,12 +391,45 @@ class EqEngine:
                     else:
                         self.reduction = 0.0
                     x = x * 10 ** (s["gain"] / 20)
+                    if s.get("gate_on", True):
+                        x = self._gate(x, s)
                     x = self._limit(x)
             self.level = max(self.level * 0.8, float(np.max(np.abs(x))) if len(x) else 0)
             try:
                 play.stdin.write((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
             except (BrokenPipeError, OSError, ValueError):
                 break
+
+    def _gate(self, x, s, sub=48):
+        """Porte anti-souffle : par tranches de 1 ms, ouverte instantanément sur la
+        voix, tenue GATE_HOLD_MS, refermée en douceur jusqu'à −attenuation_db."""
+        n = len(x) // sub
+        if n == 0:
+            return x
+        floor = 10 ** (-s.get("gate_floor", 24.0) / 20)
+        thr = s.get("gate_thr", -50.0)
+        dt = sub / RATE
+        rel = np.exp(-dt / (GATE_RELEASE_MS / 1000))
+        blocks = x[: n * sub].reshape(n, sub)
+        level = 20 * np.log10(np.sqrt((blocks ** 2).mean(axis=1)) + 1e-9)
+        gains = np.empty(n + 1, np.float32)
+        gains[0] = g = getattr(self, "gate_g", 1.0)
+        hold = getattr(self, "gate_hold", 0.0)
+        for i, lv in enumerate(level):
+            if lv > thr:
+                g, hold = 1.0, GATE_HOLD_MS / 1000      # voix : ouverte tout de suite
+            elif hold > 0:
+                hold -= dt
+            else:
+                g = floor + (g - floor) * rel           # souffle : baisse douce
+            gains[i + 1] = g
+        self.gate_g, self.gate_hold = g, hold
+        ramp = np.interp(np.arange(n * sub), np.arange(n + 1) * sub, gains)
+        out = x.copy()
+        out[: n * sub] *= ramp
+        if len(x) > n * sub:
+            out[n * sub:] *= g
+        return out
 
     def _limit(self, x, sub=24):
         """Limiteur de crêtes : réaction immédiate, retour en 60 ms ; la voix monte
