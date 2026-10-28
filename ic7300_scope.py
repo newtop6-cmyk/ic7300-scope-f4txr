@@ -73,6 +73,7 @@ from vintage_push import VintagePush
 from jewel_lamp import JewelLamp
 from station_plate import StationPlate
 from collins_knob import paint_collins_knob
+import kwm2_vfo
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -1996,6 +1997,52 @@ class SmoothKnob(TuningKnob):
         if abs(self.speed) < 25:
             self.speed = 0.0
             self.fly.stop()
+
+
+class KWM2Vfo(SmoothKnob):
+    """VFO de l'écran MOBILE : l'ensemble du KWM-2 (plaque noire, fenêtre en arc
+    avec l'échelle des kHz, bouton festonné à disque d'aluminium et manivelle).
+    Léger, à volant, comme SmoothKnob ; on le tourne autour du bouton."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(kwm2_vfo.W, kwm2_vfo.H)
+        self.khz_goal = None
+        self.khz_shown = 0.0
+        self.scale_timer = QtCore.QTimer(self)
+        self.scale_timer.timeout.connect(self._scale_tick)
+
+    def set_freq(self, hz):
+        """L'échelle de l'arc suit la fréquence (glisse en douceur)."""
+        if not hz:
+            return
+        khz = (hz % 1_000_000) / 1000.0
+        if khz != self.khz_goal:
+            if self.khz_goal is None or abs(khz - self.khz_shown) > 60:
+                self.khz_shown = khz                # grand saut : direct
+            self.khz_goal = khz
+            self.scale_timer.start(16)
+            self.update()
+
+    def _scale_tick(self):
+        if self.khz_goal is None:
+            self.scale_timer.stop()
+            return
+        self.khz_shown += (self.khz_goal - self.khz_shown) * 0.25
+        if abs(self.khz_goal - self.khz_shown) < 0.01:
+            self.khz_shown = self.khz_goal
+            self.scale_timer.stop()
+        self.update()
+
+    def _angle_at(self, pos):
+        c = kwm2_vfo.KNOB_C * (self.width() / kwm2_vfo.W)
+        return math.degrees(math.atan2(pos.y() - c.y(), pos.x() - c.x()))
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.scale(self.width() / kwm2_vfo.W, self.height() / kwm2_vfo.H)
+        kwm2_vfo.paint_kwm2(p, self.khz_shown, self.angle, hooked=self._last is not None)
+        p.end()
 
 
 class CollinsKnob(SmoothKnob):
@@ -5211,10 +5258,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
-        self.m_knob = CollinsKnob()                 # VFO façon KWM-2, léger, à volant
+        self.m_knob = KWM2Vfo()                     # ensemble VFO du KWM-2, à volant
         self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
-        knob_view = self._big(self.m_knob, 1.3)
-        page.labels.append((knob_view, "VFO"))
+        knob_view = self._big(self.m_knob, 0.86)
         self.m_emission = EmissionButton()
         self.m_emission.is_tx = lambda: getattr(self, "vox_tx", False)
         self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
@@ -5416,6 +5462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             button.set_lamp(found.group(1) if found else None)
         self.m_console.set_lamp("#2fd36a" if self.console_button.isChecked() else None)
         self.m_stations.set_current(self.freq_hz)
+        self.m_knob.set_freq(self.freq_hz)              # échelle de l'arc du VFO
         tx = bool(getattr(self, "_radio_tx", False) or self.tx_active)
         self.m_tx_lamp.set_on(tx)
         self.m_rx_lamp.set_on(not tx and self.freq_hz is not None)
