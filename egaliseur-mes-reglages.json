@@ -199,5 +199,29 @@
     "attack": 10.0,
     "release": 200.0,
     "gate": -50.0
+  },
+  "C3 compressé F4TXR": {
+    "hp": 0.0,
+    "lp": 0.0,
+    "gain": 12.0,
+    "q": 0.9,
+    "bands": [
+      0.0,
+      0.0,
+      2.0,
+      1.5,
+      0.0,
+      1.0,
+      3.0,
+      4.5,
+      1.0
+    ],
+    "comp_on": true,
+    "thr": -36.0,
+    "ratio": 6.0,
+    "makeup": 1,
+    "attack": 6.0,
+    "release": 160.0,
+    "gate": -50.0
   }
 }
