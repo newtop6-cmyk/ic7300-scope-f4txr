@@ -257,8 +257,16 @@ class TxGalva(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
-        row.addWidget(self.po_g)
-        row.addWidget(self.comp_g)
+        # inscriptions blanches sous les galvas (COMP ; rien sous Po W)
+        for galva, name in ((self.po_g, ""), (self.comp_g, "COMP")):
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(1)
+            col.addWidget(galva, 0, QtCore.Qt.AlignHCenter)
+            lab = QtWidgets.QLabel(name)
+            lab.setAlignment(QtCore.Qt.AlignCenter)
+            lab.setStyleSheet("font: 900 9pt 'DejaVu Sans Condensed'; color: white; letter-spacing: 1px; background: transparent;")
+            col.addWidget(lab)
+            row.addLayout(col)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.tx = False
         self.light = 0.0

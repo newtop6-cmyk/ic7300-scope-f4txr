@@ -3086,7 +3086,14 @@ class MainWindow(QtWidgets.QMainWindow):
         meter_row = QtWidgets.QHBoxLayout()
         meter_row.addLayout(push)
         self.ssb_led = SsbLed(self.ssb_meter)   # voyant du calage, à l'ancienne place du galva
-        self.tx_galva_row.addWidget(self.ssb_meter)
+        cale_col = QtWidgets.QVBoxLayout()          # galva CALE + « CALAGE » en blanc dessous
+        cale_col.setSpacing(1)
+        cale_col.addWidget(self.ssb_meter, 0, QtCore.Qt.AlignHCenter)
+        cale_name = QtWidgets.QLabel("CALAGE")
+        cale_name.setAlignment(QtCore.Qt.AlignCenter)
+        cale_name.setStyleSheet("font: 900 9pt 'DejaVu Sans Condensed'; color: white; letter-spacing: 1px; background: transparent;")
+        cale_col.addWidget(cale_name)
+        self.tx_galva_row.addLayout(cale_col)
         self.tx_galva_row.addStretch()               # les galvas restent serrés à gauche
         modes.addLayout(meter_row, rows, 0, 1, 2)
         ssb_row = QtWidgets.QHBoxLayout()
