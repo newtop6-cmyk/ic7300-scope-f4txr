@@ -45,6 +45,7 @@ from emission_button import EmissionButton
 WSJTX_QSS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wsjtx-sombre.qss")
 from wifi_bar import WifiBar
 from traffic_bar import TrafficBar
+from link_bar import LinkBar, LinkProbe
 from mode_detect import analyse as analyse_mode, analyse_station
 from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
@@ -2241,6 +2242,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.other_hz = None
         self.other_mode = ""
 
+        # qualité de la liaison PC ↔ téléphone GSM (ping de la passerelle)
+        self.link_probe = LinkProbe(self)
         central = QtWidgets.QWidget()
         # FIXE / MOBILE : page 0 = tout l'écran actuel, page 1 = écran MOBILE
         self.pages = QtWidgets.QStackedWidget()
@@ -2297,6 +2300,9 @@ class MainWindow(QtWidgets.QMainWindow):
         net_grid.addWidget(QtWidgets.QLabel("Trafic"), 1, 0)
         self.traffic_bar = TrafficBar()
         net_grid.addWidget(self.traffic_bar, 1, 1)
+        net_grid.addWidget(QtWidgets.QLabel("Liaison"), 2, 0)
+        self.link_bar = LinkBar(self.link_probe)
+        net_grid.addWidget(self.link_bar, 2, 1)
         top.addLayout(net_grid)
         top.addStretch()
         top.addWidget(self.cursor_label)
@@ -5364,6 +5370,9 @@ class MainWindow(QtWidgets.QMainWindow):
             page.labels.append((lamp, name))
             lamps.addWidget(lamp, 0, QtCore.Qt.AlignHCenter)
         top.addLayout(lamps)
+        self.m_link = LinkBar(self.link_probe, 46, 190, vertical=True, text=True)
+        page.labels.append((self.m_link, "LIAISON"))
+        top.addWidget(self.m_link, 0, QtCore.Qt.AlignVCenter)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
         top.addStretch()
