@@ -5300,6 +5300,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._memo_show()
         plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
+        # CL : petit poussoir qui ouvre / ferme la console (comme CONSOLE ou F12)
+        plate.addSpacing(30)
+        self.m_console = VintagePush("CL", 36, 36)
+        self.m_console.setToolTip("CL : affiche la console par-dessus, ou la renvoie "
+                                  "derrière (comme CONSOLE / F12)")
+        self.m_console.clicked.connect(lambda: self.console_button.toggle())
+        view = self._big(self.m_console, 1.4)
+        page.labels.append((view, "CONSOLE"))
+        plate.addWidget(view, 0, QtCore.Qt.AlignHCenter)
         row.addLayout(plate)
         box.addLayout(row)
         return page
@@ -5394,6 +5403,7 @@ class MainWindow(QtWidgets.QMainWindow):
             extra = theirs.styleSheet()[len(PUSH_YELLOW_3D):]
             found = re.search(r"background:\s*(#[0-9a-fA-F]{6})", extra)
             button.set_lamp(found.group(1) if found else None)
+        self.m_console.set_lamp("#2fd36a" if self.console_button.isChecked() else None)
         tx = bool(getattr(self, "_radio_tx", False) or self.tx_active)
         self.m_tx_lamp.set_on(tx)
         self.m_rx_lamp.set_on(not tx and self.freq_hz is not None)
