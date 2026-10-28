@@ -2034,7 +2034,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.other_mode = ""
 
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+        # FIXE / MOBILE : page 0 = tout l'écran actuel, page 1 = écran MOBILE
+        self.pages = QtWidgets.QStackedWidget()
+        self.pages.addWidget(central)
+        self.pages.addWidget(self._mobile_page())
+        self.setCentralWidget(self.pages)
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(5, 4, 5, 4)       # marges serrées : tout tient dans l'écran
         layout.setSpacing(3)
@@ -2290,6 +2294,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fr_toggle.customContextMenuRequested.connect(self._fr_open_now)
         self.fr_timer = QtCore.QTimer(self)
         self.fr_timer.timeout.connect(self._fr_tick)
+        # FIXE / MOBILE : levier en haut = écran complet, en bas = écran MOBILE
+        self.mobile_toggle = ToggleSwitch(
+            "FIXE", "MOBILE", tooltip="Levier en haut = FIXE (écran complet habituel), "
+            "en bas = MOBILE (écran différent, en cours de création)")
+        self.mobile_toggle.toggled.connect(self._mobile_toggled)
         # DÉMO : la souris devient un gros doigt (demo_finger.py)
         self.demo_finger = DemoFinger()
         self.demo_toggle = ToggleSwitch(
@@ -2442,7 +2451,8 @@ class MainWindow(QtWidgets.QMainWindow):
                    (self.vdo_toggle, "VDO+BF"),
                    *((self.vox_msg_buttons[n], f"VOX{n}") for n in VOX_MSG_NUMBERS),
                    (self.dictee_button, "DICTÉE"),
-                   (self.translate_button, "TRADUCTION"))
+                   (self.translate_button, "TRADUCTION"),
+                   (self.mobile_toggle, "FIXE / MOBILE"))
         # volumes : réglage relatif, doux et précis (glisser haut/bas, Ctrl = très fin)
         for knob in (self.volume_knob, self.af_knob, self.af_radio_knob, self.preamp_knob):
             knob.fine = True
@@ -2450,9 +2460,9 @@ class MainWindow(QtWidgets.QMainWindow):
         col_px = 80
         SWITCH_PX = 60
         self.switch_row1 = QtWidgets.QHBoxLayout()
-        self.switch_row1.setSpacing(8)
+        self.switch_row1.setSpacing(4)          # serré : la fenêtre tient dans l'écran
         self.switch_row2 = QtWidgets.QHBoxLayout()
-        self.switch_row2.setSpacing(8)
+        self.switch_row2.setSpacing(4)          # serré : la fenêtre tient dans l'écran
         for bar, items in ((self.audio_bar, audio), (self.switch_row1, others),
                            (self.switch_row2, others2)):
             for knob, name in items:
@@ -4994,6 +5004,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_frequency(hz)
         self.civ.set_frequency(hz)
         return True
+
+    # --- FIXE / MOBILE ------------------------------------------------------
+    def _mobile_page(self):
+        """Écran MOBILE (à créer) : pour l'instant un titre et le retour à FIXE."""
+        page = QtWidgets.QWidget()
+        page.setStyleSheet("background: #15181c;")
+        box = QtWidgets.QVBoxLayout(page)
+        box.addStretch()
+        title = QtWidgets.QLabel("MOBILE")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setStyleSheet("color: #f0d890; font: bold 48px 'DejaVu Sans';")
+        box.addWidget(title)
+        note = QtWidgets.QLabel("Écran mobile en cours de création")
+        note.setAlignment(QtCore.Qt.AlignCenter)
+        note.setStyleSheet("color: #a0a8b0; font: 18px 'DejaVu Sans';")
+        box.addWidget(note)
+        box.addSpacing(30)
+        self.mobile_back = ToggleSwitch("FIXE", "MOBILE",
+                                        tooltip="Levier en haut = retour à l'écran FIXE")
+        self.mobile_back.setDown(True, emit=False)
+        self.mobile_back.toggled.connect(self._mobile_toggled)
+        plate = QtWidgets.QVBoxLayout()
+        plate.setSpacing(1)
+        plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
+        plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
+        box.addLayout(plate)
+        box.addStretch()
+        return page
+
+    def _mobile_toggled(self, mobile):
+        self.mobile_toggle.setDown(mobile, emit=False)
+        self.mobile_back.setDown(mobile, emit=False)
+        self.pages.setCurrentIndex(1 if mobile else 0)
 
     def _loupe_toggled(self, on):
         """Interrupteur LOUPE : levier en bas = lentille autour du pointeur."""
