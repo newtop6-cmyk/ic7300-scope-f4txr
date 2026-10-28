@@ -4045,6 +4045,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for name, button in self.band_buttons.items():
             button.setChecked(name == band)
         self.band_selector.set_band(band)
+        self.m_bands.set_band(band)                 # écran MOBILE
         if band != self.last_band:          # nouvelle bande : bande latérale d'usage
             self.last_band = band
             if hasattr(self, "sideband_button"):
@@ -4069,6 +4070,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_band(name)
         if not self.civ or self.tx_active:      # refusé : le bouton revient
             self.band_selector.set_band(band_of(self.freq_hz or 0))
+            self.m_bands.set_band(band_of(self.freq_hz or 0))
 
     def on_band(self, name):
         if not self.civ or self.tx_active:
@@ -5034,7 +5036,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # fréquence : compteur à tambours (molette = changer la fréquence)
         self.m_freq = DrumDisplay()
         self.m_freq.tuned.connect(self.on_tuned)
-        box.addWidget(self._big(self.m_freq, 2.4), 0, QtCore.Qt.AlignHCenter)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(50)
+        top.addStretch()
+        top.addWidget(self._big(self.m_freq, 2.4), 0, QtCore.Qt.AlignVCenter)
+        # commutateur de bandes, à droite de la fréquence
+        self.m_bands = BandSelector(BAND_SEL_PX)
+        self.m_bands.changed.connect(self._band_selector_changed)
+        top.addWidget(self._big(self.m_bands, 1.5), 0, QtCore.Qt.AlignVCenter)
+        top.addStretch()
+        box.addLayout(top)
         box.addStretch()
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(40)

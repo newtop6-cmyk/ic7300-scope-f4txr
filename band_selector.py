@@ -64,7 +64,13 @@ class BandSelector(QtWidgets.QWidget):
     def _point_at(self, i):
         """Pointeur de la souris posé pile sur le nom de la bande i."""
         lp = self._label_pos(self.angles[i]) * self.k
-        QtGui.QCursor.setPos(self.mapToGlobal(lp.toPoint()))
+        proxy = self.graphicsProxyWidget()
+        if proxy and proxy.scene() and proxy.scene().views():   # cadran agrandi (écran MOBILE)
+            view = proxy.scene().views()[0]
+            at = view.viewport().mapToGlobal(view.mapFromScene(proxy.mapToScene(lp)))
+        else:
+            at = self.mapToGlobal(lp.toPoint())
+        QtGui.QCursor.setPos(at)
 
     def _tick(self):
         if self._drag and self._drag["moved"]:
