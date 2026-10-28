@@ -262,7 +262,7 @@ class QsoHunter(QtCore.QObject):
             if self.scan_only and self.pos > self.low:
                 hz = self._signal_here()
                 if hz:                          # station sous le curseur : on s'arrête
-                    self.resume = self.pos + 2000
+                    self.resume_pos = self.pos + 2000
                     self.visited.add(hz)
                     self.state = "settle"
                     self._tune(hz)
@@ -351,7 +351,7 @@ class QsoHunter(QtCore.QObject):
     def _next_candidate(self):
         if self.scan_only:                      # SCAN : on reprend le balayage
             self.state = "sweep"
-            self.pos = max(self.pos, getattr(self, "resume", self.low))
+            self.pos = max(self.pos, getattr(self, "resume_pos", self.low))
             self._step()
             return
         if not self.queue:

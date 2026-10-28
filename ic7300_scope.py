@@ -6129,6 +6129,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_power(self, raw):
         self.power_slider.setEnabled(True)
         self.power_knob.setEnabled(True)
+        # bouton POWER tourné il y a moins de 2 s : la radio renvoie encore
+        # l'ancienne valeur (surtout pendant le SCAN) ; on ne l'écoute pas
+        if time.monotonic() - getattr(self, "_power_user_at", 0) < 2:
+            return
         if not self.power_slider.isSliderDown():
             self.power_slider.blockSignals(True)
             self.power_slider.setValue(round(raw * 100 / 255))
@@ -6138,6 +6142,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.power_knob.setValue(self.power_slider.value())
 
     def on_power_slider(self, percent):
+        self._power_user_at = time.monotonic()
         self.power_label.setText(f"≈ {percent} W")
         self.power_knob.setValue(percent)
         if self.civ:
