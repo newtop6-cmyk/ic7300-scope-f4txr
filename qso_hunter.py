@@ -154,7 +154,8 @@ class QsoHunter(QtCore.QObject):
             else:
                 self._start_sweep()
             return
-        self._start_sweep()
+        start_from, self.start_from = getattr(self, "start_from", None), None
+        self._start_sweep(start_from)
 
     def stop(self, found=False):
         if not self.active:
@@ -218,14 +219,18 @@ class QsoHunter(QtCore.QObject):
         w = self.w
         return bool(getattr(w, "tx_active", False) or getattr(w, "_radio_tx", False))
 
-    def _start_sweep(self):
-        """Balayage visible de toute la portion phonie, kHz après kHz."""
+    def _start_sweep(self, pos=None):
+        """Balayage visible de toute la portion phonie, kHz après kHz
+        (à partir de `pos` si donné : SCAN DÉFILEMENT qui reprend)."""
         self.map_low = self.low - 30_000
         size = (self.high - self.low + 60_000) // BIN_HZ
         self.map_sum = np.zeros(size)
         self.map_count = np.zeros(size)
         self.state = "sweep"
         self.pos = self.low
+        if pos and self.low < pos < self.high:
+            self.pos = pos
+            self.resume_pos = pos
         self._step()
 
     def _candidates(self):

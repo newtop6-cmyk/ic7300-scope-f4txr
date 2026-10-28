@@ -208,6 +208,7 @@ HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
 WF_TICK_MS = 50                 # waterfall : une ligne toutes les 50 ms (20/s : fluide, moins lourd)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
+DEFIL_RESTART_MS = 10_000      # SCAN DÉFILEMENT : relance 10 s après un arrêt
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
 RIG_ADDR = 0x94                 # adresse CI-V par défaut de l'IC-7300
@@ -2532,6 +2533,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demo_toggle.toggled.connect(self._demo_toggled)
         self.demo_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.demo_toggle.customContextMenuRequested.connect(self._demo_menu)
+        # SCAN DÉFILEMENT : le SCAN repart tout seul s'il s'arrête (10 s par station)
+        self.defil_on = False
+        self.defil_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="SCAN DÉFILEMENT : levier en bas = le SCAN tourne sans "
+            "fin (arrêt 10 s sur chaque station) ; s'il s'arrête (réglage à la main, "
+            "poussoir de station…), il repart tout seul 10 s plus tard depuis la "
+            "fréquence où il est. Émission, Échap ou ARRÊT D'URGENCE = levier remis "
+            "sur OFF. En haut = scan arrêté.")
+        self.defil_toggle.toggled.connect(self._defil_set)
+        self.defil_timer = QtCore.QTimer(self)
+        self.defil_timer.setSingleShot(True)
+        self.defil_timer.timeout.connect(self._defil_restart)
         # VOX1, VOX2… : poussoirs ; appui = message en attente de « VOX n » dit au micro
         self.vox_msg_buttons = {}
         for n in VOX_MSG_NUMBERS:
@@ -2668,7 +2681,8 @@ class MainWindow(QtWidgets.QMainWindow):
                   (self.ft8_toggle, "FT8"),
                   (self.rtty_toggle, "DÉCODEUR RTTY"),
                   (self.fr_toggle, "WATERFALL FR"),
-                  (self.demo_toggle, "DÉMO"))
+                  (self.demo_toggle, "DÉMO"),
+                  (self.defil_toggle, "SCAN DÉFIL."))
         # 2e ligne d'interrupteurs, sous la première : les nouveaux s'ajoutent ici
         others2 = ((self.rec_bf_toggle, "REC BF"),
                    (self.vdo_toggle, "VDO+BF"),
@@ -3234,6 +3248,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_button.setToolTip("Balaye la bande et s'arrête 10 s sur chaque station "
                                     "LSB/USB détectée. Recliquer pour arrêter.")
         self.scan_button.toggled.connect(self.on_scan_toggled)
+        self.scan_button.clicked.connect(
+            lambda on: None if on or not self.defil_on else self.defil_toggle.setDown(False))
         extras.addWidget(self.scan_button, 0, 3)
         # CONSOLE : terminal gardé visible par-dessus Scope (F12 aussi)
         self.console_button = QtWidgets.QPushButton("CONSOLE")
@@ -4776,12 +4792,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_scan_finished(self, found):
         QtCore.QTimer.singleShot(0, self._mute_guard)
+        if self.defil_on:                           # SCAN DÉFILEMENT : il repartira
+            self.defil_timer.start(DEFIL_RESTART_MS)
         self.scan_button.blockSignals(True)
         self.scan_button.setChecked(False)
         self.scan_button.blockSignals(False)
         self._scan_stopped()
         if found:
             self.statusBar().showMessage("Scan arrêté : on reste sur le QSO français")
+
+    def _defil_set(self, on):
+        """Interrupteur SCAN DÉFILEMENT (levier en bas = ON)."""
+        self.defil_on = on
+        if on:
+            if not self.scanner.active:
+                self.scanner.start_from = self.freq_hz     # depuis la fréquence actuelle
+                self.scan_button.setChecked(True)
+                if not self.scanner.active:         # pas de radio / en émission
+                    self.defil_on = False
+                    self.defil_toggle.setDown(False, emit=False)
+                    self.statusBar().showMessage("SCAN DÉFILEMENT : impossible "
+                                                 "(radio absente ou en émission)", 5000)
+                    return
+            self.statusBar().showMessage("SCAN DÉFILEMENT : le scan tourne sans fin, "
+                                         "10 s par station", 5000)
+        else:
+            self.defil_timer.stop()
+            if self.scanner.active or self.scan_button.isChecked():
+                self.scan_button.setChecked(False)
+
+    def _defil_restart(self):
+        """Le scan s'était arrêté : il repart depuis la fréquence actuelle."""
+        if not self.defil_on or self.scanner.active:
+            return
+        if self.tx_active or getattr(self, "_radio_tx", False) or not self.civ:
+            self.defil_timer.start(DEFIL_RESTART_MS)    # on réessaiera plus tard
+            return
+        self.scanner.start_from = self.freq_hz
+        self.scan_button.setChecked(True)
+        if self.scanner.active:
+            self.statusBar().showMessage("SCAN DÉFILEMENT : le scan repart", 4000)
 
     def on_scan_found(self, hz, text):
         QtCore.QTimer.singleShot(0, self._mute_guard)   # QSO français : le son revient
@@ -5460,10 +5510,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_scan.setToolTip("SCAN : balaye la bande ; on n'entend que les QSO "
                                "en français. Nouvel appui = arrêt")
         self.m_scan.clicked.connect(lambda: self.scan_button.click())
+        self.m_defil = VintagePush("DÉFIL.", 90, 40)    # = interrupteur SCAN DÉFIL.
+        self.m_defil.setCheckable(True)
+        self.m_defil.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_defil.setFixedSize(90, 40)
+        self.m_defil.setToolTip("SCAN DÉFILEMENT marche / arrêt : le scan tourne sans "
+                                "fin, 10 s sur chaque station")
+        self.m_defil.clicked.connect(lambda: self.defil_toggle.setDown(not self.defil_on))
         hunt_row = QtWidgets.QHBoxLayout()
         hunt_row.setSpacing(12)
         view = self._big(self.m_scan, 0.9)
         page.labels.append((view, "SCAN"))
+        hunt_row.addWidget(view)
+        view = self._big(self.m_defil, 0.9)
+        page.labels.append((view, "DÉFILEMENT"))
         hunt_row.addWidget(view)
         view = self._big(self.m_hunt, 0.9)
         page.labels.append((view, "RECHERCHE"))
@@ -5821,6 +5881,9 @@ class MainWindow(QtWidgets.QMainWindow):
             found = re.search(r"background:\s*(#[0-9a-fA-F]{6})", extra)
             button.set_lamp(found.group(1) if found else None)
         self.m_console.set_lamp("#2fd36a" if self.console_button.isChecked() else None)
+        if self.m_defil.isChecked() != self.defil_on:
+            self.m_defil.setChecked(self.defil_on)
+        self.m_defil.set_lamp("#2fd36a" if self.defil_on else None)
         self.m_stations.set_current(self.freq_hz)
         blink = int(time.monotonic() / 0.35) % 2 == 0
         for i in range(len(self.m_stations.slots)):
@@ -6916,6 +6979,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """Arrête tout de suite SCAN, CHERCHER QSO FR et DÉCODAGE CW balayé.
         Appelé dès qu'on émet (bouton, VOX, VOX1, TUNE) et par Échap."""
         stopped = False
+        if self.defil_on:                           # SCAN DÉFILEMENT : levier sur OFF
+            self.defil_on = False
+            self.defil_timer.stop()
+            self.defil_toggle.setDown(False, emit=False)
+            stopped = True
         if self.cw_hunter.active:
             self.cw_hunter.stop()
             stopped = True
