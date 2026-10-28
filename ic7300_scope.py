@@ -5274,6 +5274,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mobile_back.toggled.connect(self._mobile_toggled)
         plate = QtWidgets.QVBoxLayout()
         plate.setSpacing(1)
+        # MÉMO : appui long = mémoriser la fréquence ; clic = y retourner
+        self.m_memo = VintagePush("MÉMO", 80, 56)
+        self.m_memo.setToolTip("MÉMO : appui long (1 s) = mémoriser la fréquence et le "
+                               "mode ; clic = revenir sur la fréquence mémorisée")
+        self.m_memo_timer = QtCore.QTimer(self)
+        self.m_memo_timer.setSingleShot(True)
+        self.m_memo_timer.timeout.connect(self._memo_store)
+        self.m_memo.pressed.connect(lambda: self.m_memo_timer.start(1000))
+        self.m_memo.released.connect(self._memo_released)
+        view = self._big(self.m_memo, 1.6)
+        page.labels.append((view, "MÉMOIRE"))
+        plate.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        plate.addSpacing(26)
+        self._memo_show()
         plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
         row.addLayout(plate)
@@ -5301,6 +5315,53 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dump(conf, f)
         except OSError:
             pass
+
+    def _memo_show(self):
+        memo = self._mobile_conf().get("memo")
+        if memo:
+            self.m_memo.setText("MÉMO\n" + format_frequency(memo["hz"])[:-4])
+        else:
+            self.m_memo.setText("MÉMO\nvide")
+
+    def _memo_store(self):
+        """Appui long sur MÉMO : la fréquence (et le mode) du moment est gardée."""
+        self._memo_stored = True
+        if not self.freq_hz:
+            self.statusBar().showMessage("MÉMO : pas de fréquence (radio non reliée)", 5000)
+            return
+        conf = self._mobile_conf()
+        conf["memo"] = {"hz": int(self.freq_hz), "mode": self.mode_combo.currentText()}
+        try:
+            os.makedirs(os.path.dirname(self.MOBILE_CONF), exist_ok=True)
+            with open(self.MOBILE_CONF, "w") as f:
+                json.dump(conf, f)
+        except OSError:
+            pass
+        self._memo_show()
+        self.m_memo.set_lamp("#2fd36a")                 # éclair vert : c'est gardé
+        QtCore.QTimer.singleShot(700, lambda: self.m_memo.set_lamp(None))
+        self.statusBar().showMessage(
+            f"MÉMO : {format_frequency(self.freq_hz)} MHz "
+            f"{self.mode_combo.currentText()} mémorisée", 5000)
+
+    def _memo_released(self):
+        """Clic court sur MÉMO : retour sur la fréquence mémorisée."""
+        self.m_memo_timer.stop()
+        if getattr(self, "_memo_stored", False):
+            self._memo_stored = False                   # c'était l'appui long
+            return
+        memo = self._mobile_conf().get("memo")
+        if not memo:
+            self.statusBar().showMessage("MÉMO vide : appui long pour mémoriser", 5000)
+            return
+        self._manual_tuning()
+        if self.tune_to(memo["hz"]):
+            mode = memo.get("mode")
+            if mode and mode != self.mode_combo.currentText():
+                self.mode_combo.setCurrentText(mode)
+                self.on_mode_selected(mode)
+            self.statusBar().showMessage(
+                f"MÉMO : retour sur {format_frequency(memo['hz'])} MHz {mode or ''}", 5000)
 
     def _mobile_sync(self):
         """Écran MOBILE : poussoirs recopiés sur ceux de l'écran FIXE (état,
