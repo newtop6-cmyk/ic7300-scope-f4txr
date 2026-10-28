@@ -66,6 +66,17 @@ seuil_db = {thr}
 # baisse du souffle en dB (6 à 40)
 attenuation_db = {floor}
 """
+DEBR_TEXT = """
+[debruitage]
+# Débruiteur doux : apprend le souffle pendant les silences et le retire en
+# continu, même sous la voix (latence ~21 ms). oui = en service ; non = coupé
+actif = {on}
+# baisse maximale du souffle en dB (3 à 24) : plus haut = plus propre, mais
+# trop haut peut donner un léger « gazouillis »
+force_db = {force}
+# niveau sous lequel on considère que c'est du silence (souffle), en dB
+seuil_silence_db = {quiet}
+"""
 GATE_HOLD_MS = 250              # porte : reste ouverte 250 ms après la voix (fins de mots)
 GATE_RELEASE_MS = 120           # … puis se referme en douceur
 
@@ -170,7 +181,11 @@ def load_settings():
         gate_on=cp.get("porte", "actif", fallback="oui").strip().lower() in (
             "oui", "yes", "1", "on", "vrai", "true"),
         gate_thr=max(-75.0, min(-30.0, num("porte", "seuil_db", -50.0))),
-        gate_floor=max(6.0, min(40.0, num("porte", "attenuation_db", 24.0))))
+        gate_floor=max(6.0, min(40.0, num("porte", "attenuation_db", 24.0))),
+        dn_on=cp.get("debruitage", "actif", fallback="non").strip().lower() in (
+            "oui", "yes", "1", "on", "vrai", "true"),
+        dn_force=max(3.0, min(24.0, num("debruitage", "force_db", 12.0))),
+        dn_quiet=max(-75.0, min(-35.0, num("debruitage", "seuil_silence_db", -55.0))))
 
 
 def save_settings(s):
@@ -188,10 +203,14 @@ def save_settings(s):
     porte = {"actif": "oui" if s.get("gate_on", True) else "non",
              "seuil_db": f"{s.get('gate_thr', -50):g}",
              "attenuation_db": f"{s.get('gate_floor', 24):g}"}
+    debr = {"actif": "oui" if s.get("dn_on") else "non",
+            "force_db": f"{s.get('dn_force', 12):g}",
+            "seuil_silence_db": f"{s.get('dn_quiet', -55):g}"}
     out = []
     section = ""
     found_comp = False
     found_porte = False
+    found_debr = False
     with open(CONFIG) as f:
         for line in f:
             stripped = line.strip()
@@ -199,8 +218,9 @@ def save_settings(s):
                 section = stripped[1:-1]
                 found_comp = found_comp or section == "compresseur"
                 found_porte = found_porte or section == "porte"
+                found_debr = found_debr or section == "debruitage"
             key = line.split("=", 1)[0].strip()
-            table = comp if section == "compresseur" else porte if section == "porte" else values
+            table = {"compresseur": comp, "porte": porte, "debruitage": debr}.get(section, values)
             if "=" in line and not line.lstrip().startswith("#") and key in table:
                 out.append(f"{key} = {table.pop(key)}\n")
             else:
@@ -213,6 +233,9 @@ def save_settings(s):
     if not found_porte:             # porte anti-souffle : section ajoutée
         out.append(PORTE_TEXT.format(on=porte["actif"], thr=porte["seuil_db"],
                                      floor=porte["attenuation_db"]))
+    if not found_debr:              # débruiteur : section ajoutée
+        out.append(DEBR_TEXT.format(on=debr["actif"], force=debr["force_db"],
+                                    quiet=debr["seuil_silence_db"]))
     tmp = CONFIG + ".tmp"
     with open(tmp, "w") as f:
         f.writelines(out)
@@ -269,6 +292,53 @@ def response_db(s, freqs):
 
 
 # --- moteur audio -----------------------------------------------------------
+class Denoiser:
+    """Débruiteur doux (soustraction spectrale) : apprend l'empreinte du souffle
+    pendant les silences et la retire en continu, voix comprise, de force_db au
+    plus. Trames de 1024 points, recouvrement 50 % (latence ~21 ms à 48 kHz)."""
+    N, HOP = 1024, 512
+
+    def __init__(self):
+        self.win = np.sqrt(np.hanning(self.N + 1)[:-1]).astype(np.float32)
+        self.inbuf = np.zeros(0, np.float32)
+        self.prev = np.zeros(self.N, np.float32)       # entrée de la trame précédente
+        self.ola = np.zeros(self.HOP, np.float32)
+        self.outq = np.zeros(self.HOP, np.float32)     # latence initiale (silence)
+        self.noise = None
+        self.gain = None
+        self.frames = 0
+
+    def process(self, x, force_db=12.0, quiet_db=-55.0):
+        self.inbuf = np.concatenate([self.inbuf, x.astype(np.float32)])
+        floor = 10 ** (-force_db / 20)
+        out = []
+        while len(self.inbuf) >= self.HOP:
+            hop, self.inbuf = self.inbuf[:self.HOP], self.inbuf[self.HOP:]
+            frame = np.concatenate([self.prev[self.HOP:], hop])
+            self.prev = frame
+            spec = np.fft.rfft(frame * self.win)
+            p = (spec.real ** 2 + spec.imag ** 2)
+            level = 10 * np.log10(p.mean() * 2 / self.N + 1e-12)
+            if self.noise is None:
+                self.noise = p.copy()
+            elif level < quiet_db or self.frames < 20:     # silence : on apprend le souffle
+                self.noise = 0.9 * self.noise + 0.1 * p
+            else:                                          # voix : on garde l'empreinte,
+                self.noise = np.minimum(self.noise, p)     # sauf si le souffle baisse
+            self.frames += 1
+            g = np.clip(1 - 1.5 * self.noise / (p + 1e-12), floor, 1.0)
+            self.gain = g if self.gain is None else 0.6 * self.gain + 0.4 * g   # pas de « gazouillis »
+            y = np.fft.irfft(spec * self.gain, self.N).astype(np.float32) * self.win
+            out.append(self.ola + y[:self.HOP])
+            self.ola = y[self.HOP:]
+        if out:
+            self.outq = np.concatenate([self.outq] + out)
+        res, self.outq = self.outq[:len(x)], self.outq[len(x):]
+        if len(res) < len(x):
+            res = np.concatenate([np.zeros(len(x) - len(res), np.float32), res])
+        return res
+
+
 class EqEngine:
     """micro → filtres → sortie virtuelle ic7300_micro_eq (toujours en marche)."""
 
@@ -290,6 +360,7 @@ class EqEngine:
         self.reduction = 0.0            # compression en cours (dB) pour l'affichage
         self.lim_gain = 1.0             # gain du limiteur (1 = rien)
         self.lim_hits = 0.0             # part du temps où le limiteur agit (0..1)
+        self.denoiser = Denoiser()      # débruiteur doux (si en service)
         self.gate_g = 1.0               # porte anti-souffle : gain en cours (0..1)
         self.gate_hold = 0.0            # temps restant porte ouverte (s)
 
@@ -382,6 +453,8 @@ class EqEngine:
             with self.lock:
                 s, sos = self.settings, self.sos
                 if s["on"]:
+                    if s.get("dn_on"):
+                        x = self.denoiser.process(x, s["dn_force"], s["dn_quiet"])
                     if sos is not None:
                         if self.zi is None or self.zi.shape[0] != sos.shape[0]:
                             self.zi = signal.sosfilt_zi(sos) * 0
