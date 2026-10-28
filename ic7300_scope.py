@@ -325,6 +325,8 @@ PULL_MAX = 1500                 # Hz : rattrapage après appui sur CALAGE AUTO B
 # choisie que peu après le choix, et jamais loin ; ensuite elle ne bouge plus.
 CALAGE_WINDOW_S = 60            # s après le choix de la fréquence
 CALAGE_MAX_HZ = 3000            # Hz d'écart maximal avec la fréquence choisie
+STUCK_JUMP_ON = False           # saut au kHz voisin : COUPÉ (la mesure de la voix peut
+                                # être biaisée et sauter du mauvais côté, vu le 28/10 23:18)
 STUCK_MIN_HZ = 150              # calage refusé : écart minimal qui compte
 STUCK_COUNT = 3                 # refus de suite dans le même sens → kHz voisin
 STUCK_MAX_HZ = 2000             # au plus 2 kHz de la fréquence d'arrivée
@@ -5284,6 +5286,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Corrections refusées, toujours dans le même sens (≥ 150 Hz) : la station
         est sur le kHz rond voisin (ex. scan arrêté sur 3,761 pour un QSO sur
         3,760). Après 3 refus de suite, on y saute ; au plus 2 kHz de l'arrivée."""
+        if not STUCK_JUMP_ON:                       # coupé le 28/10 : mesure biaisée
+            return
         move = target - self.freq_hz
         if abs(move) < STUCK_MIN_HZ or self.tx_active or getattr(self, "qrg_locked", False):
             self._stuck = None
