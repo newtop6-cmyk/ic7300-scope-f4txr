@@ -2718,7 +2718,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # famille RÉGLAGES AUDIO : dans un cadre d'argent, à gauche
         self.audio_bar = QtWidgets.QHBoxLayout()
         self.audio_bar.setSpacing(6)
-        audio = ((self.preamp_knob, "PRÉAMPLI BF"), (self.af_knob, "VOLUME PC"),
+        # VOLUME PC retiré de l'affichage à la demande (VOLUME règle le même son) ;
+        # self.af_knob reste en mémoire, caché, pour ne rien casser
+        audio = ((self.preamp_knob, "PRÉAMPLI BF"),
                  (self.volume_knob, "VOLUME"), (self.af_radio_knob, "AF RADIO"),
                  (self.clean_knob, "FILTRE RX"),
                  (self.mic_knob, "GAIN MICRO"), (self.level_knob, "NIVEAU TX"),
