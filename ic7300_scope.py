@@ -921,6 +921,10 @@ class CivReader(QtCore.QThread):
     def set_comp_level(self, level):
         self._pending_comp_level = level
 
+    def set_dial_lock(self, on):
+        """LOCK de la radio : son bouton de fréquence ne fait plus rien."""
+        self._commands.put((0x16, 0x50, 0x01 if on else 0x00))
+
     def set_af_gain(self, level):
         self._pending_af = level
 
@@ -2534,6 +2538,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.demo_toggle.toggled.connect(self._demo_toggled)
         self.demo_toggle.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.demo_toggle.customContextMenuRequested.connect(self._demo_menu)
+        # VERROU QRG : levier en bas = la fréquence ne peut plus bouger
+        self.qrg_locked = False
+        self.qrg_toggle = ToggleSwitch(
+            "OFF", "ON", tooltip="VERROU QRG : levier en bas = fréquence verrouillée "
+            "(VFO, molette, clics, stations, scan, calage et bouton de la radio "
+            "refusés) ; en haut = libre.")
+        self.qrg_toggle.toggled.connect(self._qrg_set)
+        # au démarrage : LOCK de la radio retiré (resté d'une session plantée ?)
+        QtCore.QTimer.singleShot(4000, lambda: getattr(self, "civ", None)
+                                 and not self.qrg_locked and self.civ.set_dial_lock(False))
         # SCAN DÉFILEMENT : le SCAN repart tout seul s'il s'arrête (10 s par station)
         self.defil_on = False
         self.defil_toggle = ToggleSwitch(
@@ -2913,11 +2927,10 @@ class MainWindow(QtWidgets.QMainWindow):
             led.setToolTip(f"Pas du bouton VFO : {text} par cran")
             plate_grid.addWidget(led, row, 2)
             self.fine_switches.append((hz, None, led))
-        self.vfo_step_push = RoundPush("PAS", 56)
+        self.vfo_step_push = RoundPush("PAS", 44)
         self.vfo_step_push.setToolTip("Pas du bouton VFO : chaque appui passe au suivant, "
                                       "×1 (1 Hz) → ×10 → ×100 → ×1000 (1 kHz) → ×1")
         self.vfo_step_push.clicked.connect(self._vfo_step_next)
-        plate_grid.addWidget(self.vfo_step_push, 4, 0, 1, 3, QtCore.Qt.AlignHCenter)
         self.vfo_step_hz = self._vfo_step_load()
         self._vfo_step_show()
         self.other_label = QtWidgets.QLabel("")
@@ -2925,8 +2938,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.other_label.setStyleSheet("font: 11pt monospace; color: #90a4ae;")
         self.other_label.setToolTip("L'autre VFO")
         self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
+        # multiplicateur au-dessus du VFO : ×1 → ×10 → ×100 → ×1000 (voir la plaque)
+        vfo.addWidget(self.vfo_step_push, 0, 0, 1, 4, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignBottom)
         vfo.addWidget(self.knob, 1, 0, 1, 4, QtCore.Qt.AlignCenter)
-        vfo.addWidget(self.fine_plate, 1, 4, QtCore.Qt.AlignVCenter)   # à droite du VFO
+        # à droite du VFO : plaque des pas, et dessous l'interrupteur VERROU QRG
+        plate_col = QtWidgets.QVBoxLayout()
+        plate_col.setSpacing(1)
+        plate_col.addWidget(self.fine_plate, 0, QtCore.Qt.AlignHCenter)
+        plate_col.addSpacing(10)
+        plate_col.addWidget(NamePlate("VERROU QRG", 80), 0, QtCore.Qt.AlignHCenter)
+        self.qrg_toggle.setFixedSize(60, 60)
+        plate_col.addWidget(self.qrg_toggle, 0, QtCore.Qt.AlignHCenter)
+        vfo.addLayout(plate_col, 1, 4, QtCore.Qt.AlignVCenter)
         vfo.setColumnMinimumWidth(5, BAND_SEL_GAP)
         vfo.addWidget(self.band_selector, 1, 6, QtCore.Qt.AlignVCenter)  # centré sur le VFO
         step_row = QtWidgets.QHBoxLayout()
@@ -4493,6 +4516,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_sideband(name)
 
     def on_hunt_toggled(self, on):
+        if on and self.qrg_locked:
+            self.hunt_button.blockSignals(True)
+            self.hunt_button.setChecked(False)
+            self.hunt_button.blockSignals(False)
+            self.statusBar().showMessage("QRG verrouillée : pas de recherche", 4000)
+            return
         if on and self.scanner.resume():            # scan verrouillé : on le libère
             self._mute_guard()                      # reprise du balayage : silence
             self.hunt_button.blockSignals(True)
@@ -4527,7 +4556,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- scan ---------------------------------------------------------
     def on_scan_toggled(self, on):
         if on:
-            if not self.civ or self.tx_active:
+            if not self.civ or self.tx_active or self.qrg_locked:
+                if self.qrg_locked:
+                    self.statusBar().showMessage("QRG verrouillée : pas de SCAN", 4000)
                 self.scan_button.setChecked(False)
                 return
             if self.hunter.active:                  # une seule recherche à la fois
@@ -4814,6 +4845,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scan_stopped()
         if found:
             self.statusBar().showMessage("Scan arrêté : on reste sur le QSO français")
+
+    def _qrg_set(self, on):
+        """Interrupteur VERROU QRG (levier en bas = verrouillé)."""
+        self.qrg_locked = on
+        if on:
+            self._stop_searches()                   # scan, recherches, défilement arrêtés
+            if hasattr(self, "snap_timer"):
+                self.snap_timer.stop()
+        if self.civ:
+            self.civ.set_dial_lock(on)              # bouton de la radio aussi
+        where = f" sur {format_frequency(self.freq_hz)} MHz" if on and self.freq_hz else ""
+        self.statusBar().showMessage(
+            f"QRG verrouillée{where}" if on else "QRG libre", 5000)
 
     def _defil_set(self, on):
         """Interrupteur SCAN DÉFILEMENT (levier en bas = ON)."""
@@ -5357,6 +5401,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.civ:
             return False
         hz = int(hz)
+        if getattr(self, "qrg_locked", False) and hz != self.freq_hz:
+            self._spy(f"REFUS {self.freq_hz} -> {hz} (VERROU QRG)", stack=True)
+            self.statusBar().showMessage("QRG verrouillée : levier VERROU QRG en haut "
+                                         "pour changer de fréquence", 4000)
+            return False
         if not MIN_FREQ <= hz <= MAX_FREQ:
             self.statusBar().showMessage(
                 f"Hors de la plage de la radio ({MIN_FREQ // 1000}–"
@@ -5537,7 +5586,16 @@ class MainWindow(QtWidgets.QMainWindow):
         page.labels.append((view, "SCAN"))
         hunt_row.addWidget(view)
         view = self._big(self.m_defil, 0.9)
-        page.labels.append((view, "DÉFILEMENT"))
+        page.labels.append((view, "DÉFIL."))
+        hunt_row.addWidget(view)
+        self.m_qrg = VintagePush("QRG", 90, 40)     # = interrupteur VERROU QRG
+        self.m_qrg.setCheckable(True)
+        self.m_qrg.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_qrg.setFixedSize(90, 40)
+        self.m_qrg.setToolTip("VERROU QRG marche / arrêt : la fréquence ne bouge plus")
+        self.m_qrg.clicked.connect(lambda: self.qrg_toggle.setDown(not self.qrg_locked))
+        view = self._big(self.m_qrg, 0.9)
+        page.labels.append((view, "VERROU"))
         hunt_row.addWidget(view)
         view = self._big(self.m_hunt, 0.9)
         page.labels.append((view, "RECHERCHE"))
@@ -5895,6 +5953,9 @@ class MainWindow(QtWidgets.QMainWindow):
             found = re.search(r"background:\s*(#[0-9a-fA-F]{6})", extra)
             button.set_lamp(found.group(1) if found else None)
         self.m_console.set_lamp("#2fd36a" if self.console_button.isChecked() else None)
+        if self.m_qrg.isChecked() != self.qrg_locked:
+            self.m_qrg.setChecked(self.qrg_locked)
+        self.m_qrg.set_lamp("#e03030" if self.qrg_locked else None)
         if self.m_defil.isChecked() != self.defil_on:
             self.m_defil.setChecked(self.defil_on)
         self.m_defil.set_lamp("#2fd36a" if self.defil_on else None)
