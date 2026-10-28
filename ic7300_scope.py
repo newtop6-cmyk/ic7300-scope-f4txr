@@ -5627,7 +5627,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError:
             pass
 
-    STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_708_000, "alt": [3_785_000], "mode": "LSB"}]
+    STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_710_000, "alt": [3_785_000], "mode": "LSB"}]
     BUSY_HOLD_S = 15            # occupé : gardé 15 s après le dernier signal vu
 
     def _stations_load(self):
