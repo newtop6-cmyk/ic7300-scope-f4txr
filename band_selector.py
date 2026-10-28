@@ -51,12 +51,20 @@ class BandSelector(QtWidgets.QWidget):
             if i != self.index:
                 self.index = i
                 self.timer.start(16)
+                if self.underMouse():           # souris sur le commutateur : la suivre
+                    self._point_at(i)
 
     def _choose(self, i):
         i = max(0, min(len(self.names) - 1, i))
         self.index = i
         self.timer.start(16)
+        self._point_at(i)
         self.changed.emit(self.names[i] + "m")
+
+    def _point_at(self, i):
+        """Pointeur de la souris posé pile sur le nom de la bande i."""
+        lp = self._label_pos(self.angles[i]) * self.k
+        QtGui.QCursor.setPos(self.mapToGlobal(lp.toPoint()))
 
     def _tick(self):
         if self._drag and self._drag["moved"]:
