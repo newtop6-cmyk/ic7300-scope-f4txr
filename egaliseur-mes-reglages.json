@@ -151,5 +151,29 @@
     "attack": 10.0,
     "release": 200.0,
     "gate": -50.0
+  },
+  "AVANT + un poil d'aigus F4TXR": {
+    "hp": 0.0,
+    "lp": 0.0,
+    "gain": 6.0,
+    "q": 0.9,
+    "bands": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      2.0,
+      2.0
+    ],
+    "comp_on": false,
+    "thr": -26.0,
+    "ratio": 3.0,
+    "makeup": 9.0,
+    "attack": 10.0,
+    "release": 200.0,
+    "gate": -50.0
   }
 }
