@@ -5070,6 +5070,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_wf_tuned = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
         self.m_wf_plot.addItem(self.m_wf_tuned, ignoreBounds=True)
         self.m_wf_plot.setMinimumHeight(180)
+        self.m_wf_plot.scene().sigMouseClicked.connect(self._mobile_wf_clicked)
+        self.m_wf_plot.setCursor(QtCore.Qt.PointingHandCursor)
+        self.m_wf_plot.setToolTip("Clic sur une station : la radio s'y cale")
         box.addWidget(self.m_wf_plot, 1)
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
@@ -5147,6 +5150,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.setStyleSheet(theirs.styleSheet())
         if self.m_emergency.flashing != self.emergency_button.flashing:
             self.m_emergency.set_flashing(self.emergency_button.flashing)
+
+    def _mobile_wf_clicked(self, event):
+        """Clic sur le waterfall MOBILE : la radio va sur cette fréquence."""
+        if event.button() != QtCore.Qt.LeftButton or self.view != "rf":
+            return
+        vb = self.m_wf_plot.getPlotItem().getViewBox()
+        if not vb.sceneBoundingRect().contains(event.scenePos()):
+            return
+        x = vb.mapSceneToView(event.scenePos()).x()         # kHz
+        step = self.step_combo.currentData()
+        self.tune_to(round(x * 1000 / step) * step)
 
     def _mobile_waterfall(self):
         """Le waterfall de l'écran MOBILE recopie le grand (quand il est affiché)."""
