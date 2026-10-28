@@ -4039,6 +4039,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.snap_timer.start()         # arrondi quand on lâche le bouton
         self.freq_hz = hz
         self.freq_label.setText(format_frequency(hz))
+        self.m_freq.setText(format_frequency(hz))
         self._update_markers()
         band = band_of(hz)
         for name, button in self.band_buttons.items():
@@ -5006,21 +5007,51 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     # --- FIXE / MOBILE ------------------------------------------------------
+    @staticmethod
+    def _big(widget, zoom):
+        """Le même cadran, agrandi zoom fois (dessin et souris compris)."""
+        scene = QtWidgets.QGraphicsScene()
+        scene.setBackgroundBrush(QtGui.QColor("#15181c"))      # fond de l'écran MOBILE
+        widget.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        proxy = scene.addWidget(widget)
+        proxy.setScale(zoom)
+        view = QtWidgets.QGraphicsView(scene)
+        view.setStyleSheet("background: transparent; border: none;")
+        view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        view.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
+        w, h = round(widget.width() * zoom), round(widget.height() * zoom)
+        scene.setSceneRect(0, 0, w, h)
+        view.setFixedSize(w + 2, h + 2)
+        return view
+
     def _mobile_page(self):
-        """Écran MOBILE (à créer) : pour l'instant un titre et le retour à FIXE."""
+        """Écran MOBILE : fréquence, S-mètre, bouton VFO et EMISSION en grand."""
         page = QtWidgets.QWidget()
         page.setStyleSheet("background: #15181c;")
         box = QtWidgets.QVBoxLayout(page)
+        box.setContentsMargins(20, 16, 20, 16)
+        # fréquence : compteur à tambours (molette = changer la fréquence)
+        self.m_freq = DrumDisplay()
+        self.m_freq.tuned.connect(self.on_tuned)
+        box.addWidget(self._big(self.m_freq, 2.4), 0, QtCore.Qt.AlignHCenter)
         box.addStretch()
-        title = QtWidgets.QLabel("MOBILE")
-        title.setAlignment(QtCore.Qt.AlignCenter)
-        title.setStyleSheet("color: #f0d890; font: bold 48px 'DejaVu Sans';")
-        box.addWidget(title)
-        note = QtWidgets.QLabel("Écran mobile en cours de création")
-        note.setAlignment(QtCore.Qt.AlignCenter)
-        note.setStyleSheet("color: #a0a8b0; font: 18px 'DejaVu Sans';")
-        box.addWidget(note)
-        box.addSpacing(30)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(40)
+        row.addStretch()
+        self.m_smeter = VintageSMeter()
+        row.addWidget(self._big(self.m_smeter, 2.0), 0, QtCore.Qt.AlignVCenter)
+        self.m_knob = TuningKnob()                  # bouton VFO
+        self.m_knob.tuned.connect(self.on_knob_tuned)
+        row.addWidget(self._big(self.m_knob, 1.5), 0, QtCore.Qt.AlignVCenter)
+        self.m_emission = EmissionButton()
+        self.m_emission.is_tx = lambda: getattr(self, "vox_tx", False)
+        self.m_emission.toggled.connect(lambda on: self.vox_button.setChecked(on))
+        row.addWidget(self._big(self.m_emission, 2.8), 0, QtCore.Qt.AlignVCenter)
+        row.addStretch()
+        box.addLayout(row)
+        box.addStretch()
+        # retour à l'écran FIXE
         self.mobile_back = ToggleSwitch("FIXE", "MOBILE",
                                         tooltip="Levier en haut = retour à l'écran FIXE")
         self.mobile_back.setDown(True, emit=False)
@@ -5030,7 +5061,6 @@ class MainWindow(QtWidgets.QMainWindow):
         plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
         box.addLayout(plate)
-        box.addStretch()
         return page
 
     def _mobile_toggled(self, mobile):
@@ -6531,6 +6561,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.backlight_timer.stop()
             self.freq_label.set_voice(None)
+            self.m_freq.set_voice(None)
             self._pump_meters(None)
             self.clocks.set_voice(None)
 
@@ -6546,6 +6577,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _backlight_voice(self):
         level = self.voice_scope.voice_level()
         self.freq_label.set_voice(level)
+        self.m_freq.set_voice(level)
         self.clocks.set_voice(level)
 
     def on_transmitting(self, tx):
@@ -7064,6 +7096,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hunter.feed_meter(raw)
         self.scanner.feed_meter(raw)
         self.s_meter.setValue(raw)
+        self.m_smeter.setValue(raw)
         self._rx_meter_feed(raw)
         self.s_raw_avg = 0.8 * self.s_raw_avg + 0.2 * raw     # pour le dosage RNNoise
 
@@ -7495,6 +7528,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.emission_button.setChecked(on)
             self.emission_button.blockSignals(False)
             self.emission_button.update()
+        if self.m_emission.isChecked() != on:          # écran MOBILE
+            self.m_emission.blockSignals(True)
+            self.m_emission.setChecked(on)
+            self.m_emission.blockSignals(False)
+            self.m_emission.update()
 
     def on_vox_knob(self, level):
         self.vox_label.setText(f"{level * 100 / 255:.0f} %")
