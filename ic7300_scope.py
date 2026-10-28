@@ -5751,7 +5751,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
-        self.m_knob = DrakeVfo()                    # VFO look Drake (avant : KWM2Vfo)
+        self.m_knob = KWM2Vfo()                     # VFO Collins KWM-2 (photo de l utilisateur) ; DrakeVfo() = look Drake
         self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
         knob_view = self._big(self.m_knob, 0.80)   # 0,86 avant le multiplicateur
         self.m_emission = EmissionButton()
