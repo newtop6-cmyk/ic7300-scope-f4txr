@@ -8,6 +8,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 UPPER = np.array([156, 160, 150], float)     # gris clair légèrement vert
 LOWER = np.array([74, 82, 76], float)        # gris Collins foncé
+CABINET = np.array([34, 37, 34], float)      # coffret autour des façades
 ENGRAVE = QtGui.QColor("#f2efe4")            # peinture blanche des inscriptions
 
 
@@ -63,19 +64,66 @@ class CollinsPanel(QtWidgets.QWidget):
             return self._cache[1]
         pix = QtGui.QPixmap(w, h)
         p = QtGui.QPainter(pix)
-        p.drawImage(0, 0, wrinkle(w, max(1, split), UPPER, 3))
-        p.drawImage(0, split, wrinkle(w, max(1, h - split), LOWER, 11))
+        # coffret : peinture granitée très sombre, on le voit autour des façades
+        p.drawImage(0, 0, wrinkle(w, h, CABINET, 5))
         p.setRenderHint(QtGui.QPainter.Antialiasing)
-        # baguettes d'aluminium brossé : en haut, au milieu, en bas
-        for y, t in ((0, 7), (split - 5, 10), (h - 7, 7)):
-            self._alu(p, QtCore.QRectF(0, y, w, t))
-        # vis aux quatre coins de chaque zone
-        for y in (22, split - 22, split + 26, h - 24):
-            for x in (22, w - 22):
-                self._screw(p, QtCore.QPointF(x, y))
+        upper = QtCore.QRectF(10, 10, w - 20, split - 14)
+        lower = QtCore.QRectF(10, split + 6, w - 20, h - split - 16)
+        for r, base, seed in ((upper, UPPER, 3), (lower, LOWER, 11)):
+            self._raised(p, r, wrinkle(int(r.width()), int(r.height()), base, seed))
+            for x in (r.left() + 24, r.right() - 24):           # vis dans les coins
+                for y in (r.top() + 24, r.bottom() - 24):
+                    self._screw(p, QtCore.QPointF(x, y))
         p.end()
         self._cache = ((w, h, split), pix)
         return pix
+
+    def _raised(self, p, r, image, radius=30, rim=15):
+        """Façade bombée posée sur le coffret : ombre portée, bords arrondis en
+        relief (lumière en haut à gauche, ombre en bas à droite)."""
+        # ombre portée douce, décalée vers le bas à droite
+        p.setPen(QtCore.Qt.NoPen)
+        for i in range(14, 0, -1):
+            p.setBrush(QtGui.QColor(0, 0, 0, 16))
+            p.drawRoundedRect(r.translated(i * 0.45, i * 0.8).adjusted(-i * 0.4, -i * 0.4,
+                                                                     i * 0.4, i * 0.4),
+                              radius + i * 0.4, radius + i * 0.4)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(r, radius, radius)
+        p.save()
+        p.setClipPath(path)
+        p.drawImage(r.topLeft(), image)
+        # bords arrondis : anneaux successifs, de plus en plus fondus vers l'intérieur
+        for k in range(rim):
+            t = k / rim                                       # 0 = bord, 1 = plat
+            fade = (1 - t) ** 1.6
+            ring = r.adjusted(k + 0.5, k + 0.5, -k - 0.5, -k - 0.5)
+            g = QtGui.QLinearGradient(ring.topLeft(), ring.bottomRight())
+            g.setColorAt(0, QtGui.QColor(255, 255, 255, int(190 * fade)))
+            g.setColorAt(0.45, QtGui.QColor(255, 255, 255, int(25 * fade)))
+            g.setColorAt(0.55, QtGui.QColor(0, 0, 0, int(25 * fade)))
+            g.setColorAt(1, QtGui.QColor(0, 0, 0, int(210 * fade)))
+            p.setPen(QtGui.QPen(QtGui.QBrush(g), 1.2))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawRoundedRect(ring, max(2, radius - k), max(2, radius - k))
+        # léger bombé : centre un peu plus clair que les bords
+        dome = QtGui.QRadialGradient(r.center() - QtCore.QPointF(r.width() * 0.1, r.height() * 0.25),
+                                     max(r.width(), r.height()) * 0.7)
+        dome.setColorAt(0, QtGui.QColor(255, 255, 255, 28))
+        dome.setColorAt(1, QtGui.QColor(0, 0, 0, 40))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(dome)
+        p.drawRect(r)
+        p.restore()
+        # liseré : arête vive claire en haut, contour sombre
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(QtGui.QColor(10, 12, 10, 220), 1.4))
+        p.drawRoundedRect(r, radius, radius)
+        edge = QtGui.QLinearGradient(0, r.top(), 0, r.top() + radius)
+        edge.setColorAt(0, QtGui.QColor(255, 255, 255, 170))
+        edge.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.setPen(QtGui.QPen(QtGui.QBrush(edge), 1))
+        p.drawRoundedRect(r.adjusted(1.5, 1.5, -1.5, -1.5), radius - 1.5, radius - 1.5)
 
     @staticmethod
     def _alu(p, r):
