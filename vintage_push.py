@@ -95,3 +95,80 @@ class VintagePush(QtWidgets.QPushButton):
             p.setPen(QtGui.QColor("#2a2114"))
         p.drawText(cap, QtCore.Qt.AlignCenter, self.text())
         p.end()
+
+
+class RoundPush(QtWidgets.QPushButton):
+    """Micro poussoir ROND vintage en relief 3D : ombre portée, lunette chromée
+    moletée, gorge noire, capuchon ivoire bombé avec inscription gravée ;
+    enfoncé, le capuchon descend et s'assombrit."""
+
+    def __init__(self, text, size=40):
+        super().__init__(text)
+        self.setFixedSize(size, size)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        s = min(self.width(), self.height())
+        c = QtCore.QPointF(s / 2 - 0.8, s / 2 - 1.2)
+        R = s / 2 - 3
+        down = self.isDown()
+        # ombre portée douce, en bas à droite
+        for i in range(5, 0, -1):
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(0, 0, 0, 22))
+            p.drawEllipse(c + QtCore.QPointF(1.2 + i * 0.35, 1.8 + i * 0.4), R + i * 0.5, R + i * 0.5)
+        # lunette chromée (dégradé conique = reflets du métal tourné)
+        g = QtGui.QConicalGradient(c, 135)
+        for stop, col in ((0, "#ffffff"), (0.12, "#b9bdb6"), (0.3, "#5d615b"),
+                          (0.5, "#e8ebe6"), (0.7, "#6d716b"), (0.88, "#cfd2cc"), (1, "#ffffff")):
+            g.setColorAt(stop, QtGui.QColor(col))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor("#1b1d1a"), 0.9))
+        p.drawEllipse(c, R, R)
+        # moletage fin sur le bord de la lunette
+        p.setPen(QtGui.QPen(QtGui.QColor(30, 30, 30, 110), 0.7))
+        import math
+        for k in range(36):
+            a = math.radians(k * 10)
+            u = QtCore.QPointF(math.cos(a), math.sin(a))
+            p.drawLine(c + u * (R - 2.2), c + u * (R - 0.6))
+        # gorge noire
+        rg = R * 0.74
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor("#0b0c0a"))
+        p.drawEllipse(c, rg, rg)
+        # capuchon bombé ivoire (descend quand on appuie)
+        rc = rg - 1.6
+        cc = c + QtCore.QPointF(0, 1.0 if down else -0.4)
+        g = QtGui.QRadialGradient(cc + QtCore.QPointF(-rc * 0.35, -rc * 0.4), rc * 1.5)
+        top, mid, bot = QtGui.QColor("#fffbee"), QtGui.QColor("#e6d7af"), QtGui.QColor("#8e7a4e")
+        if down:
+            top, mid, bot = top.darker(118), mid.darker(118), bot.darker(118)
+        g.setColorAt(0, top)
+        g.setColorAt(0.55, mid)
+        g.setColorAt(1, bot)
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor(60, 48, 25, 160), 0.6))
+        p.drawEllipse(cc, rc, rc)
+        # point de lumière sur le dôme
+        if not down:
+            hl = QtGui.QRadialGradient(cc + QtCore.QPointF(-rc * 0.38, -rc * 0.45), rc * 0.45)
+            hl.setColorAt(0, QtGui.QColor(255, 255, 255, 200))
+            hl.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(hl)
+            p.drawEllipse(cc, rc, rc)
+        # inscription gravée : creux sombre + liseré clair en dessous
+        f = QtGui.QFont("DejaVu Sans Condensed")
+        f.setPixelSize(max(6, int(min(rc * 0.62, 2 * rc * 0.78 / (0.6 * max(1, len(self.text())))))))
+        f.setWeight(QtGui.QFont.Black)
+        p.setFont(f)
+        box = QtCore.QRectF(cc.x() - rc, cc.y() - rc, 2 * rc, 2 * rc)
+        p.setPen(QtGui.QColor(255, 250, 230, 170))
+        p.drawText(box.translated(0, 0.7), QtCore.Qt.AlignCenter, self.text())
+        p.setPen(QtGui.QColor("#2a1f0c"))
+        p.drawText(box, QtCore.Qt.AlignCenter, self.text())
+        p.end()

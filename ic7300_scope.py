@@ -71,7 +71,7 @@ from drum_display import DrumClock, DrumDisplay
 from nixie_display import NixieDisplay
 from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
-from vintage_push import VintagePush
+from vintage_push import RoundPush, VintagePush
 from jewel_lamp import JewelLamp
 from station_plate import StationPlate
 from emission_check import EmissionWindow, TxAnalyzer
@@ -2912,6 +2912,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.other_label.setStyleSheet("font: 11pt monospace; color: #90a4ae;")
         self.other_label.setToolTip("L'autre VFO")
         self.vfo_label.hide()               # inscription « VFO ? » retirée (gardée en mémoire)
+        # micro poussoir rond au-dessus du VFO : pas × 1 → × 10 → × 100 → × 1000
+        self.vfo_mult = 1
+        self.vfo_mult_push = RoundPush("×1", 40)
+        self.vfo_mult_push.setToolTip("Multiplie le pas du bouton VFO : chaque appui passe "
+                                      "à ×1 → ×10 → ×100 → ×1000 → ×1")
+        self.vfo_mult_push.clicked.connect(self._vfo_mult_next)
+        vfo.addWidget(self.vfo_mult_push, 0, 0, 1, 4, QtCore.Qt.AlignHCenter | QtCore.Qt.AlignBottom)
         vfo.addWidget(self.knob, 1, 0, 1, 4, QtCore.Qt.AlignCenter)
         vfo.addWidget(self.fine_plate, 1, 4, QtCore.Qt.AlignVCenter)   # à droite du VFO
         vfo.setColumnMinimumWidth(5, BAND_SEL_GAP)
@@ -7061,10 +7068,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.freq_hz is None:
             return
         step = self._fine_step() or self.step_combo.currentData()   # sinon : pas du menu
+        step *= self.vfo_mult                       # micro poussoir ×1…×1000
         base = self.freq_hz // step * step
         if steps < 0 and base != self.freq_hz:
             steps += 1                      # on s'aligne d'abord sur le pas
         self.tune_to(base + steps * step)
+
+    def _vfo_mult_next(self):
+        """Micro poussoir au-dessus du VFO : ×1 → ×10 → ×100 → ×1000 → ×1."""
+        self.vfo_mult = 1 if self.vfo_mult >= 1000 else self.vfo_mult * 10
+        self.vfo_mult_push.setText(f"×{self.vfo_mult}")
+        step = (self._fine_step() or self.step_combo.currentData()) * self.vfo_mult
+        txt = f"{step / 1000:g} kHz" if step >= 1000 else f"{step} Hz"
+        self.statusBar().showMessage(f"VFO : pas ×{self.vfo_mult} = {txt} par cran", 4000)
 
     def _mobile_knob_tuned(self, steps):
         """VFO de l'écran MOBILE : chaque cran avance de 50 Hz (5 kHz par tour) ;
