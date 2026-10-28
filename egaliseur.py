@@ -444,12 +444,35 @@ class EqEngine:
         threading.Thread(target=finish, daemon=True).start()
         return files
 
+    @staticmethod
+    def _loud(path):
+        """Copie d'écoute bien audible : parole amenée vers −11 dB, limiteur doux
+        (les enregistrements bruts sont trop faibles à l'écoute)."""
+        import wave
+        with wave.open(path) as w:
+            rate = w.getframerate()
+            x = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+        n = rate // 50
+        blocks = x[: len(x) // n * n].reshape(-1, n)
+        rms = np.sqrt((blocks ** 2).mean(axis=1)) if len(blocks) else np.array([1e-3])
+        voice = rms[rms > 10 ** (-45 / 20)]
+        level = float(np.median(voice)) if len(voice) else float(rms.max() or 1e-3)
+        y = np.tanh(x * (10 ** (-11 / 20) / level) * 1.2) / np.tanh(1.2) * 0.92
+        out = path[:-4] + "_ecoute.wav"
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes((y * 32767).astype(np.int16).tobytes())
+        return out
+
     def playback(self, which):
         path = getattr(self, "rec_files", {}).get(which)
         if path and os.path.exists(path):
             if getattr(self, "player", None):
                 self.player.kill()
-            self.player = subprocess.Popen(["paplay", path], stderr=subprocess.DEVNULL)
+            self.player = subprocess.Popen(["paplay", self._loud(path)],
+                                           stderr=subprocess.DEVNULL)
             return True
         return False
 
@@ -475,7 +498,7 @@ class EqEngine:
             w.writeframes(y.tobytes())
         if getattr(self, "player", None):
             self.player.kill()
-        self.player = subprocess.Popen(["paplay", out], stderr=subprocess.DEVNULL)
+        self.player = subprocess.Popen(["paplay", self._loud(out)], stderr=subprocess.DEVNULL)
         return True
 
     # s'écouter dans le casque
