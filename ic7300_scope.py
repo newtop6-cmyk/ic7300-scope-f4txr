@@ -204,7 +204,7 @@ BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
 WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (~30/s, fluide)
-MOBILE_VFO_STEP = 100           # VFO MOBILE : 100 Hz par cran, 100 crans = 10 kHz par tour
+MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
 RIG_ADDR = 0x94                 # adresse CI-V par défaut de l'IC-7300
@@ -2005,7 +2005,7 @@ class KWM2Vfo(SmoothKnob):
     avec l'échelle des kHz, bouton festonné à disque d'aluminium et manivelle).
     Léger, à volant, comme SmoothKnob ; on le tourne autour du bouton."""
 
-    DETENTS = 100                   # un tour = 10 kHz, par pas de 100 Hz : très doux
+    DETENTS = 100                   # un tour = 5 kHz, par pas de 50 Hz : délicat
 
     def __init__(self):
         super().__init__()
@@ -2089,7 +2089,7 @@ class KWM2Vfo(SmoothKnob):
         self._rotate(delta)
 
     def wheelEvent(self, event):
-        """Molette : un cran de molette = 500 Hz (5 pas de 100 Hz), régulier."""
+        """Molette : un cran de molette = 250 Hz (5 pas de 50 Hz), régulier."""
         self._wheel += event.angleDelta().y()
         notches = int(self._wheel / 120)
         if notches:
@@ -5113,6 +5113,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Les stations BLU sont presque toujours sur un kHz rond : on s'y cale."""
         if self.audio.ssb is None or self.tx_active or self.freq_hz is None:
             return
+        if self.freq_hz == getattr(self, "_mobile_fine_hz", None):
+            return                          # réglé finement au VFO MOBILE : on n'y touche pas
         target = round(self.freq_hz / 1000) * 1000
         if self.ssb_target is not None and self.freq_hz == self.ssb_target \
                 and abs(self.freq_hz - target) <= FINE_MAX:
@@ -6744,7 +6746,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_to(base + steps * step)
 
     def _mobile_knob_tuned(self, steps):
-        """VFO de l'écran MOBILE : chaque cran avance de 100 Hz (50 kHz par tour)."""
+        """VFO de l'écran MOBILE : chaque cran avance de 50 Hz (5 kHz par tour) ;
+        pas d'arrondi automatique au kHz, qui défairait le réglage fin."""
         self._manual_tuning()
         if self.freq_hz is None:
             return
@@ -6752,7 +6755,9 @@ class MainWindow(QtWidgets.QMainWindow):
         base = self.freq_hz // step * step
         if steps < 0 and base != self.freq_hz:
             steps += 1                      # on s'aligne d'abord sur le pas
-        self.tune_to(base + steps * step)
+        self._mobile_fine_hz = base + steps * step
+        self.tune_to(self._mobile_fine_hz)
+        self.snap_timer.stop()                  # réglage fin gardé tel quel
 
     def on_freq_entered(self):
         self._manual_tuning()
