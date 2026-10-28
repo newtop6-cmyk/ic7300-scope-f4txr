@@ -5072,7 +5072,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_wf_plot.setMinimumHeight(180)
         self.m_wf_plot.scene().sigMouseClicked.connect(self._mobile_wf_clicked)
         self.m_wf_plot.setCursor(QtCore.Qt.PointingHandCursor)
-        self.m_wf_plot.setToolTip("Clic sur une station : la radio s'y cale")
+        self.m_wf_plot.setToolTip("Clic sur une station : la radio s'y cale ; "
+                                  "molette : changer la fréquence")
+        self.m_wf_plot.viewport().installEventFilter(self)     # molette
         box.addWidget(self.m_wf_plot, 1)
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
@@ -7248,6 +7250,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def eventFilter(self, obj, event):
         kind = event.type()
+        if kind == QtCore.QEvent.Wheel and hasattr(self, "m_wf_plot") \
+                and obj is self.m_wf_plot.viewport():
+            # waterfall MOBILE : molette = fréquence, au pas choisi
+            notches = event.angleDelta().y() / 120
+            if notches and self.freq_hz is not None:
+                self.on_tuned(round(notches) or (1 if notches > 0 else -1))
+            return True
         if kind == QtCore.QEvent.Wheel:
             pos = self.spec_plot.scene().views()[0].mapToScene(event.pos())
             if self._x_at(pos) is not None and self.freq_hz is not None:
