@@ -71,6 +71,7 @@ from collins_dial import CollinsDial
 from collins_panel import CollinsPanel
 from vintage_push import VintagePush
 from jewel_lamp import JewelLamp
+from collins_knob import paint_collins_knob
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
 from vintage_switch import BlueLed, LeverSwitch, SilverPlate
@@ -1994,6 +1995,17 @@ class SmoothKnob(TuningKnob):
         if abs(self.speed) < 25:
             self.speed = 0.0
             self.fly.stop()
+
+
+class CollinsKnob(SmoothKnob):
+    """VFO de l'écran MOBILE dessiné comme le gros bouton d'accord d'un
+    Collins KWM-2 (bakélite noire, jupe cannelée, creux pour le doigt)."""
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        paint_collins_knob(p, QtCore.QRectF(self.rect()), self.angle,
+                           hooked=self._last is not None)
+        p.end()
 
 class BarGraph(QtWidgets.QWidget):
     """Bargraph à segments avec mémoire de crête."""
@@ -5198,7 +5210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
-        self.m_knob = SmoothKnob()                  # bouton VFO léger, à volant
+        self.m_knob = CollinsKnob()                 # VFO façon KWM-2, léger, à volant
         self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
         knob_view = self._big(self.m_knob, 1.3)
         page.labels.append((knob_view, "VFO"))
