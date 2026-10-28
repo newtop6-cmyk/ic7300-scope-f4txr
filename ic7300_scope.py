@@ -2039,21 +2039,51 @@ class KWM2Vfo(SmoothKnob):
         c = kwm2_vfo.KNOB_C * (self.width() / kwm2_vfo.W)
         return math.degrees(math.atan2(pos.y() - c.y(), pos.x() - c.x()))
 
-    def mouseReleaseEvent(self, event):
-        """Linéaire et précis : pas de volant, le bouton s'arrête où on le lâche."""
-        self.speed = 0.0
-        self._direct = False
+    # Un clic : le VFO est pris (lueur ambre) et suit la souris sans tenir le
+    # bouton ; deux clics : il est lâché. Clic droit ou Échap : lâché aussi.
+    def _hook(self, pos):
+        self._last = self._angle_at(pos)
+        self.setMouseTracking(True)
+        self.setCursor(QtCore.Qt.ClosedHandCursor)
+        self.update()
+
+    def _unhook(self):
         self._last = None
+        self._direct = False
+        self.setMouseTracking(False)
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.RightButton:
+            self._unhook()
+        elif event.button() == QtCore.Qt.LeftButton and self._last is None:
+            self._hook(event.pos())
         event.accept()
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._unhook()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()                  # le VFO reste pris jusqu'au double-clic
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Escape:
+            self._unhook()
+        else:
+            super().keyPressEvent(event)
+
     def mouseMoveEvent(self, event):
+        """Linéaire et précis : exactement l'angle tourné autour du bouton."""
         if self._last is None:
             return
         a = self._angle_at(event.pos())
-        delta = (a - self._last + 180) % 360 - 180      # exactement l'angle tourné
+        delta = (a - self._last + 180) % 360 - 180
         self._last = a
+        if abs(delta) > 45:
+            return                      # souris revenue d'ailleurs : pas de saut
         self._rotate(delta)
 
     def wheelEvent(self, event):
