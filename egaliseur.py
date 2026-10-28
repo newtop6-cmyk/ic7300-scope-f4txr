@@ -33,6 +33,7 @@ BANDS = (100, 200, 400, 700, 1000, 1500, 2000, 2500, 3000)
 ENV = {**os.environ, "LC_ALL": "C"}
 CEILING = 10 ** (-1 / 20)       # limiteur : crêtes tenues à -1 dBFS
 LIM_RELEASE_MS = 60
+REC_SECONDS = 15                # durée de l'enregistrement de test
 
 COMP_TEXT = """
 [compresseur]
@@ -424,7 +425,7 @@ class EqEngine:
     # enregistrement de comparaison : voix brute et voix égalisée en même temps
     REC_DIR = "/tmp"
 
-    def record(self, seconds=6):
+    def record(self, seconds=REC_SECONDS):
         """Enregistre `seconds` s du micro brut (avant) et égalisé (après)."""
         files = {}
         procs = []
@@ -754,9 +755,9 @@ class EqWindow(QtWidgets.QWidget):
         cmp_row = QtWidgets.QHBoxLayout()
         big = ("QPushButton { font: bold 12pt sans-serif; color: #fff; background: %s; "
                "border-radius: 8px; padding: 8px 14px; } QPushButton:disabled { color: #888; }")
-        self.rec_button = QtWidgets.QPushButton("● S'ENREGISTRER 6 s")
+        self.rec_button = QtWidgets.QPushButton("● S'ENREGISTRER 15 s")
         self.rec_button.setStyleSheet(big % "#b71c1c")
-        self.rec_button.setToolTip("Parle dans le micro pendant 6 s (rien n'est émis)")
+        self.rec_button.setToolTip("Parle dans le micro pendant 15 s (rien n'est émis)")
         self.rec_button.clicked.connect(self._record)
         self.play_before = QtWidgets.QPushButton("▶ ÉCOUTER AVANT")
         self.play_before.setStyleSheet(big % "#455a64")
@@ -875,8 +876,8 @@ class EqWindow(QtWidgets.QWidget):
             self.rec_info.setText("Pas de micro en service")
             return
         self.listen_box.setChecked(False)
-        self.engine.record(6)
-        self.rec_left = 6
+        self.engine.record(REC_SECONDS)
+        self.rec_left = REC_SECONDS
         self.rec_button.setEnabled(False)
         self._rec_tick()
         self.rec_timer.start(1000)
