@@ -1936,6 +1936,64 @@ class TuningKnob(QtWidgets.QWidget):
         p.drawEllipse(hl)
 
 
+
+class SmoothKnob(TuningKnob):
+    """VFO de l'écran MOBILE : léger et souple. Clic + glisser direct (pas de
+    double-clic), un cran tous les 5°, et effet de volant : lancé d'un geste,
+    il continue sur sa lancée puis ralentit en douceur."""
+    DETENTS = 72
+
+    def __init__(self):
+        super().__init__()
+        self.speed = 0.0                    # °/s, pour le volant
+        self._t = None
+        self.fly = QtCore.QTimer(self)
+        self.fly.timeout.connect(self._coast)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.fly.stop()                 # la main arrête le volant
+            self.speed = 0.0
+            self._direct = True
+            self._last = self._angle_at(event.pos())
+            self._t = time.monotonic()
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._last is None:
+            return
+        a = self._angle_at(event.pos())
+        delta = (a - self._last + 180) % 360 - 180
+        self._last = a
+        now = time.monotonic()
+        dt = max(1e-3, now - (self._t or now))
+        self._t = now
+        self.speed = 0.6 * self.speed + 0.4 * (delta / dt)      # vitesse lissée
+        self._rotate(delta)
+
+    def mouseReleaseEvent(self, event):
+        self._direct = False
+        self._last = None
+        self.setCursor(QtCore.Qt.OpenHandCursor)
+        if time.monotonic() - (self._t or 0) > 0.08:
+            self.speed = 0.0                # main arrêtée avant de lâcher
+        if abs(self.speed) > 90:
+            self.speed = max(-1500.0, min(1500.0, self.speed))
+            self.fly.start(16)
+        self.update()
+        event.accept()
+
+    def _coast(self):
+        self._rotate(self.speed * 0.016)
+        self.speed *= 0.93                  # freinage doux
+        if abs(self.speed) < 25:
+            self.speed = 0.0
+            self.fly.stop()
+
 class BarGraph(QtWidgets.QWidget):
     """Bargraph à segments avec mémoire de crête."""
 
@@ -5130,7 +5188,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
-        self.m_knob = TuningKnob()                  # bouton VFO
+        self.m_knob = SmoothKnob()                  # bouton VFO léger, à volant
         self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
         knob_view = self._big(self.m_knob, 1.3)
         page.labels.append((knob_view, "VFO"))
