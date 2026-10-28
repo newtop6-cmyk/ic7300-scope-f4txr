@@ -204,7 +204,7 @@ BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
 WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (~30/s, fluide)
-MOBILE_VFO_STEP = 50_000        # VFO de l'écran MOBILE : 50 kHz par cran
+MOBILE_VFO_STEP = 100           # VFO MOBILE : 100 Hz par cran, 500 crans = 50 kHz par tour
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
 RIG_ADDR = 0x94                 # adresse CI-V par défaut de l'IC-7300
@@ -2005,6 +2005,8 @@ class KWM2Vfo(SmoothKnob):
     avec l'échelle des kHz, bouton festonné à disque d'aluminium et manivelle).
     Léger, à volant, comme SmoothKnob ; on le tourne autour du bouton."""
 
+    DETENTS = 500                   # un tour = 50 kHz, par pas de 100 Hz : graduel
+
     def __init__(self):
         super().__init__()
         self.setFixedSize(kwm2_vfo.W, kwm2_vfo.H)
@@ -2087,14 +2089,14 @@ class KWM2Vfo(SmoothKnob):
         self._rotate(delta)
 
     def wheelEvent(self, event):
-        """Molette : un cran de molette = un cran du VFO (50 kHz), sans à-coup."""
+        """Molette : un cran de molette = 1 kHz (10 pas de 100 Hz), régulier."""
         self._wheel += event.angleDelta().y()
-        steps = int(self._wheel / 120)
-        if steps:
-            self._wheel -= steps * 120
+        notches = int(self._wheel / 120)
+        if notches:
+            self._wheel -= notches * 120
             self._accum = 0.0
-            self.angle = (self.angle + steps * 360 / self.DETENTS) % 360
-            self.tuned.emit(steps)
+            self.angle = (self.angle + notches * 10 * 360 / self.DETENTS) % 360
+            self.tuned.emit(notches * 10)
             self.update()
         event.accept()
 
@@ -6742,7 +6744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tune_to(base + steps * step)
 
     def _mobile_knob_tuned(self, steps):
-        """VFO de l'écran MOBILE : chaque cran avance de 50 kHz."""
+        """VFO de l'écran MOBILE : chaque cran avance de 100 Hz (50 kHz par tour)."""
         self._manual_tuning()
         if self.freq_hz is None:
             return
