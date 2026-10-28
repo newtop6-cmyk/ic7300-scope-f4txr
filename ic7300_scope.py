@@ -2955,8 +2955,9 @@ class MainWindow(QtWidgets.QMainWindow):
         step_top = QtWidgets.QHBoxLayout()
         step_top.setSpacing(8)
         step_top.addStretch()
-        step_top.addWidget(self.vfo_step_push, 0, QtCore.Qt.AlignVCenter)
+        step_top.addSpacing(self.vfo_step_push.width() + 8)    # lucarne pile au centre
         step_top.addWidget(self.vfo_step_window, 0, QtCore.Qt.AlignVCenter)
+        step_top.addWidget(self.vfo_step_push, 0, QtCore.Qt.AlignVCenter)
         step_top.addStretch()
         vfo.addLayout(step_top, 0, 0, 1, 4, QtCore.Qt.AlignBottom)
         self._vfo_step_show()
@@ -5666,8 +5667,9 @@ class MainWindow(QtWidgets.QMainWindow):
         mult_row = QtWidgets.QHBoxLayout()
         mult_row.setSpacing(8)
         mult_row.addStretch()
-        mult_row.addWidget(mult_view, 0, QtCore.Qt.AlignVCenter)
+        mult_row.addSpacing(mult_view.sizeHint().width() + 8)  # lucarne pile au centre
         mult_row.addWidget(self.m_mult_window, 0, QtCore.Qt.AlignVCenter)
+        mult_row.addWidget(mult_view, 0, QtCore.Qt.AlignVCenter)
         mult_row.addStretch()
         knob_col.addLayout(mult_row)
         knob_col.addWidget(knob_view, 0, QtCore.Qt.AlignHCenter)
@@ -7238,12 +7240,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Petite fenêtre rétroéclairée ambre qui affiche le pas en cours."""
         lab = QtWidgets.QLabel()
         lab.setAlignment(QtCore.Qt.AlignCenter)
-        lab.setFixedSize(146, 30)
+        lab.setFixedSize(210, 40)
         lab.setStyleSheet(
-            "QLabel { font: 900 12pt 'DejaVu Sans Condensed'; color: #ffb43a;"
+            "QLabel { font: 900 16pt 'DejaVu Sans Condensed'; color: #ffb43a;"
             " background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a0f04,"
-            " stop:0.5 #2e1a06, stop:1 #120a02); border: 2px solid #9a9d98;"
-            " border-top-color: #4a4c48; border-left-color: #4a4c48; border-radius: 6px; }")
+            " stop:0.5 #2e1a06, stop:1 #120a02); border: 3px solid #9a9d98;"
+            " border-top-color: #4a4c48; border-left-color: #4a4c48; border-radius: 8px; }")
         glow = QtWidgets.QGraphicsDropShadowEffect(lab)
         glow.setOffset(0, 0)
         glow.setBlurRadius(12)
