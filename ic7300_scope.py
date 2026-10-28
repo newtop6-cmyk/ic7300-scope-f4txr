@@ -76,6 +76,7 @@ from jewel_lamp import JewelLamp
 from station_plate import StationPlate
 from emission_check import EmissionWindow, TxAnalyzer
 from collins_knob import paint_collins_knob
+import drake_vfo
 import kwm2_vfo
 from function_screen import FunctionScreen, PendingView, SstvLiveView
 from tx_galva import RedButton, TxGalva
@@ -2124,6 +2125,17 @@ class KWM2Vfo(SmoothKnob):
         p = QtGui.QPainter(self)
         p.scale(self.width() / kwm2_vfo.W, self.height() / kwm2_vfo.H)
         kwm2_vfo.paint_kwm2(p, self.khz_shown, self.angle, hooked=self._last is not None)
+        p.end()
+
+
+class DrakeVfo(KWM2Vfo):
+    """VFO de l'écran MOBILE au look Drake (drake_vfo.py) : même fonctionnement
+    que KWM2Vfo (même géométrie, même pas, prise au clic), seul le dessin change."""
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.scale(self.width() / drake_vfo.W, self.height() / drake_vfo.H)
+        drake_vfo.paint_drake(p, self.khz_shown, self.angle, hooked=self._last is not None)
         p.end()
 
 
@@ -5605,7 +5617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 3e ligne : S-mètre, VFO, EMISSION, QSO en français et VOX
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(30)
-        self.m_knob = KWM2Vfo()                     # ensemble VFO du KWM-2, à volant
+        self.m_knob = DrakeVfo()                    # VFO look Drake (avant : KWM2Vfo)
         self.m_knob.tuned.connect(self._mobile_knob_tuned)     # pas de 50 kHz
         knob_view = self._big(self.m_knob, 0.80)   # 0,86 avant le multiplicateur
         self.m_emission = EmissionButton()
