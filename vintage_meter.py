@@ -415,12 +415,26 @@ class SwrMicroGalva(QtWidgets.QWidget):
         side.setColorAt(1, QtGui.QColor(0, 0, 0, 110))
         p.setBrush(side)
         p.drawRoundedRect(QtCore.QRectF(0, 0, w, h), 10, 10)
+        p.setBrush(QtCore.Qt.NoBrush)                        # arête de lumière (3D en avant)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 240, 215, 190), 1.2))
+        p.drawLine(QtCore.QPointF(10, 1.2), QtCore.QPointF(w - 10, 1.2))
+        p.setPen(QtCore.Qt.NoPen)
         case = QtGui.QLinearGradient(0, 0, 0, h)
         case.setColorAt(0, QtGui.QColor("#54422f"))
         case.setColorAt(1, QtGui.QColor("#21170f"))
         p.setBrush(case)
         p.drawRoundedRect(QtCore.QRectF(3, 3, w - 6, h - 6), 8, 8)
-        face = QtCore.QRectF(7, 7, w - 14, h - 14)
+        # jonc chromé bombé autour du cadran : clair en haut, sombre en bas
+        ring = QtGui.QLinearGradient(0, 4, 0, h - 4)
+        for stop, col in ((0, "#ffffff"), (0.3, "#cfd2ce"), (0.6, "#6e716d"), (1, "#1c1d1b")):
+            ring.setColorAt(stop, QtGui.QColor(col))
+        p.setBrush(ring)
+        p.drawRoundedRect(QtCore.QRectF(4, 4, w - 8, h - 8), 7, 7)
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 200), 1))   # fond de gorge du jonc
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawRoundedRect(QtCore.QRectF(8, 8, w - 16, h - 16), 5, 5)
+        p.setPen(QtCore.Qt.NoPen)
+        face = QtCore.QRectF(8.5, 8.5, w - 17, h - 17)
         glow = QtGui.QRadialGradient(w / 2, h, w * 0.7)
         glow.setColorAt(0, QtGui.QColor("#fff3cf"))
         glow.setColorAt(0.55, QtGui.QColor("#f1d999"))
@@ -471,6 +485,28 @@ class SwrMicroGalva(QtWidgets.QWidget):
         vig.setColorAt(0.62, QtGui.QColor(0, 0, 0, 0))
         vig.setColorAt(1, QtGui.QColor(0, 0, 0, 140))
         p.fillRect(face, vig)
+        # cadran enfoncé : ombre du cadre sur le haut et les côtés
+        sh = QtGui.QLinearGradient(0, face.top(), 0, face.top() + 7)
+        sh.setColorAt(0, QtGui.QColor(0, 0, 0, 210))
+        sh.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+        p.fillRect(face, sh)
+        for x0, x1 in ((face.left(), face.left() + 9), (face.right(), face.right() - 9)):
+            sg = QtGui.QLinearGradient(x0, 0, x1, 0)
+            sg.setColorAt(0, QtGui.QColor(0, 0, 0, 120))
+            sg.setColorAt(1, QtGui.QColor(0, 0, 0, 0))
+            p.fillRect(face, sg)
+        # verre bombé qui sort vers l'avant : large reflet en haut + liseré bas
+        dome = QtGui.QPainterPath()
+        dome.addRoundedRect(QtCore.QRectF(face.left() + 10, face.top() + 1.5,
+                                          face.width() - 20, face.height() * 0.42), 6, 6)
+        hl = QtGui.QLinearGradient(0, face.top(), 0, face.top() + face.height() * 0.45)
+        hl.setColorAt(0, QtGui.QColor(255, 255, 255, 215))
+        hl.setColorAt(0.6, QtGui.QColor(255, 255, 255, 60))
+        hl.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
+        p.fillPath(dome, hl)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 90), 1))
+        p.drawLine(QtCore.QPointF(face.left() + 14, face.bottom() - 2.5),
+                   QtCore.QPointF(face.right() - 14, face.bottom() - 2.5))
         p.restore()
         # loupe ronde dans un anneau métallique, à gauche : ROS mesuré « 1:x »
         lc, lr = QtCore.QPointF(29, h / 2), 15.5
