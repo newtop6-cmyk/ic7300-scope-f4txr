@@ -9,6 +9,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 SWEEP = 270                     # degrés de course, de 0 (bas gauche) au maximum (bas droite)
 MODE = {"precision": True}      # interrupteur PRÉCISION : double-clic pour accrocher
+HOOK_ALL = True                 # tous les boutons : 1 clic = collé à la souris, 2e clic = lâché
 BASE = 170                      # le dessin est fait pour 170 px, puis mis à l'échelle
 
 
@@ -77,8 +78,8 @@ class VintageKnob(QtWidgets.QWidget):
     # ses déplacements, sans tenir le bouton ; nouveau double-clic, clic droit
     # ou Échap : il se décroche.
     def mousePressEvent(self, event):
-        if self.fine:
-            # volumes : 1 clic = le bouton se COLLE au doigt (anneau lumineux) et
+        if self.fine or HOOK_ALL:
+            # 1 clic = le bouton se COLLE au doigt (anneau lumineux) et
             # tourne en bougeant la souris, sans tenir le bouton ; 2e clic (où que
             # ce soit), clic droit ou Échap = lâché
             if self._dragging:
@@ -86,6 +87,7 @@ class VintageKnob(QtWidgets.QWidget):
             elif self.isEnabled() and event.button() == QtCore.Qt.LeftButton:
                 self._direct = False
                 self._dragging = True
+                self._hooked = True
                 self._set_anchor(event.globalPos())
                 self.setMouseTracking(True)
                 self.grabMouse(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
@@ -112,7 +114,7 @@ class VintageKnob(QtWidgets.QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
-        if self.fine:
+        if self.fine or HOOK_ALL:
             self.mousePressEvent(event)         # clics rapprochés : chacun compte
             return
         if not MODE["precision"]:
@@ -176,6 +178,7 @@ class VintageKnob(QtWidgets.QWidget):
         return v
 
     def _release(self):
+        self._hooked = False
         if not self._dragging:
             return
         self._anchor = None
@@ -203,7 +206,7 @@ class VintageKnob(QtWidgets.QWidget):
     def mouseMoveEvent(self, event):
         if not self._dragging:
             return
-        if self.fine:
+        if self.fine or getattr(self, "_hooked", False):
             self._user_set(self._fine_value(event.globalPos()))
             return
         if not getattr(self, "_direct", False) and self._too_far(event.pos()):
@@ -406,7 +409,7 @@ class ScaleBakelite(VintageKnob):
     def mouseMoveEvent(self, event):
         if not self._dragging:
             return
-        if self.fine:
+        if self.fine or getattr(self, "_hooked", False):
             self.setValue(self._fine_value(event.globalPos()))
             return
         if not getattr(self, "_direct", False) and self._too_far(event.pos()):
