@@ -8206,7 +8206,23 @@ class MainWindow(QtWidgets.QMainWindow):
             capture_output=True, text=True, timeout=5).stdout.strip()
         self.tx_monitor_module = out if out.isdigit() else None
 
+    def _tx_journal(self, text):
+        """tx-debug.log : pourquoi une émission s'est arrêtée (diagnostic)."""
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "tx-debug.log"), "a") as f:
+                f.write(f"{datetime.datetime.now():%H:%M:%S.%f} {text}\n")
+        except OSError:
+            pass
+
     def stop_tx(self, reason=None):
+        if self.tx_active:
+            import traceback
+            chain = " < ".join(fr.name for fr in traceback.extract_stack()[-5:-1][::-1])
+            held = time.monotonic() - getattr(self, "tx_started", time.monotonic())
+            self._tx_journal(f"FIN d'émission après {held:.1f} s : {reason or 'sans message'}"
+                             f" (par {chain}) top={self.top_vox} "
+                             f"vox_vocal={self.vox_by_voice}")
         self._backlight_tx(False)           # rétro-éclairage : retour au calme
         self._tx_monitor(False)
         mon = getattr(self, "vox_monitor_player", None)
@@ -8333,7 +8349,15 @@ class MainWindow(QtWidgets.QMainWindow):
         elif tx:
             self._backlight_tx(True)
         delay = 6 if str(self.civ.port).startswith("socket://") else 2
-        if self.tx_active and not tx and time.monotonic() - self.tx_started > delay:
+        now = time.monotonic()
+        if tx or not self.tx_active:
+            self._radio_rx_since = None
+        elif getattr(self, "_radio_rx_since", None) is None:
+            self._radio_rx_since = now          # 1re réponse « réception » : on attend
+            self._tx_journal("la radio répond « réception » pendant l'émission (1re fois)")
+        # une seule réponse « réception » ne coupe plus : il faut 1,5 s d'affilée
+        if self.tx_active and not tx and now - self.tx_started > delay \
+                and now - self._radio_rx_since >= 1.5:
             self.stop_tx("La radio n'émet pas (hors bande amateur ?)")
 
     SWR_ALARM = 2.0
