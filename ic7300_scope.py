@@ -2931,6 +2931,7 @@ class MainWindow(QtWidgets.QMainWindow):
         meters.addStretch(1)
         # à droite : galva POWER, jumeau du S-mètre
         self.power_meter = VintagePowerMeter()
+        self.power_meter.dual = True            # double aiguille : puissance + ROS
         power_col = QtWidgets.QVBoxLayout()
         power_col.setSpacing(1)
         self.swr_galva.setFixedWidth(self.power_meter.width())   # même largeur que POWER
@@ -8347,6 +8348,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.swr_meter.setValue(swr)
         self.swr_galva.setValue(swr)
         self.swr_galva.set_ratio(piecewise(swr, SWR_POINTS))
+        self.power_meter.set_swr(piecewise(swr, SWR_POINTS))    # aiguille rouge du galva POWER
         self.swr_value.setText(f"{piecewise(swr, SWR_POINTS):.1f}")
         self.tx_galva.set_swr(piecewise(swr, SWR_POINTS))
         self.swr_alarm = piecewise(swr, SWR_POINTS) > self.SWR_ALARM      # strictement au-dessus de 2

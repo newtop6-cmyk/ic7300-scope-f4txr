@@ -196,6 +196,23 @@ class VintagePowerMeter(VintageSMeter):
         super().__init__()
         self.setToolTip("Puissance émise (Po) en watts")
         self.watts_peak = 0.0
+        # double aiguille : noire = puissance (échelle du haut), rouge = ROS (dessous)
+        self.dual = False
+        self.swr_target = 1.0
+        self.swr_shown = 1.0
+
+    @staticmethod
+    def swr_frac(swr):
+        """ROS → position : coefficient de réflexion (s−1)/(s+1), comme les vrais
+        ROS-mètres (1 à gauche, 2 au tiers, 3 au milieu, ∞ à droite)."""
+        swr = max(1.0, float(swr))
+        return (swr - 1) / (swr + 1)
+
+    def set_swr(self, swr):
+        self.swr_target = max(1.0, float(swr)) if swr is not None else 1.0
+        if self.dual:
+            self.setToolTip(f"Puissance émise (aiguille noire) et ROS (aiguille rouge) : "
+                            f"ROS {self.swr_target:.1f}")
 
     def frac(self, watts):
         # échelle linéaire, comme la barre Po de l'IC-7300 : même lecture que la radio
@@ -205,6 +222,7 @@ class VintagePowerMeter(VintageSMeter):
         # comme la barre Po de la radio : monte vite, redescend un peu moins vite
         speed = 0.6 if self.target > self.value else 0.25
         self.value += (self.target - self.value) * speed
+        self.swr_shown += (self.swr_target - self.swr_shown) * 0.35
         self.update()
 
     def setValue(self, watts):
@@ -216,6 +234,7 @@ class VintagePowerMeter(VintageSMeter):
     def reset(self):
         self.target = 0.0
         self.watts_peak = 0.0
+        self.swr_target = 1.0
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -297,16 +316,33 @@ class VintagePowerMeter(VintageSMeter):
             p.drawLine(point(f, r_out), point(f, r_out + (9 if big else 5)))
             if big:
                 label(f, r_out + 18, str(watts), color, 9, bold=True)
-        for pct in (0, 25, 50, 75, 100):                 # échelle intérieure en %
-            f = self.frac(pct)
-            p.setPen(QtGui.QPen(ink, 1))
-            p.drawLine(point(f, r_in), point(f, r_in - 5))
-            label(f, r_in - 13, f"{pct}%" if pct in (0, 100) else str(pct), ink, 6)
+        if self.dual:                                   # échelle intérieure : ROS
+            green = QtGui.QColor("#2e7d32")
+            arc(r_in - 3, 0, self.swr_frac(1.5), green, 4)
+            arc(r_in - 3, self.swr_frac(2), 1, red, 4)
+            for swr, text in ((1, "1"), (1.2, ""), (1.5, "1.5"), (2, "2"), (2.5, ""),
+                              (3, "3"), (5, "5"), (10, ""), (1e9, "∞")):
+                f = self.swr_frac(swr)
+                color = red if swr > 2 else ink
+                p.setPen(QtGui.QPen(color, 1.3 if text else 0.9))
+                p.drawLine(point(f, r_in), point(f, r_in - (6 if text else 4)))
+                if text:
+                    label(f, r_in - 15, text, color, 7, bold=True)
+        else:
+            for pct in (0, 25, 50, 75, 100):             # échelle intérieure en %
+                f = self.frac(pct)
+                p.setPen(QtGui.QPen(ink, 1))
+                p.drawLine(point(f, r_in), point(f, r_in - 5))
+                label(f, r_in - 13, f"{pct}%" if pct in (0, 100) else str(pct), ink, 6)
         p.setPen(ink)
         p.setFont(QtGui.QFont("DejaVu Serif", 10, QtGui.QFont.Bold))
         p.drawText(QtCore.QRectF(18, h - 46, 40, 16), QtCore.Qt.AlignLeft, "W")
-        p.setFont(QtGui.QFont("DejaVu Serif", 6))
-        p.drawText(QtCore.QRectF(w - 58, h - 44, 40, 14), QtCore.Qt.AlignRight, "Po")
+        p.setFont(QtGui.QFont("DejaVu Serif", 6 if not self.dual else 7,
+                              QtGui.QFont.Bold if self.dual else -1))
+        if self.dual:
+            p.setPen(red)
+        p.drawText(QtCore.QRectF(w - 58, h - 44, 40, 14), QtCore.Qt.AlignRight,
+                   "ROS" if self.dual else "Po")
         # POWER au centre, et la crête dessous
         p.setFont(QtGui.QFont("DejaVu Serif", 11, QtGui.QFont.Bold))
         p.setPen(red if self.watts_peak >= 80 else ink)
@@ -315,6 +351,13 @@ class VintagePowerMeter(VintageSMeter):
         p.setPen(ink)
         p.drawText(QtCore.QRectF(cx - 60, h - 46, 120, 14), QtCore.Qt.AlignCenter,
                    f"{self.watts_peak:.0f} W" if self.watts_peak >= 1 else "")
+        if self.dual:                       # aiguille rouge du ROS, sous la noire
+            f = self.swr_frac(self.swr_shown)
+            tip_r, base_r = point(f, r_in + 2), point(f, 52)
+            p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 45), 2.2))
+            p.drawLine(base_r + QtCore.QPointF(3, 2), tip_r + QtCore.QPointF(3, 2))
+            p.setPen(QtGui.QPen(QtGui.QColor("#c62828"), 1.6))
+            p.drawLine(base_r, tip_r)
         tip = point(self.value / S9_PLUS_60, r_out + 4)
         base = point(self.value / S9_PLUS_60, 52)
         p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 55), 2.4))
