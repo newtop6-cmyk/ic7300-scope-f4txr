@@ -3,3 +3,4 @@ __pycache__/
 *.avant-*
 *.origine
 *.log
+*.log.[0-9]*
