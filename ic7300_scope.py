@@ -88,7 +88,7 @@ from band_selector import BandSelector
 from emergency_button import EmergencyButton
 from vintage_meter import SwrMicroGalva, SwrTitle, VintageSMeter, VintagePowerMeter
 from whistle import Whistle
-from qso_hunter import QsoHunter, find_signals
+from qso_hunter import QsoHunter, find_signals, SCAN_STOP_S
 from panel_frame import PanelFrame
 from silver_frame import SilverFrame
 from cw_station import CwStation
@@ -215,6 +215,7 @@ MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
 CLAR_FINE_HZ = 40              # CLARIFIER : affinage voix à ± 40 Hz du kHz rond (mesure biaisée ~+240 Hz vue le 28/10)
 CLAR_PICK_S = 15               # CLARIFIER : 15 s pour choisir le bon kHz rond à la voix
+CLAR_VFO_STILL_MS = 1200       # CLARIFIER : VFO immobile depuis 1,2 s avant de recaler
 CLAR_MAX_HZ = 1500             # CLARIFIER : correction maximale du RIT
 DEFIL_RESTART_MS = 10_000      # SCAN DÉFILEMENT : relance 10 s après un arrêt
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
@@ -2584,11 +2585,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # au démarrage : LOCK de la radio retiré (resté d'une session plantée ?)
         QtCore.QTimer.singleShot(4000, lambda: getattr(self, "civ", None)
                                  and not self.qrg_locked and self.civ.set_dial_lock(False))
-        # SCAN DÉFILEMENT : le SCAN repart tout seul s'il s'arrête (10 s par station)
+        # SCAN DÉFILEMENT : le SCAN repart tout seul s'il s'arrête (20 s par station)
         self.defil_on = False
         self.defil_toggle = ToggleSwitch(
             "OFF", "ON", tooltip="SCAN DÉFILEMENT : levier en bas = le SCAN tourne sans "
-            "fin (arrêt 10 s sur chaque station) ; s'il s'arrête (réglage à la main, "
+            "fin (arrêt 20 s sur chaque station) ; s'il s'arrête (réglage à la main, "
             "poussoir de station…), il repart tout seul 10 s plus tard depuis la "
             "fréquence où il est. Émission, Échap ou ARRÊT D'URGENCE = levier remis "
             "sur OFF. En haut = scan arrêté.")
@@ -3335,12 +3336,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                   "signal 20 s, dans une grande fenêtre. Recliquer pour arrêter.")
         self.cw_button.toggled.connect(self.on_cw_toggled)
         extras.addWidget(self.cw_button, 0, 2)
-        # SCAN : arrêt 10 s sur chaque station BLU, clignote tant qu'il tourne
+        # SCAN : arrêt 20 s sur chaque station BLU, clignote tant qu'il tourne
         self.scan_button = QtWidgets.QPushButton("SCAN")
         self.scan_button.setCheckable(True)
         self.scan_button.setMinimumWidth(58)
         self.scan_button.setStyleSheet(PUSH_3D)
-        self.scan_button.setToolTip("Balaye la bande et s'arrête 10 s sur chaque station "
+        self.scan_button.setToolTip("Balaye la bande et s'arrête 20 s sur chaque station "
                                     "LSB/USB détectée. Recliquer pour arrêter.")
         self.scan_button.toggled.connect(self.on_scan_toggled)
         self.scan_button.clicked.connect(
@@ -4412,7 +4413,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_frequency(self, hz):
         if hz != self.freq_hz and getattr(self, "clar_on", False):
-            QtCore.QTimer.singleShot(0, lambda h=hz: self.clar_on and self._clar_rebase(h))
+            self._clar_wait_vfo()
         elif hz != self.freq_hz and getattr(self, "rit_hz", 0):
             self._clar_apply(0, quiet=True)         # autre station : le RIT repart de 0
         if hz != self.freq_hz:
@@ -4629,7 +4630,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_hunt_status(self, text):
         self.statusBar().showMessage(text)
         if "balayage" in text or "calage de la voix" in text \
-                or ("arrêt" in text and "arrêt 10 s" not in text):
+                or ("arrêt" in text and f"arrêt {SCAN_STOP_S} s" not in text):
             return                      # pas chaque kHz ni chaque seconde au journal
         try:
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -4943,10 +4944,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"CLARIFIER : réception sur {format_frequency(hz)} MHz ; la voix choisit le "
                 "bon kHz rond puis affine", 6000)
         elif self.civ:
+            if self._clar_vfo_moving():
+                self._clar_vfo_timer.stop()
             self._clar_pick_end()
             self.audio.ssb_tuner.fast = False
             self._clar_apply(0, quiet=True)
             self.statusBar().showMessage("CLARIFIER arrêté : RIT remis à 0", 4000)
+
+    def _clar_wait_vfo(self):
+        """VFO en mouvement : RIT à 0 tout de suite (on entend ce qu'on règle),
+        recalage sur le kHz rond seulement quand le VFO ne bouge plus depuis
+        CLAR_VFO_STILL_MS (sinon chaque cran était annulé par le RIT)."""
+        timer = getattr(self, "_clar_vfo_timer", None)
+        if timer is None:
+            timer = self._clar_vfo_timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda: self.clar_on and self._clar_rebase(self.freq_hz))
+        self._clar_pick_end()
+        self.clar_base = 0
+        if self.rit_hz:
+            self._clar_apply(0, quiet=True)
+        timer.start(CLAR_VFO_STILL_MS)
+
+    def _clar_vfo_moving(self):
+        timer = getattr(self, "_clar_vfo_timer", None)
+        return timer is not None and timer.isActive()
 
     def _clar_rebase(self, hz):
         """RIT posé tout de suite sur le kHz rond le plus proche de la fréquence :
@@ -5031,7 +5054,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                  "(radio absente ou en émission)", 5000)
                     return
             self.statusBar().showMessage("SCAN DÉFILEMENT : le scan tourne sans fin, "
-                                         "10 s par station", 5000)
+                                         "20 s par station", 5000)
         else:
             self.defil_timer.stop()
             if self.scanner.active or self.scan_button.isChecked():
@@ -5503,6 +5526,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not sign or self.audio.ssb is None or self.tx_active or self.freq_hz is None:
             return
         if self.clar_on:                    # CLARIFIER : le RIT corrige, pas le VFO
+            if self._clar_vfo_moving():
+                return                      # VFO en mouvement : on attend qu'il s'arrête
             if kind == "shift" and self._clar_picking():
                 rx = self.freq_hz + self.rit_hz
                 target = rx + sign * round(shift)
@@ -5846,7 +5871,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_defil.setFocusPolicy(QtCore.Qt.NoFocus)
         self.m_defil.setFixedSize(90, 40)
         self.m_defil.setToolTip("SCAN DÉFILEMENT marche / arrêt : le scan tourne sans "
-                                "fin, 10 s sur chaque station")
+                                "fin, 20 s sur chaque station")
         self.m_defil.clicked.connect(lambda: self.defil_toggle.setDown(not self.defil_on))
         hunt_row = QtWidgets.QHBoxLayout()
         hunt_row.setSpacing(12)

@@ -37,13 +37,13 @@ SCAN_SWEEP_MS = 100             # SCAN : petits pas rapprochés, défilement con
 SCAN_STEP = 125                 # … de 125 Hz (1,25 kHz/s : balayage lent)
 BIN_HZ = 250                    # finesse de la carte de la bande
 SETTLE_MS = 2500                # après un changement de fréquence (calage, réseau)
-LISTEN_S = 10                   # arrêt de 10 s sur chaque signal BLU (son pour Whisper)
+LISTEN_S = 20                   # arrêt de 20 s minimum sur chaque signal BLU (son pour Whisper)
 LISTEN_MAX_S = 25               # … prolongé jusqu'à 25 s si la voix n'est pas encore calée
 STRONG = 6.0                    # signal : au moins 6 unités au-dessus du fond du scope
 SSB_FILL = 0.45                 # forme BLU : ≥ 45 % des 2,4 kHz au-dessus du fond
 FR_PROB = 0.55                  # Whisper doit être assez sûr que c'est du français
 HOLD_S = 20                     # QSO français : on reste 20 s dessus avant de reprendre
-SCAN_STOP_S = 10                # SCAN : arrêt de 10 s tout rond sur chaque station
+SCAN_STOP_S = 20                # SCAN : arrêt de 20 s minimum sur chaque station (29/10)
 EMPTY_SWEEPS = 3                # CHERCHER : 3 balayages sans rien → arrêt (plus de boucle sans fin)
 
 
@@ -97,7 +97,7 @@ class QsoHunter(QtCore.QObject):
     def __init__(self, window, scan_only=False):
         super().__init__()
         self.w = window
-        # scan_only : scan, arrêt 10 s tout rond sur chaque station BLU (sans
+        # scan_only : scan, arrêt 20 s tout rond sur chaque station BLU (sans
         # attendre le calage), langue reconnue ensuite par Whisper
         self.scan_only = scan_only
         self.language = False           # reconnaissance de langue disponible
@@ -282,7 +282,7 @@ class QsoHunter(QtCore.QObject):
         if self.state == "sweep":
             if self.scan_only and self.pos > self.low:
                 hz = self._signal_here()
-                if hz:                          # station repérée : arrêt 10 s dessus
+                if hz:                          # station repérée : arrêt 20 s dessus
                     self.resume_pos = max(self.pos, hz) + 2000
                     self.visited.add(hz)
                     self._tune(hz)
@@ -342,7 +342,7 @@ class QsoHunter(QtCore.QObject):
                 self._listen_status()
                 self.timer.start(1000)
                 return
-            # 10 s écoulées : la langue est cherchée en parallèle, le scan repart
+            # 20 s écoulées : la langue est cherchée en parallèle, le scan repart
             chunks = self.w.audio.capture or []
             self.w.audio.capture = None
             if chunks and self.language and self.lang_pending is None:
@@ -358,7 +358,7 @@ class QsoHunter(QtCore.QObject):
             voice = tuner.normal.frames >= 3 or tuner.hold > 0
             calibrating = self.w.audio.ssb is not None and voice and not tuner.locked
             if self.scan_only:
-                calibrating = False         # scan : 10 s tout rond
+                calibrating = False         # scan : 20 s tout rond
             if self.listen_left > 0 or (calibrating and self.listened < LISTEN_MAX_S):
                 self._listen_status(calibrating and self.listen_left <= 0)
                 self.timer.start(1000)
@@ -374,7 +374,7 @@ class QsoHunter(QtCore.QObject):
             self.worker.ask(self.wavfile)
 
     def _scan_listen(self):
-        """SCAN : arrêt sur la station, 10 s comptées dès l'arrivée."""
+        """SCAN : arrêt sur la station, 20 s comptées dès l'arrivée."""
         self.state = "listen"
         self.heard.emit(self.target or self.pos, self.side)
         self.s_peak = 0
