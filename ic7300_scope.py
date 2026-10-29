@@ -45,7 +45,7 @@ import console
 from emission_button import EmissionButton
 WSJTX_QSS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wsjtx-sombre.qss")
 from wifi_bar import WifiBar
-from traffic_bar import TrafficBar
+from traffic_bar import TrafficBar, default_iface, iface_bytes
 from link_bar import LinkBar, LinkProbe, StarlinkProbe
 import net_switch
 from mode_detect import analyse as analyse_mode, analyse_station
@@ -2391,6 +2391,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pi_bar = LinkBar(self.pi_probe)
         net_grid.addWidget(self.pi_bar, 3, 1)
         # Starlink : à droite de Liaison (pas une ligne de plus : hauteur inchangée)
+        net_grid.addWidget(QtWidgets.QLabel("Upload"), 1, 2)
+        net_grid.addWidget(self.up_label, 1, 3)
         net_grid.addWidget(QtWidgets.QLabel("Starlink"), 2, 2)
         self.starlink_bar = LinkBar(self.starlink_probe)
         net_grid.addWidget(self.starlink_bar, 2, 3)
@@ -4807,6 +4809,21 @@ class MainWindow(QtWidgets.QMainWindow):
                            "EXT = téléphone GSM en USB")
             self.net_labels.append(lab)
         self.net_label, self.m_net_label = self.net_labels
+        # compteur de vitesse d'envoi (upload) de la liaison Internet en cours
+        self.up_labels = []
+        for px in (11, 13):                         # FIXE, MOBILE
+            lab = QtWidgets.QLabel("↑ —")
+            lab.setStyleSheet(f"font: bold {px}px 'DejaVu Sans Mono'; color: #ff9800;")
+            lab.setMinimumWidth(110 if px == 11 else 120)
+            lab.setAlignment(QtCore.Qt.AlignCenter)
+            lab.setToolTip("Vitesse d'envoi (upload) de la liaison Internet en cours, "
+                           "moyenne sur 1 s")
+            self.up_labels.append(lab)
+        self.up_label, self.m_up_label = self.up_labels
+        self._up_last = None
+        self.up_timer = QtCore.QTimer(self)
+        self.up_timer.timeout.connect(self._up_tick)
+        self.up_timer.start(1000)
         self._net_blink = False
         self.net_blink_timer = QtCore.QTimer(self)
         self.net_blink_timer.timeout.connect(self._net_blink_tick)
@@ -4815,6 +4832,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.net_timer.timeout.connect(self._net_check)
         self.net_timer.start(5000)
         QtCore.QTimer.singleShot(1500, self._net_check)
+
+    def _up_tick(self):
+        """Compteur ↑ : octets envoyés par l'interface de la route par défaut."""
+        iface = default_iface()
+        counts = iface_bytes(iface) if iface else None
+        now = time.monotonic()
+        text = "↑ —"
+        if counts and self._up_last and self._up_last[0] == iface:
+            dt = max(1e-3, now - self._up_last[1])
+            bits = max(0, counts[1] - self._up_last[2]) * 8 / dt
+            if bits >= 1e6:
+                text = f"↑ {bits / 1e6:.1f} Mbit/s"
+            elif bits >= 1e3:
+                text = f"↑ {bits / 1e3:.0f} kbit/s"
+            else:
+                text = f"↑ {bits:.0f} bit/s"
+        self._up_last = (iface, now, counts[1]) if counts else None
+        for lab in self.up_labels:
+            lab.setText(text)
 
     def _net_blink_tick(self):
         self._net_blink = not self._net_blink
@@ -6025,7 +6061,13 @@ class MainWindow(QtWidgets.QMainWindow):
         bars_col = QtWidgets.QVBoxLayout()           # HOUSE / EXT clignote dessous
         bars_col.setSpacing(2)
         bars_col.addLayout(bars)
-        bars_col.addWidget(self.m_net_label, 0, QtCore.Qt.AlignHCenter)
+        under_bars = QtWidgets.QHBoxLayout()
+        under_bars.setSpacing(8)
+        under_bars.addStretch()
+        under_bars.addWidget(self.m_net_label)
+        under_bars.addWidget(self.m_up_label)
+        under_bars.addStretch()
+        bars_col.addLayout(under_bars)
         top.addLayout(bars_col)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
