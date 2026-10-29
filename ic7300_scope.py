@@ -213,8 +213,8 @@ MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapi
 WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (30/s, demandé le 29/10)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
-CLAR_FINE_HZ = 150             # CLARIFIER : affinage voix à ± 150 Hz du kHz rond (40 avant le 29/10 : trop court)
-CLAR_AGREE_HZ = 50             # CLARIFIER : deux mesures de suite à moins de 50 Hz l'une de l'autre
+CLAR_FINE_HZ = 25              # CLARIFIER : affinage voix à ± 25 Hz du kHz rond (demandé le 29/10)
+CLAR_AGREE_HZ = 25             # CLARIFIER : deux mesures de suite à moins de 25 Hz l'une de l'autre
 CLAR_PICK_S = 15               # CLARIFIER : 15 s pour choisir le bon kHz rond à la voix
 CLAR_VFO_STILL_MS = 1200       # CLARIFIER : VFO immobile depuis 1,2 s avant de recaler
 CLAR_MAX_HZ = 1500             # CLARIFIER : correction maximale du RIT
