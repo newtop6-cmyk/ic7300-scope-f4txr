@@ -6045,6 +6045,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_stations.store.connect(self._station_store)
         plate.addWidget(self.m_stations, 0, QtCore.Qt.AlignHCenter)
         plate.addSpacing(22)
+        plate.addStretch(1)                         # FIXE / MOBILE collé à son levier
         plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
         plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
         # C : petit poussoir dans le coin en bas à gauche, ouvre / ferme la
