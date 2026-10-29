@@ -4700,6 +4700,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.tx_active:
             return
+        self._updown_unlock()
         listening = self.scanner.active and self.scanner.state != "sweep"
         if self.scan_button.isChecked():
             self.scan_button.click()            # même arrêt qu'un appui sur SCAN
@@ -4713,6 +4714,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """▶ : arrêt suivant tout de suite."""
         if self.tx_active:
             return
+        self._updown_unlock()
         if self.scanner.active:
             if self.scanner.skip():
                 self.statusBar().showMessage("SCAN : vers l'arrêt suivant…", 3000)
@@ -4723,6 +4725,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_button.setChecked(True)
         if self.scanner.active:
             self.statusBar().showMessage("SCAN relancé vers l'arrêt suivant…", 3000)
+
+    def _updown_unlock(self):
+        """UP / DOWN : on veut bouger, le VERROU QRG est relâché."""
+        if getattr(self, "qrg_locked", False):
+            self.qrg_toggle.setDown(False)
+            self.statusBar().showMessage("VERROU QRG relâché pour UP / DOWN", 4000)
 
     def _log_scan_keep(self, hz):
         try:
@@ -5838,7 +5846,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_wf_plot.addItem(self.m_wf_image)
         self.m_wf_tuned = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ffd54a", width=2))
         self.m_wf_plot.addItem(self.m_wf_tuned, ignoreBounds=True)
-        self.m_wf_plot.setMinimumHeight(180)
+        self.m_wf_plot.setMinimumHeight(145)        # 180 avant UP / DOWN sous le VFO
         self.m_wf_plot.scene().sigMouseClicked.connect(self._mobile_wf_clicked)
         self.m_wf_plot.setCursor(QtCore.Qt.PointingHandCursor)
         self.m_wf_plot.setToolTip("Clic sur une station : la radio s'y cale ; "
@@ -5922,6 +5930,20 @@ class MainWindow(QtWidgets.QMainWindow):
         mult_row.addStretch()
         knob_col.addLayout(mult_row)
         knob_col.addWidget(knob_view, 0, QtCore.Qt.AlignHCenter)
+        # sous le VFO : DOWN (dernier arrêt du SCAN) et UP (arrêt suivant)
+        self.m_scan_back = ArrowPush("left", 104, 30, "DOWN")
+        self.m_scan_back.setToolTip("DOWN : valide le dernier arrêt du SCAN, on y reste")
+        self.m_scan_back.clicked.connect(self.on_scan_back)
+        self.m_scan_fwd = ArrowPush("right", 104, 30, "UP")
+        self.m_scan_fwd.setToolTip("UP : arrêt suivant du SCAN tout de suite")
+        self.m_scan_fwd.clicked.connect(self.on_scan_fwd)
+        updown = QtWidgets.QHBoxLayout()
+        updown.setSpacing(40)
+        updown.addStretch()
+        updown.addWidget(self.m_scan_back)
+        updown.addWidget(self.m_scan_fwd)
+        updown.addStretch()
+        knob_col.addLayout(updown)
         row.addLayout(knob_col)                                 # VFO au centre
         row.addStretch()
         right = QtWidgets.QVBoxLayout()
@@ -5949,21 +5971,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_defil.clicked.connect(lambda: self.defil_toggle.setDown(not self.defil_on))
         hunt_row = QtWidgets.QHBoxLayout()
         hunt_row.setSpacing(12)
-        # ◀ SCAN ▶ : mêmes flèches que sur l'écran FIXE
-        self.m_scan_back = ArrowPush("left", 34, 40)
-        self.m_scan_back.setToolTip("Valide le dernier arrêt du SCAN : on y reste")
-        self.m_scan_back.clicked.connect(self.on_scan_back)
-        self.m_scan_fwd = ArrowPush("right", 34, 40)
-        self.m_scan_fwd.setToolTip("Arrêt suivant du SCAN tout de suite")
-        self.m_scan_fwd.clicked.connect(self.on_scan_fwd)
-        scan_trio = QtWidgets.QHBoxLayout()
-        scan_trio.setSpacing(3)
-        scan_trio.addWidget(self._big(self.m_scan_back, 0.9))
         view = self._big(self.m_scan, 0.9)
         page.labels.append((view, "SCAN"))
-        scan_trio.addWidget(view)
-        scan_trio.addWidget(self._big(self.m_scan_fwd, 0.9))
-        hunt_row.addLayout(scan_trio)
+        hunt_row.addWidget(view)
         view = self._big(self.m_defil, 0.9)
         page.labels.append((view, "DÉFIL."))
         hunt_row.addWidget(view)
