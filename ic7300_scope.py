@@ -5972,15 +5972,15 @@ class MainWindow(QtWidgets.QMainWindow):
             lamps.addSpacing(gap)
             lamps.addWidget(lamp, 0, QtCore.Qt.AlignHCenter)
         top.addLayout(lamps)
-        self.m_link = LinkBar(self.link_probe, 34, 190, vertical=True, text=True)
+        self.m_link = LinkBar(self.link_probe, 22, 190, vertical=True, text=True)
         page.labels.append((self.m_link, "LIAISON"))
         bars = QtWidgets.QHBoxLayout()               # 3 barres : noms sans chevauchement
-        bars.setSpacing(42)                         # barres fines : noms toujours séparés
+        bars.setSpacing(54)                         # barres fines : noms toujours séparés
         bars.addWidget(self.m_link, 0, QtCore.Qt.AlignVCenter)
-        self.m_pi_link = LinkBar(self.pi_probe, 34, 190, vertical=True, text=True)
+        self.m_pi_link = LinkBar(self.pi_probe, 22, 190, vertical=True, text=True)
         page.labels.append((self.m_pi_link, "4G PI"))
         bars.addWidget(self.m_pi_link, 0, QtCore.Qt.AlignVCenter)
-        self.m_starlink = LinkBar(self.starlink_probe, 34, 190, vertical=True, text=True)
+        self.m_starlink = LinkBar(self.starlink_probe, 22, 190, vertical=True, text=True)
         page.labels.append((self.m_starlink, "STARLINK"))
         bars.addWidget(self.m_starlink, 0, QtCore.Qt.AlignVCenter)
         bars_col = QtWidgets.QVBoxLayout()           # HOUSE / EXT clignote dessous

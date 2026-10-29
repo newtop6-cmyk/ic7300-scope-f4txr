@@ -181,12 +181,14 @@ class LinkBar(QtWidgets.QWidget):
             if not pr.enabled:
                 label = "LOCAL"
             elif pr.lost:
-                label = "COUPÉ"
+                label = "COUPÉ" if w >= 30 else "✕"
             elif pr.rtt < 0:
                 label = "…"
             else:
                 label = f"{pr.rtt:.1f} ms" if pr.rtt < 10 else f"{pr.rtt:.0f} ms"
-            p.setFont(QtGui.QFont("DejaVu Sans", 9 if w >= 50 else (7 if w >= 40 else 6), QtGui.QFont.Bold))
+                if w < 30:                      # barre très fine : le nombre seul
+                    label = label[:-3]
+            p.setFont(QtGui.QFont("DejaVu Sans", 9 if w >= 50 else (7 if w >= 40 else (6 if w >= 30 else 7)), QtGui.QFont.Bold))
             box = QtCore.QRectF(0, h - text_h, w, text_h)
             p.setPen(QtGui.QColor(255, 255, 255, 170))      # gravé : reflet dessous
             p.drawText(box.translated(0, 1), QtCore.Qt.AlignCenter, label)
