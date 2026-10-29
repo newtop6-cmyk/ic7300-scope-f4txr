@@ -877,6 +877,9 @@ class CivReader(QtCore.QThread):
         self._alive = None
         self._pending_usb_mod = None
         self._pending_ptt = None
+        self._voice_armed = False       # VOX armé : entrée son déjà préparée (départ immédiat)
+        self._pending_arm = None
+        self._voice_ready = False
         self._ptt = False               # émission demandée par l'appli
         self._tx = False                # la radio dit qu'elle émet
         self._data_state = None         # (data, filtre) lu sur la radio
@@ -1032,6 +1035,12 @@ class CivReader(QtCore.QThread):
         """Gain de l'entrée USB à l'émission (menu USB MOD Level), 0 à 255."""
         self._pending_usb_mod = level
 
+    def arm_voice(self, on):
+        """VOX armé : l'entrée son de l'émission est préparée tout de suite (encore en
+        réception), pour qu'au premier mot il ne reste que l'ordre d'émettre."""
+        self._voice_armed = bool(on)
+        self._pending_arm = bool(on)
+
     def set_ptt(self, on, data=False):
         """Émission (True) ou réception (False).
 
@@ -1039,17 +1048,24 @@ class CivReader(QtCore.QThread):
         tel quel (phonie) et l'entrée USB est prise hors mode data."""
         if on:
             self._tx_data = data
+            self._ptt_asked_at = time.monotonic()
         self._pending_ptt = on
 
     def _key(self, ser):
+        t0 = time.monotonic()
         if self._tx_data:
             self._key_data(ser)
-        else:
+        elif not self._voice_ready:
             self._key_voice(ser)
         self._buf = bytearray()             # vieilles réponses « réception » jetées
         self._command(ser, 0x1C, 0x00, 0x01)
         self._ptt = True
         self._keyed_at = time.monotonic()
+        asked = getattr(self, "_ptt_asked_at", None)
+        self._txlog(f"PTT envoyé : {(self._keyed_at - t0) * 1000:.0f} ms de préparation"
+                    + (f", {(self._keyed_at - asked) * 1000:.0f} ms après la demande"
+                       if asked else "") + (" (entrée déjà prête)" if self._voice_ready
+                                            and not self._tx_data else ""))
 
     def _key_voice(self, ser):
         # hors mode data, la radio prend le son sur l'entrée du menu
@@ -1087,9 +1103,10 @@ class CivReader(QtCore.QThread):
             if saved[0] == 0x00:
                 self._command(ser, 0x1A, 0x06, *saved)
             remove_state("tx_data")
-        if state.get("tx_menu") is not None:
+        if state.get("tx_menu") is not None and not (self._voice_armed and self._running):
             self._command(ser, 0x1A, 0x05, 0x00, 0x66, state["tx_menu"])
             remove_state("tx_menu")
+            self._voice_ready = False
 
     def _recover(self, ser):
         """Si l'appli a planté en émission, on coupe et on remet le mode data."""
@@ -1110,6 +1127,19 @@ class CivReader(QtCore.QThread):
             if onoff is not None:
                 self._power_switch(ser, onoff)
                 n = 1                       # pas de longue série de questions tout de suite
+            arm, self._pending_arm = self._pending_arm, None
+            if arm is True and not self._ptt and not self._voice_ready:
+                t0 = time.monotonic()
+                self._key_voice(ser)            # DATA OFF MOD → USB dès maintenant
+                self._voice_ready = True
+                self._txlog(f"VOX armé : entrée son préparée en "
+                            f"{(time.monotonic() - t0) * 1000:.0f} ms")
+            elif arm is False and not self._ptt and self._voice_ready:
+                self._voice_ready = False
+                state = load_state()
+                if state.get("tx_menu") is not None:    # VOX désarmé : menu remis
+                    self._command(ser, 0x1A, 0x05, 0x00, 0x66, state["tx_menu"])
+                    remove_state("tx_menu")
             ptt, self._pending_ptt = self._pending_ptt, None
             if ptt is True and not self._ptt:
                 self._key(ser)
@@ -9103,6 +9133,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("VOX : pas de CAT ou pas de micro", 5000)
                 self.vox_button.setChecked(False)
                 return
+            self.civ.arm_voice(True)                # départ immédiat au premier mot
             self.vox_monitor = VoxMonitor(mic)
             self.vox_monitor.level.connect(self.on_vox_level)
             self.vox_monitor.start()
@@ -9119,6 +9150,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.vox_tx:
                 self.vox_tx = False
                 self.stop_tx("VOX arrêté : retour en réception")
+            if self.civ:
+                self.civ.arm_voice(False)
             self.vox_button.setText("VOX OFF")
             self.vox_button.setStyleSheet(PUSH_3D)
             self.vox_label.setText(f"{self.vox_knob.value * 100 / 255:.0f} %")
