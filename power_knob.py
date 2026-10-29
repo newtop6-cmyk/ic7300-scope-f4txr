@@ -89,6 +89,7 @@ class VintageKnob(QtWidgets.QWidget):
                 self._dragging = True
                 self._hooked = True
                 self._set_anchor(event.globalPos())
+                self._sync_cursor(self.value)       # pointeur posé sur le repère
                 self.setMouseTracking(True)
                 self.grabMouse(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
                 self.grabKeyboard()
@@ -154,7 +155,7 @@ class VintageKnob(QtWidgets.QWidget):
         ou None s'il est trop près du centre pour être fiable."""
         c = self.mapToGlobal(self.rect().center())
         dx, dy = gpos.x() - c.x(), gpos.y() - c.y()
-        if dx * dx + dy * dy < (self.width() * 0.3) ** 2:
+        if dx * dx + dy * dy < (self.width() * 0.18) ** 2:
             return None
         return math.degrees(math.atan2(dy, dx))
 
@@ -175,7 +176,28 @@ class VintageKnob(QtWidgets.QWidget):
             v += ((y0 - gpos.y()) + (gpos.x() - x0)) * self.maximum / 250 / fine
         v = max(0.0, min(float(self.maximum), v))
         self._anchor = [gpos.x(), gpos.y(), v, ctrl, a1]
+        if getattr(self, "_hooked", False):
+            self._sync_cursor(v)
         return v
+
+    def _sync_cursor(self, v):
+        """Bouton accroché : le pointeur est remis exactement sur la ligne du
+        repère blanc (même angle), à sa distance du centre — jamais plus près
+        que le repère. Repère et pointeur tournent ainsi en phase, butées
+        comprises."""
+        c = self.mapToGlobal(self.rect().center())
+        cur = QtGui.QCursor.pos()
+        tip = (BASE / 2 - 2 - 36 - 5) / BASE * self.width()      # pointe du repère
+        r = max(tip, min(math.hypot(cur.x() - c.x(), cur.y() - c.y()), self.width()))
+        a = math.radians(225 - SWEEP * v / self.maximum)
+        x = round(c.x() + r * math.cos(a))
+        y = round(c.y() - r * math.sin(a))
+        if (x, y) != (cur.x(), cur.y()):
+            QtGui.QCursor.setPos(x, y)
+        if self._anchor is not None:            # la suite part de là, sans à-coup
+            pt = QtCore.QPoint(x, y)
+            self._anchor[0], self._anchor[1] = x, y
+            self._anchor[4] = self._angle_at(pt)
 
     def _release(self):
         self._hooked = False
