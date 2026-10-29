@@ -2369,6 +2369,7 @@ class MainWindow(QtWidgets.QMainWindow):
         net_col.setSpacing(1)
         net_col.addWidget(NamePlate("INT / EXT", 80), 0, QtCore.Qt.AlignHCenter)
         net_col.addWidget(self.net_toggle, 0, QtCore.Qt.AlignHCenter)
+        net_col.addWidget(self.net_label, 0, QtCore.Qt.AlignHCenter)
         top.addSpacing(8)
         top.addLayout(net_col)
         top.addStretch()
@@ -4764,10 +4765,35 @@ class MainWindow(QtWidgets.QMainWindow):
             t.setDown(self.net_mode == "EXT", emit=False)
             t.toggled.connect(lambda down: self._net_set("EXT" if down else "INT"))
         self._net_busy = False
+        self.net_actual = net_switch.current()
+        # sous les barregraphes : HOUSE / EXT en bleu, clignotant (réseau réellement pris)
+        self.net_labels = []
+        for px in (11, 13):                         # FIXE, MOBILE
+            lab = QtWidgets.QLabel("")
+            lab.setAlignment(QtCore.Qt.AlignCenter)
+            lab.setStyleSheet(f"font: bold {px}px 'DejaVu Sans'; letter-spacing: 2px;")
+            lab.setToolTip("Liaison Internet en cours : HOUSE = box de la maison, "
+                           "EXT = téléphone GSM en USB")
+            self.net_labels.append(lab)
+        self.net_label, self.m_net_label = self.net_labels
+        self._net_blink = False
+        self.net_blink_timer = QtCore.QTimer(self)
+        self.net_blink_timer.timeout.connect(self._net_blink_tick)
+        self.net_blink_timer.start(500)
         self.net_timer = QtCore.QTimer(self)        # téléphone rebranché… : on réimpose
         self.net_timer.timeout.connect(self._net_check)
         self.net_timer.start(5000)
         QtCore.QTimer.singleShot(1500, self._net_check)
+
+    def _net_blink_tick(self):
+        self._net_blink = not self._net_blink
+        now = self.net_actual
+        text = {"INT": "HOUSE", "EXT": "EXT"}.get(now, "—")
+        color = "#2f9bff" if self._net_blink and now else "#123a66"
+        for lab in self.net_labels:
+            if lab.text() != text:
+                lab.setText(text)
+            lab.setStyleSheet(lab.styleSheet().split(" color:")[0] + f" color: {color};")
 
     def _net_set(self, mode):
         self.net_mode = mode
@@ -4792,9 +4818,13 @@ class MainWindow(QtWidgets.QMainWindow):
         def work():
             try:
                 msg = None
-                if net_switch.current() != mode:
+                now = net_switch.current()
+                self.net_actual = now
+                if now != mode:
                     ok, msg = net_switch.set_mode(mode)
-                    if not ok:
+                    if ok:
+                        self.net_actual = mode
+                    else:
                         msg = f"INT / EXT : {msg}"
                 elif announce:
                     msg = f"Internet par {'la maison' if mode == 'INT' else 'le GSM (USB)'}"
@@ -5949,7 +5979,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_starlink = LinkBar(self.starlink_probe, 46, 190, vertical=True, text=True)
         page.labels.append((self.m_starlink, "STARLINK"))
         bars.addWidget(self.m_starlink, 0, QtCore.Qt.AlignVCenter)
-        top.addLayout(bars)
+        bars_col = QtWidgets.QVBoxLayout()           # HOUSE / EXT clignote dessous
+        bars_col.setSpacing(2)
+        bars_col.addLayout(bars)
+        bars_col.addWidget(self.m_net_label, 0, QtCore.Qt.AlignHCenter)
+        top.addLayout(bars_col)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
         top.addStretch()
