@@ -47,6 +47,7 @@ WSJTX_QSS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wsjtx-somb
 from wifi_bar import WifiBar
 from traffic_bar import TrafficBar
 from link_bar import LinkBar, LinkProbe, StarlinkProbe
+import net_switch
 from mode_detect import analyse as analyse_mode, analyse_station
 from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
@@ -2292,6 +2293,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                   "4G PC → Pi", bad_ms=1000)
         # et l'état de la parabole Starlink (latence, pertes, obstruction)
         self.starlink_probe = StarlinkProbe(self)
+        # commutateur réseau INT (box de la maison) / EXT (GSM en USB)
+        self._net_init()
         central = QtWidgets.QWidget()
         # FIXE / MOBILE : page 0 = tout l'écran actuel, page 1 = écran MOBILE
         self.pages = QtWidgets.QStackedWidget()
@@ -2362,6 +2365,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.starlink_bar = LinkBar(self.starlink_probe)
         net_grid.addWidget(self.starlink_bar, 2, 3)
         top.addLayout(net_grid)
+        net_col = QtWidgets.QVBoxLayout()
+        net_col.setSpacing(1)
+        net_col.addWidget(NamePlate("INT / EXT", 80), 0, QtCore.Qt.AlignHCenter)
+        net_col.addWidget(self.net_toggle, 0, QtCore.Qt.AlignHCenter)
+        top.addSpacing(8)
+        top.addLayout(net_col)
         top.addStretch()
         top.addWidget(self.cursor_label)
         left = QtWidgets.QVBoxLayout()
@@ -4734,6 +4743,69 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.scanner.active:
             self.statusBar().showMessage("SCAN relancé vers l'arrêt suivant…", 3000)
 
+    # --- commutateur réseau INT / EXT ------------------------------------------
+    NET_CONF = os.path.expanduser("~/.config/ic7300-scope/reseau.json")
+
+    def _net_init(self):
+        tip = ("INT / EXT : par où passe Internet. Levier en haut = INT (box de la "
+               "maison), en bas = EXT (téléphone GSM en USB). La radio (Tailscale) suit.")
+        self.net_toggle = ToggleSwitch("INT", "EXT", tooltip=tip)
+        self.net_toggle.setFixedSize(60, 60)
+        self.m_net_toggle = ToggleSwitch("INT", "EXT", tooltip=tip)
+        self.m_net_toggle.setFixedSize(60, 60)
+        try:
+            with open(self.NET_CONF) as f:
+                self.net_mode = json.load(f).get("mode")
+        except (OSError, ValueError):
+            self.net_mode = None
+        if self.net_mode not in ("INT", "EXT"):
+            self.net_mode = net_switch.current() or "INT"
+        for t in (self.net_toggle, self.m_net_toggle):
+            t.setDown(self.net_mode == "EXT", emit=False)
+            t.toggled.connect(lambda down: self._net_set("EXT" if down else "INT"))
+        self._net_busy = False
+        self.net_timer = QtCore.QTimer(self)        # téléphone rebranché… : on réimpose
+        self.net_timer.timeout.connect(self._net_check)
+        self.net_timer.start(5000)
+        QtCore.QTimer.singleShot(1500, self._net_check)
+
+    def _net_set(self, mode):
+        self.net_mode = mode
+        for t in (self.net_toggle, self.m_net_toggle):
+            if t.down != (mode == "EXT"):
+                t.setDown(mode == "EXT", emit=False)
+        try:
+            os.makedirs(os.path.dirname(self.NET_CONF), exist_ok=True)
+            with open(self.NET_CONF, "w") as f:
+                json.dump({"mode": mode}, f)
+        except OSError:
+            pass
+        self._net_check(announce=True)
+
+    def _net_check(self, announce=False):
+        """En tâche de fond : si Internet ne passe pas par le côté choisi, on bascule."""
+        if self._net_busy:
+            return
+        self._net_busy = True
+        mode = self.net_mode
+
+        def work():
+            try:
+                msg = None
+                if net_switch.current() != mode:
+                    ok, msg = net_switch.set_mode(mode)
+                    if not ok:
+                        msg = f"INT / EXT : {msg}"
+                elif announce:
+                    msg = f"Internet par {'la maison' if mode == 'INT' else 'le GSM (USB)'}"
+                if msg:
+                    QtCore.QMetaObject.invokeMethod(
+                        self.statusBar(), "showMessage", QtCore.Qt.QueuedConnection,
+                        QtCore.Q_ARG(str, msg), QtCore.Q_ARG(int, 5000))
+            finally:
+                self._net_busy = False
+        threading.Thread(target=work, daemon=True).start()
+
     def _updown_unlock(self):
         """UP / DOWN : on veut bouger, le VERROU QRG est relâché."""
         if getattr(self, "qrg_locked", False):
@@ -6098,8 +6170,14 @@ class MainWindow(QtWidgets.QMainWindow):
         plate.addWidget(self.m_stations, 0, QtCore.Qt.AlignHCenter)
         plate.addSpacing(22)
         plate.addStretch(1)                         # FIXE / MOBILE collé à son levier
-        plate.addWidget(NamePlate("FIXE / MOBILE", 110), 0, QtCore.Qt.AlignHCenter)
-        plate.addWidget(self.mobile_back, 0, QtCore.Qt.AlignHCenter)
+        levers = QtWidgets.QGridLayout()             # INT / EXT à côté de FIXE / MOBILE
+        levers.setHorizontalSpacing(18)
+        levers.setVerticalSpacing(1)
+        levers.addWidget(NamePlate("INT / EXT", 96), 0, 0, QtCore.Qt.AlignHCenter)
+        levers.addWidget(self.m_net_toggle, 1, 0, QtCore.Qt.AlignHCenter)
+        levers.addWidget(NamePlate("FIXE / MOBILE", 110), 0, 1, QtCore.Qt.AlignHCenter)
+        levers.addWidget(self.mobile_back, 1, 1, QtCore.Qt.AlignHCenter)
+        plate.addLayout(levers)
         # C : petit poussoir dans le coin en bas à gauche, ouvre / ferme la
         # console (comme CONSOLE ou F12)
         self.m_console = VintagePush("C", 22, 22)     # tout petit
