@@ -4789,11 +4789,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._net_blink = not self._net_blink
         now = self.net_actual
         text = {"INT": "HOUSE", "EXT": "EXT"}.get(now, "—")
-        color = "#2f9bff" if self._net_blink and now else "#123a66"
+        # fond blanc fixe, texte bleu qui clignote dessus
+        color = "#0a6cff" if self._net_blink and now else "#c9dcf5"
         for lab in self.net_labels:
             if lab.text() != text:
                 lab.setText(text)
-            lab.setStyleSheet(lab.styleSheet().split(" color:")[0] + f" color: {color};")
+            lab.setStyleSheet(lab.styleSheet().split(" color:")[0] +
+                              f" color: {color}; background: #ffffff;"
+                              " border: 1px solid #7a8a99; border-radius: 4px;"
+                              " padding: 0px 6px;")
 
     def _net_set(self, mode):
         self.net_mode = mode
