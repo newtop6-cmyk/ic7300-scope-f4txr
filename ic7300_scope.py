@@ -46,7 +46,7 @@ from emission_button import EmissionButton
 WSJTX_QSS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wsjtx-sombre.qss")
 from wifi_bar import WifiBar
 from traffic_bar import TrafficBar
-from link_bar import LinkBar, LinkProbe
+from link_bar import LinkBar, LinkProbe, StarlinkProbe
 from mode_detect import analyse as analyse_mode, analyse_station
 from ssb_meter import PlainLed, SsbLed, SsbMeter, SsbMeterSmall
 from magic_eye import MagicEye
@@ -2290,6 +2290,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # et liaison 4G jusqu'au Pi qui porte la radio (à travers Tailscale)
         self.pi_probe = LinkProbe(self, getattr(args, "remote", None) or "",
                                   "4G PC → Pi", bad_ms=1000)
+        # et l'état de la parabole Starlink (latence, pertes, obstruction)
+        self.starlink_probe = StarlinkProbe(self)
         central = QtWidgets.QWidget()
         # FIXE / MOBILE : page 0 = tout l'écran actuel, page 1 = écran MOBILE
         self.pages = QtWidgets.QStackedWidget()
@@ -2355,6 +2357,10 @@ class MainWindow(QtWidgets.QMainWindow):
         net_grid.addWidget(QtWidgets.QLabel("4G Pi"), 3, 0)
         self.pi_bar = LinkBar(self.pi_probe)
         net_grid.addWidget(self.pi_bar, 3, 1)
+        # Starlink : à droite de Liaison (pas une ligne de plus : hauteur inchangée)
+        net_grid.addWidget(QtWidgets.QLabel("Starlink"), 2, 2)
+        self.starlink_bar = LinkBar(self.starlink_probe)
+        net_grid.addWidget(self.starlink_bar, 2, 3)
         top.addLayout(net_grid)
         top.addStretch()
         top.addWidget(self.cursor_label)
@@ -5814,7 +5820,7 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setSpacing(38)
         # 1re ligne : fréquence, commutateur de bandes, arrêt d'urgence
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(30)
+        top.setSpacing(22)                         # 30 avant la barre STARLINK
         top.addStretch()
         self.m_smeter = VintageSMeter()             # S-mètre en haut à gauche
         view = self._big(self.m_smeter, 1.3)
@@ -5860,12 +5866,18 @@ class MainWindow(QtWidgets.QMainWindow):
             lamps.addSpacing(gap)
             lamps.addWidget(lamp, 0, QtCore.Qt.AlignHCenter)
         top.addLayout(lamps)
-        self.m_link = LinkBar(self.link_probe, 52, 190, vertical=True, text=True)
+        self.m_link = LinkBar(self.link_probe, 46, 190, vertical=True, text=True)
         page.labels.append((self.m_link, "LIAISON"))
-        top.addWidget(self.m_link, 0, QtCore.Qt.AlignVCenter)
-        self.m_pi_link = LinkBar(self.pi_probe, 52, 190, vertical=True, text=True)
+        bars = QtWidgets.QHBoxLayout()               # 3 barres : noms sans chevauchement
+        bars.setSpacing(30)
+        bars.addWidget(self.m_link, 0, QtCore.Qt.AlignVCenter)
+        self.m_pi_link = LinkBar(self.pi_probe, 46, 190, vertical=True, text=True)
         page.labels.append((self.m_pi_link, "4G PI"))
-        top.addWidget(self.m_pi_link, 0, QtCore.Qt.AlignVCenter)
+        bars.addWidget(self.m_pi_link, 0, QtCore.Qt.AlignVCenter)
+        self.m_starlink = LinkBar(self.starlink_probe, 46, 190, vertical=True, text=True)
+        page.labels.append((self.m_starlink, "STARLINK"))
+        bars.addWidget(self.m_starlink, 0, QtCore.Qt.AlignVCenter)
+        top.addLayout(bars)
         self.m_emergency = EmergencyButton(EMERGENCY_PX)
         self.m_emergency.pressed.connect(self.on_emergency)
         top.addStretch()

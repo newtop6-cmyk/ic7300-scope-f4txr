@@ -134,6 +134,12 @@ class LinkBar(QtWidgets.QWidget):
             tip = (f"Liaison {pr.name} ({pr.host}) : {round(pr.note * 100)} %\n"
                    f"temps de réponse {pr.rtt:.0f} ms, pertes {pr.loss:.0f} %\n"
                    "(10 dernières secondes)")
+        st = getattr(pr, "status", None)
+        if st and not pr.lost and pr.rtt >= 0:     # Starlink : détails de la parabole
+            tip = (f"Starlink : {round(pr.note * 100)} %\n"
+                   f"latence {st['latency_ms']:.0f} ms, pertes {100 * st['drop']:.1f} %\n"
+                   f"ciel obstrué {100 * st['obstructed']:.0f} %\n"
+                   f"débit ↓ {st['down_bps'] / 1e3:.0f} kbit/s, ↑ {st['up_bps'] / 1e3:.0f} kbit/s")
         self.setToolTip(tip)
         if pr.lost:
             self.update()
@@ -180,10 +186,136 @@ class LinkBar(QtWidgets.QWidget):
                 label = "…"
             else:
                 label = f"{pr.rtt:.1f} ms" if pr.rtt < 10 else f"{pr.rtt:.0f} ms"
-            p.setFont(QtGui.QFont("DejaVu Sans", 9, QtGui.QFont.Bold))
+            p.setFont(QtGui.QFont("DejaVu Sans", 9 if w >= 50 else 7, QtGui.QFont.Bold))
             box = QtCore.QRectF(0, h - text_h, w, text_h)
             p.setPen(QtGui.QColor(255, 255, 255, 170))      # gravé : reflet dessous
             p.drawText(box.translated(0, 1), QtCore.Qt.AlignCenter, label)
             p.setPen(QtGui.QColor("#c62828" if pr.lost else "#1c1f22"))
             p.drawText(box, QtCore.Qt.AlignCenter, label)
         p.end()
+
+
+# --- Starlink : état de la parabole (latence, pertes, obstruction) ----------
+DISH = "192.168.100.1"
+DISH_URL = f"http://{DISH}:9201/SpaceX.API.Device.Device/Handle"
+STATUS_REQ = b"\x00\x00\x00\x00\x03" + bytes([0xE2, 0x3E, 0x00])   # get_status (grpc-web)
+
+
+def _varint(b, i):
+    v = s = 0
+    while True:
+        c = b[i]
+        i += 1
+        v |= (c & 0x7F) << s
+        s += 7
+        if c < 0x80:
+            return v, i
+
+
+def _fields(b):
+    """Protobuf brut → {champ: valeur} (float, entier ou octets du sous-message)."""
+    out, i = {}, 0
+    import struct
+    while i < len(b):
+        key, i = _varint(b, i)
+        f, wt = key >> 3, key & 7
+        if wt == 0:
+            out[f], i = _varint(b, i)
+        elif wt == 5:
+            out[f] = struct.unpack("<f", b[i:i + 4])[0]
+            i += 4
+        elif wt == 1:
+            out[f] = struct.unpack("<d", b[i:i + 8])[0]
+            i += 8
+        elif wt == 2:
+            n, i = _varint(b, i)
+            out[f] = b[i:i + n]
+            i += n
+        else:
+            break
+    return out
+
+
+def dish_status(iface=None):
+    """État de la parabole : dict(latency_ms, drop, obstructed, down_bps, up_bps)
+    ou None si elle ne répond pas."""
+    cmd = ["curl", "-s", "-m", "3", "-X", "POST",
+           "-H", "Content-Type: application/grpc-web+proto", "-H", "X-Grpc-Web: 1",
+           "--data-binary", "@-", DISH_URL]
+    if iface:
+        cmd[1:1] = ["--interface", iface]
+    try:
+        data = subprocess.run(cmd, input=STATUS_REQ, capture_output=True, timeout=5).stdout
+        if len(data) < 6 or data[0] != 0:
+            return None
+        n = int.from_bytes(data[1:5], "big")
+        st = _fields(_fields(data[5:5 + n]).get(2004, b""))
+        if 1009 not in st:
+            return None
+        obst = _fields(st.get(1004, b""))
+        return {"latency_ms": float(st.get(1009, -1)),
+                "drop": float(st.get(1003, 0.0)),           # absent = aucune perte
+                "obstructed": float(obst.get(1, 0.0)),
+                "down_bps": float(st.get(1007, 0.0)),
+                "up_bps": float(st.get(1008, 0.0))}
+    except (OSError, subprocess.TimeoutExpired, IndexError, ValueError):
+        return None
+
+
+def _default_ifaces():
+    """Interfaces des routes par défaut (le Wi-Fi de la box Starlink en fait partie)."""
+    names = []
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.read().splitlines()[1:]:
+                k = line.split()
+                if len(k) > 1 and k[1] == "00000000" and k[0] not in names:
+                    names.append(k[0])
+    except OSError:
+        pass
+    return names
+
+
+def starlink_quality(st):
+    """Note 0 à 1 : latence (≤ 30 ms = plein, 150 ms = 0), pertes très pénalisées."""
+    q = (150 - st["latency_ms"]) / 120
+    q *= (1 - min(1.0, st["drop"])) ** 3
+    return max(0.0, min(1.0, q))
+
+
+class StarlinkProbe(QtCore.QObject):
+    """Même interface que LinkProbe (note, rtt, loss, lost, updated) pour LinkBar ;
+    la parabole est jointe par l'interface qui y mène (souvent le Wi-Fi de la box,
+    même quand Internet passe par le téléphone)."""
+    updated = QtCore.pyqtSignal(float, float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.name, self.host, self.enabled = "Starlink", DISH, True
+        self.note, self.rtt, self.loss = 0.0, -1.0, 0.0
+        self.lost, self.status, self.iface, self.misses = False, None, None, 0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while True:
+            start = time.monotonic()
+            st = dish_status(self.iface)
+            if st is None:                          # autre interface ?
+                for iface in [None] + _default_ifaces():
+                    if iface != self.iface:
+                        st = dish_status(iface)
+                        if st is not None:
+                            self.iface = iface
+                            break
+            if st is None:
+                self.misses += 1
+                self.lost = self.misses >= 2
+                if self.lost:
+                    self.note, self.rtt = 0.0, -1.0
+            else:
+                self.misses, self.lost, self.status = 0, False, st
+                self.note = starlink_quality(st)
+                self.rtt = st["latency_ms"]
+                self.loss = 100 * st["drop"]
+            self.updated.emit(self.note, self.rtt, self.loss)
+            time.sleep(max(0.0, 2.0 - (time.monotonic() - start)))
