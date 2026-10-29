@@ -172,3 +172,45 @@ class RoundPush(QtWidgets.QPushButton):
         p.setPen(QtGui.QColor("#2a1f0c"))
         p.drawText(box, QtCore.Qt.AlignCenter, self.text())
         p.end()
+
+
+class ArrowPush(VintagePush):
+    """Poussoir vintage en relief portant une flèche gravée (gauche ou droite) :
+    flèche bombée noire, arête claire en haut, ombre en bas ; enfoncé, elle
+    descend avec le capuchon."""
+
+    def __init__(self, direction, width=38, height=32):
+        super().__init__("", width, height)
+        self.direction = direction          # "left" ou "right"
+
+    def paintEvent(self, event):
+        super().paintEvent(event)           # lunette, gorge, capuchon (sans texte)
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        down = self.isDown()
+        cx, cy = w / 2, h / 2 - 0.6 + (1.4 if down else 0)
+        aw, ah = w * 0.19, h * 0.17                     # demi-largeur, demi-hauteur
+        s = -1 if self.direction == "left" else 1
+        tri = QtGui.QPolygonF([QtCore.QPointF(cx + s * aw, cy),
+                               QtCore.QPointF(cx - s * aw * 0.7, cy - ah),
+                               QtCore.QPointF(cx - s * aw * 0.7, cy + ah)])
+        # gravure : bord clair décalé vers le bas, ombre vers le haut
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(255, 255, 255, 150))
+        p.drawPolygon(tri.translated(0, 1.0))
+        p.setBrush(QtGui.QColor(0, 0, 0, 90))
+        p.drawPolygon(tri.translated(0, -0.6))
+        # flèche bombée : noir profond en bas, gris acier en haut
+        g = QtGui.QLinearGradient(0, cy - ah, 0, cy + ah)
+        g.setColorAt(0, QtGui.QColor("#6a6d70" if not down else "#4a4c4e"))
+        g.setColorAt(0.5, QtGui.QColor("#1c1d1f"))
+        g.setColorAt(1, QtGui.QColor("#050505"))
+        p.setBrush(g)
+        p.setPen(QtGui.QPen(QtGui.QColor("#000000"), 0.7))
+        p.drawPolygon(tri)
+        # petit reflet sur l'arête haute
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 110 if not down else 50), 0.9))
+        p.drawLine(QtCore.QPointF(cx - s * aw * 0.55, cy - ah * 0.78),
+                   QtCore.QPointF(cx + s * aw * 0.7, cy - ah * 0.08))
+        p.end()

@@ -166,6 +166,20 @@ class QsoHunter(QtCore.QObject):
         self.holding.emit(0)
         self.finished.emit(found)
 
+    def last_stop(self):
+        """Fréquence du dernier arrêt du SCAN (celui en cours s'il écoute)."""
+        stops = getattr(self, "stops", [])
+        return stops[-1] if stops else None
+
+    def skip(self):
+        """SCAN en écoute : on abrège l'arrêt, le balayage repart tout de suite
+        vers la station suivante. False si le scan n'est pas en écoute."""
+        if self.active and self.scan_only and self.state == "listen":
+            self.listen_left = 1
+            self.timer.start(0)
+            return True
+        return False
+
     def keep(self):
         """L'opérateur reste sur le QSO français trouvé : fin de la recherche."""
         if self.active and self.state == "hold":
@@ -376,6 +390,11 @@ class QsoHunter(QtCore.QObject):
     def _scan_listen(self):
         """SCAN : arrêt sur la station, 20 s comptées dès l'arrivée."""
         self.state = "listen"
+        hz = self.target or self.pos
+        stops = self.__dict__.setdefault("stops", [])
+        if hz and (not stops or stops[-1] != hz):
+            stops.append(hz)
+            del stops[:-20]
         self.heard.emit(self.target or self.pos, self.side)
         self.s_peak = 0
         self.listen_left = SCAN_STOP_S

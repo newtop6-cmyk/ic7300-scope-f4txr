@@ -74,7 +74,7 @@ from collins_panel import CollinsPanel
 from arc_step import ArcStepWindow
 from drake_display import DrakeClock, DrakeDisplay
 from backlit_window import BacklitWindow
-from vintage_push import RoundPush, VintagePush
+from vintage_push import ArrowPush, RoundPush, VintagePush
 from jewel_lamp import JewelLamp
 from station_plate import StationPlate
 from emission_check import EmissionWindow, TxAnalyzer
@@ -3346,7 +3346,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_button.toggled.connect(self.on_scan_toggled)
         self.scan_button.clicked.connect(
             lambda on: None if on or not self.defil_on else self.defil_toggle.setDown(False))
-        extras.addWidget(self.scan_button, 0, 3)
+        # deux flèches vintage autour de SCAN : ◀ = on garde le dernier arrêt,
+        # ▶ = arrêt suivant tout de suite
+        self.scan_back = ArrowPush("left", 34, 30)
+        self.scan_back.setToolTip("Valide le dernier arrêt du SCAN : le scan s'arrête "
+                                  "et on reste (ou on revient) sur cette station")
+        self.scan_back.clicked.connect(self.on_scan_back)
+        self.scan_fwd = ArrowPush("right", 34, 30)
+        self.scan_fwd.setToolTip("Arrêt suivant du SCAN tout de suite (scan arrêté : "
+                                 "il repart d'ici vers la station suivante)")
+        self.scan_fwd.clicked.connect(self.on_scan_fwd)
+        scan_box = QtWidgets.QWidget()
+        scan_row = QtWidgets.QHBoxLayout(scan_box)
+        scan_row.setContentsMargins(0, 0, 0, 0)
+        scan_row.setSpacing(2)
+        scan_row.addWidget(self.scan_back)
+        scan_row.addWidget(self.scan_button, 1)
+        scan_row.addWidget(self.scan_fwd)
+        extras.addWidget(scan_box, 0, 3)
         # CONSOLE : terminal gardé visible par-dessus Scope (F12 aussi)
         self.console_button = QtWidgets.QPushButton("CONSOLE")
         self.console_button.setCheckable(True)
@@ -4674,6 +4691,38 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"SCAN arrêté : on reste sur {format_frequency(keep)} MHz", 6000)
                     self._log_scan_keep(keep)
 
+    def on_scan_back(self):
+        """◀ : le dernier arrêt du scan est validé — scan arrêté, on y reste."""
+        hz = self.scanner.last_stop()
+        if not hz:
+            self.statusBar().showMessage("Pas encore d'arrêt du SCAN à valider", 4000)
+            return
+        if self.tx_active:
+            return
+        listening = self.scanner.active and self.scanner.state != "sweep"
+        if self.scan_button.isChecked():
+            self.scan_button.click()            # même arrêt qu'un appui sur SCAN
+        if not listening and self.freq_hz and abs(self.freq_hz - hz) > 1000:
+            self.tune_to(hz)                    # le balayage était reparti : on revient
+        self.statusBar().showMessage(
+            f"Dernier arrêt validé : on reste sur {format_frequency(hz)} MHz", 6000)
+        self._log_scan_keep(hz)
+
+    def on_scan_fwd(self):
+        """▶ : arrêt suivant tout de suite."""
+        if self.tx_active:
+            return
+        if self.scanner.active:
+            if self.scanner.skip():
+                self.statusBar().showMessage("SCAN : vers l'arrêt suivant…", 3000)
+            return
+        if not self.freq_hz:
+            return
+        self.scanner.start_from = self.freq_hz + 2000   # pas la station déjà écoutée
+        self.scan_button.setChecked(True)
+        if self.scanner.active:
+            self.statusBar().showMessage("SCAN relancé vers l'arrêt suivant…", 3000)
+
     def _log_scan_keep(self, hz):
         try:
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -5899,9 +5948,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_defil.clicked.connect(lambda: self.defil_toggle.setDown(not self.defil_on))
         hunt_row = QtWidgets.QHBoxLayout()
         hunt_row.setSpacing(12)
+        # ◀ SCAN ▶ : mêmes flèches que sur l'écran FIXE
+        self.m_scan_back = ArrowPush("left", 34, 40)
+        self.m_scan_back.setToolTip("Valide le dernier arrêt du SCAN : on y reste")
+        self.m_scan_back.clicked.connect(self.on_scan_back)
+        self.m_scan_fwd = ArrowPush("right", 34, 40)
+        self.m_scan_fwd.setToolTip("Arrêt suivant du SCAN tout de suite")
+        self.m_scan_fwd.clicked.connect(self.on_scan_fwd)
+        scan_trio = QtWidgets.QHBoxLayout()
+        scan_trio.setSpacing(3)
+        scan_trio.addWidget(self._big(self.m_scan_back, 0.9))
         view = self._big(self.m_scan, 0.9)
         page.labels.append((view, "SCAN"))
-        hunt_row.addWidget(view)
+        scan_trio.addWidget(view)
+        scan_trio.addWidget(self._big(self.m_scan_fwd, 0.9))
+        hunt_row.addLayout(scan_trio)
         view = self._big(self.m_defil, 0.9)
         page.labels.append((view, "DÉFIL."))
         hunt_row.addWidget(view)
