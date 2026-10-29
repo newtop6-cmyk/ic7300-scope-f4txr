@@ -4655,9 +4655,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scanner.start()
             self._mute_guard()                      # balayage silencieux
         else:
+            # appui sur SCAN en marche : arrêt ET on reste sur l'écoute en cours
+            state = getattr(self.scanner, "state", None)
+            target = getattr(self.scanner, "target", None)
+            was_active = self.scanner.active
             self.scanner.stop()
             self._scan_stopped()
             self._mute_guard()
+            if was_active:
+                keep = self.freq_hz             # ce qu'on entend (calage voix compris)
+                if state != "sweep" and target and \
+                        (not keep or abs(keep - target) > 1000):
+                    keep = target               # radio en retard : la station écoutée
+                if keep and keep != self.freq_hz and not self.tx_active:
+                    self.tune_to(keep)
+                if keep:
+                    self.statusBar().showMessage(
+                        f"SCAN arrêté : on reste sur {format_frequency(keep)} MHz", 6000)
+                    self._log_scan_keep(keep)
+
+    def _log_scan_keep(self, hz):
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "recherche.log"), "a") as log:
+                log.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
+                          f"SCAN arrêté à la main : on reste sur {hz / 1e6:.3f} MHz\n")
+        except OSError:
+            pass
 
     def _scan_stopped(self):
         self.scan_timer.stop()
