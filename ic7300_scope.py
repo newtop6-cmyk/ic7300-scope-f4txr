@@ -210,7 +210,7 @@ HOP = 1600                      # 30 spectres par seconde
 BIN_HZ = RATE / FFT_SIZE
 HISTORY = 300                   # lignes du waterfall (10 s)
 MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapide)
-WF_TICK_MS = 50                 # waterfall : une ligne toutes les 50 ms (20/s : fluide, moins lourd)
+WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (30/s, demandé le 29/10)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
 CLAR_FINE_HZ = 40              # CLARIFIER : affinage voix à ± 40 Hz du kHz rond (mesure biaisée ~+240 Hz vue le 28/10)
