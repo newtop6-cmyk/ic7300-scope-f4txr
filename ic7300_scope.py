@@ -9209,6 +9209,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return out or None
 
     def on_vox_toggled(self, on):
+        import traceback
+        chain = " < ".join(fr.name for fr in traceback.extract_stack()[-6:-1][::-1])
+        self._tx_journal(f"VOX {'ARMÉ' if on else 'désarmé'} (par {chain})")
+        if not on:
+            self._vox_off_at = time.monotonic()
         if on:
             mode = self.mode_combo.currentText()
             if mode.endswith("-D") and mode[:-2] in self.VOX_VOICE_MODES:
@@ -9366,6 +9371,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.vox_vocal_button.isChecked() or self.vox_button.isChecked() \
                 or self.tx_active:
             return
+        if time.monotonic() - getattr(self, "_vox_off_at", 0) < 3.0:
+            self._tx_journal("« VOX » entendu juste après une coupure : ignoré (3 s)")
+            return                          # pas de réarmement tout seul après une coupure
         self.vox_button.setChecked(True)
         if self.vox_button.isChecked():
             self.vox_by_voice = True
@@ -9402,6 +9410,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """« TOP » : le VOX s'arme et reste armé (émission à chaque parole,
         réception après 1,5 s de silence) jusqu'à « STOP »."""
         if self.tx_active or not self.civ:
+            return
+        if time.monotonic() - getattr(self, "_vox_off_at", 0) < 3.0:
+            self._tx_journal("« TOP » entendu juste après une coupure : ignoré (3 s)")
             return
         self.top_vox = True                 # avant le VOX : l'écoute continue
         if not self.vox_button.isChecked():
