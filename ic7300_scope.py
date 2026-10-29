@@ -213,11 +213,12 @@ MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapi
 WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (30/s, demandé le 29/10)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
-CLAR_FINE_HZ = 25              # CLARIFIER : affinage voix à ± 25 Hz du kHz rond (demandé le 29/10)
-CLAR_AGREE_HZ = 25             # CLARIFIER : deux mesures de suite à moins de 25 Hz l'une de l'autre
+CLAR_FINE_HZ = 150             # CLARIFIER : affinage à la voix à ± 150 Hz de la station repérée
+CLAR_AGREE_HZ = 50             # CLARIFIER : deux mesures de suite à moins de 50 Hz l'une de l'autre
+CLAR_RANGE_HZ = 2500           # CLARIFIER : station cherchée à ± 2,5 kHz du VFO (demandé le 29/10)
 CLAR_PICK_S = 15               # CLARIFIER : 15 s pour choisir le bon kHz rond à la voix
 CLAR_VFO_STILL_MS = 1200       # CLARIFIER : VFO immobile depuis 1,2 s avant de recaler
-CLAR_MAX_HZ = 1500             # CLARIFIER : correction maximale du RIT
+CLAR_MAX_HZ = 2500             # CLARIFIER : correction maximale du RIT (± 2,5 kHz)
 DEFIL_RESTART_MS = 10_000      # SCAN DÉFILEMENT : relance 10 s après un arrêt
 RX_FINE_MAX = 30                # barre « RX fin » : pleine échelle au-dessus du bruit
 
@@ -5063,8 +5064,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.clar_base = 0
             return
         self.clar_base = round(hz / 1000) * 1000 - hz
+        station = self._clar_station_near(hz)
+        if station is not None:
+            self.clar_base = station - hz       # station vue sur le spectre
+            self._log_calage(f"clarifier : station repérée sur le spectre {station}")
         self._clar_apply(self.clar_base, quiet=True)
         self._clar_pick_start()
+
+    def _clar_station_near(self, hz):
+        """Station BLU la plus proche vue sur le spectre, à ± CLAR_RANGE_HZ du VFO
+        (porteuse arrondie au kHz), ou None."""
+        side = self.mode_combo.currentText()
+        if side not in ("LSB", "USB") or self.avg is None or not self.scope_edges:
+            return None
+        try:
+            found = find_signals(self.avg, *self.scope_edges, side)
+        except Exception:
+            return None
+        near = [f for f in found if abs(f - hz) <= CLAR_RANGE_HZ]
+        return min(near, key=lambda f: abs(f - hz)) if near else None
 
     def _clar_picking(self):
         return time.monotonic() < getattr(self, "clar_pick_until", 0.0)
@@ -5633,6 +5651,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 want = round((prev + want) / 2)
                 self._clar_last_want = None
                 new = max(base - CLAR_FINE_HZ, min(base + CLAR_FINE_HZ, want))
+                new = max(-CLAR_RANGE_HZ, min(CLAR_RANGE_HZ, new))
                 if new != want:
                     self._log_calage(f"clarifier borné {want - base:+d} → {new - base:+d} "
                                      "autour du kHz rond")
