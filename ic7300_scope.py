@@ -5954,15 +5954,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_panel = page
         box = QtWidgets.QVBoxLayout(page)
         box.setContentsMargins(40, 40, 40, 14)
-        box.setSpacing(38)
+        box.setSpacing(37)                         # 38 avant (1 px de trop avec POWER / ROS)
         # 1re ligne : fréquence, commutateur de bandes, arrêt d'urgence
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(22)                         # 30 avant la barre STARLINK
         top.addStretch()
         self.m_smeter = VintageSMeter()             # S-mètre en haut à gauche
-        view = self._big(self.m_smeter, 1.3)
-        page.labels.append((view, "SIGNAL"))
-        top.addWidget(view, 0, QtCore.Qt.AlignVCenter)
+        # en émission, à la même place : galva POWER à double aiguille (Po + ROS)
+        self.m_power = VintagePowerMeter()
+        self.m_power.dual = True
+        self.m_meter_stack = QtWidgets.QStackedWidget()
+        self.m_meter_stack.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.m_meter_stack.addWidget(self._big(self.m_smeter, 1.3))
+        self.m_meter_stack.addWidget(self._big(self.m_power, 1.3))
+        self.m_meter_stack.setFixedSize(self.m_meter_stack.widget(0).size())
+        self.m_meter_label = [self.m_meter_stack, "SIGNAL"]
+        page.labels.append(self.m_meter_label)
+        top.addWidget(self.m_meter_stack, 0, QtCore.Qt.AlignVCenter)
         # fréquence : cadran Collins rétroéclairé ou tubes Nixie (clic droit = l'autre)
         self.m_collins = CollinsDial(800, 170)
         self.m_nixie = NixieDisplay(800, 170)
@@ -6570,6 +6578,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_knob.set_freq(self.freq_hz)              # échelle de l'arc du VFO
         tx = bool(getattr(self, "_radio_tx", False) or self.tx_active)
         self.m_tx_lamp.set_on(tx)
+        page = 1 if tx else 0                   # SIGNAL en réception, POWER / ROS en émission
+        if self.m_meter_stack.currentIndex() != page:
+            self.m_meter_stack.setCurrentIndex(page)
+            self.m_meter_label[1] = "POWER / ROS" if tx else "SIGNAL"
+            self.m_panel.update()
         self.m_rx_lamp.set_on(not tx and self.freq_hz is not None)
         if self.m_emergency.flashing != self.emergency_button.flashing:
             self.m_emergency.set_flashing(self.emergency_button.flashing)
@@ -8214,6 +8227,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tx_active = False
         self.tx_galva.set_tx(False)
         self.power_meter.reset()
+        self.m_power.reset()
         self.swr_galva.reset()
         self.swr_alarm = False
         self.tx_stopped_at = time.monotonic()
@@ -8314,6 +8328,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.voice_scope.set_tx(tx)        # vobulation seulement en émission
         if not tx and not self.tx_active:
             self.power_meter.setValue(0)        # plus d'émission : aiguille à 0
+            self.m_power.setValue(0)
             self._backlight_tx(False)
         elif tx:
             self._backlight_tx(True)
@@ -8349,6 +8364,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.swr_galva.setValue(swr)
         self.swr_galva.set_ratio(piecewise(swr, SWR_POINTS))
         self.power_meter.set_swr(piecewise(swr, SWR_POINTS))    # aiguille rouge du galva POWER
+        self.m_power.set_swr(piecewise(swr, SWR_POINTS))
         self.swr_value.setText(f"{piecewise(swr, SWR_POINTS):.1f}")
         self.tx_galva.set_swr(piecewise(swr, SWR_POINTS))
         self.swr_alarm = piecewise(swr, SWR_POINTS) > self.SWR_ALARM      # strictement au-dessus de 2
@@ -8392,6 +8408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.po_meter.setValue(watts)
         self.tx_galva.set_po(watts)
         self.power_meter.setValue(watts)
+        self.m_power.setValue(watts)
         now = time.monotonic()
         # puissance du moment, comme l'écran de la radio (plus de pointe tenue 4 s)
         self.po_peak_w, self.po_peak_t = max(watts, self.po_peak_w * 0.85), now
@@ -8528,6 +8545,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.red_button.set_alert(tuning)       # voyant vert : flash rouge rapide
         if not tuning and not self.tx_active:
             self.power_meter.setValue(0)
+            self.m_power.setValue(0)
             self._backlight_tx(False)
         self.tune_button.setStyleSheet(POWER_OFF if tuning else PUSH_3D)
 
