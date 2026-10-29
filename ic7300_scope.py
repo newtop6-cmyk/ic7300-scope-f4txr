@@ -3024,7 +3024,25 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setToolTip(tip)
             button.clicked.connect(lambda _, c=code: self.on_vfo_operation(c))
             self.vfo_buttons.append(button)
-        vfo.addWidget(self.other_label, 3, 0, 1, 4)
+        # sous le VFO : DOWN (◀ = on garde le dernier arrêt du SCAN) et
+        # UP (▶ = arrêt suivant tout de suite), sur leur ligne
+        self.scan_back = ArrowPush("left", 76, 22, "DOWN")
+        self.scan_back.setToolTip("DOWN : valide le dernier arrêt du SCAN — le scan "
+                                  "s'arrête et on reste (ou on revient) sur cette station")
+        self.scan_back.clicked.connect(self.on_scan_back)
+        self.scan_fwd = ArrowPush("right", 76, 22, "UP")
+        self.scan_fwd.setToolTip("UP : arrêt suivant du SCAN tout de suite (scan arrêté : "
+                                 "il repart d'ici vers la station suivante)")
+        self.scan_fwd.clicked.connect(self.on_scan_fwd)
+        self.other_label.setStyleSheet("font: 8pt monospace; color: #90a4ae;")
+        self.other_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                       QtWidgets.QSizePolicy.Preferred)
+        under_vfo = QtWidgets.QHBoxLayout()     # même ligne : pas plus haut
+        under_vfo.setSpacing(4)
+        under_vfo.addWidget(self.scan_back, 0, QtCore.Qt.AlignVCenter)
+        under_vfo.addWidget(self.other_label, 1)
+        under_vfo.addWidget(self.scan_fwd, 0, QtCore.Qt.AlignVCenter)
+        vfo.addLayout(under_vfo, 3, 0, 1, 4)
         self.tune_button = QtWidgets.QPushButton("TUNE")
         self.tune_button.setToolTip("Accorde l'antenne avec la boîte d'accord "
                                     "interne. La radio émet une porteuse.")
@@ -3346,24 +3364,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_button.toggled.connect(self.on_scan_toggled)
         self.scan_button.clicked.connect(
             lambda on: None if on or not self.defil_on else self.defil_toggle.setDown(False))
-        # deux flèches vintage autour de SCAN : ◀ = on garde le dernier arrêt,
-        # ▶ = arrêt suivant tout de suite
-        self.scan_back = ArrowPush("left", 34, 30)
-        self.scan_back.setToolTip("Valide le dernier arrêt du SCAN : le scan s'arrête "
-                                  "et on reste (ou on revient) sur cette station")
-        self.scan_back.clicked.connect(self.on_scan_back)
-        self.scan_fwd = ArrowPush("right", 34, 30)
-        self.scan_fwd.setToolTip("Arrêt suivant du SCAN tout de suite (scan arrêté : "
-                                 "il repart d'ici vers la station suivante)")
-        self.scan_fwd.clicked.connect(self.on_scan_fwd)
-        scan_box = QtWidgets.QWidget()
-        scan_row = QtWidgets.QHBoxLayout(scan_box)
-        scan_row.setContentsMargins(0, 0, 0, 0)
-        scan_row.setSpacing(2)
-        scan_row.addWidget(self.scan_back)
-        scan_row.addWidget(self.scan_button, 1)
-        scan_row.addWidget(self.scan_fwd)
-        extras.addWidget(scan_box, 0, 3)
+        extras.addWidget(self.scan_button, 0, 3)
         # CONSOLE : terminal gardé visible par-dessus Scope (F12 aussi)
         self.console_button = QtWidgets.QPushButton("CONSOLE")
         self.console_button.setCheckable(True)

@@ -179,9 +179,10 @@ class ArrowPush(VintagePush):
     flèche bombée noire, arête claire en haut, ombre en bas ; enfoncé, elle
     descend avec le capuchon."""
 
-    def __init__(self, direction, width=38, height=32):
+    def __init__(self, direction, width=38, height=32, label=""):
         super().__init__("", width, height)
         self.direction = direction          # "left" ou "right"
+        self.label = label                  # nom gravé à côté de la flèche (UP, DOWN…)
 
     def paintEvent(self, event):
         super().paintEvent(event)           # lunette, gorge, capuchon (sans texte)
@@ -192,6 +193,19 @@ class ArrowPush(VintagePush):
         cx, cy = w / 2, h / 2 - 0.6 + (1.4 if down else 0)
         aw, ah = w * 0.19, h * 0.17                     # demi-largeur, demi-hauteur
         s = -1 if self.direction == "left" else 1
+        if self.label:                      # flèche côté extérieur, nom à côté
+            aw, ah = h * 0.24, h * 0.19
+            cx = (14 + aw) if s < 0 else (w - 14 - aw)
+            f = QtGui.QFont("DejaVu Sans", 8, QtGui.QFont.Bold)
+            f.setPixelSize(max(8, int(h * 0.36)))
+            p.setFont(f)
+            text_r = QtCore.QRectF(0, 0, w, h).adjusted(
+                (2 * aw + 16) if s < 0 else 8, 0, -8 if s < 0 else -(2 * aw + 16), 0)
+            text_r.translate(0, -0.6 + (1.4 if down else 0))
+            p.setPen(QtGui.QColor(255, 255, 255, 170))
+            p.drawText(text_r.translated(0, 0.8), QtCore.Qt.AlignCenter, self.label)
+            p.setPen(QtGui.QColor("#2a2114"))
+            p.drawText(text_r, QtCore.Qt.AlignCenter, self.label)
         tri = QtGui.QPolygonF([QtCore.QPointF(cx + s * aw, cy),
                                QtCore.QPointF(cx - s * aw * 0.7, cy - ah),
                                QtCore.QPointF(cx - s * aw * 0.7, cy + ah)])
