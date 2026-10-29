@@ -213,7 +213,8 @@ MOBILE_WF_ROWS = 100            # waterfall MOBILE : 100 dernières lignes (rapi
 WF_TICK_MS = 33                 # waterfall : une ligne toutes les 33 ms (30/s, demandé le 29/10)
 MOBILE_VFO_STEP = 50            # VFO MOBILE : 50 Hz par cran, 100 crans = 5 kHz par tour
 VFO_STEP_FILE = os.path.expanduser("~/.config/ic7300-scope/vfo.json")   # pas du VFO FIXE
-CLAR_FINE_HZ = 40              # CLARIFIER : affinage voix à ± 40 Hz du kHz rond (mesure biaisée ~+240 Hz vue le 28/10)
+CLAR_FINE_HZ = 150             # CLARIFIER : affinage voix à ± 150 Hz du kHz rond (40 avant le 29/10 : trop court)
+CLAR_AGREE_HZ = 50             # CLARIFIER : deux mesures de suite à moins de 50 Hz l'une de l'autre
 CLAR_PICK_S = 15               # CLARIFIER : 15 s pour choisir le bon kHz rond à la voix
 CLAR_VFO_STILL_MS = 1200       # CLARIFIER : VFO immobile depuis 1,2 s avant de recaler
 CLAR_MAX_HZ = 1500             # CLARIFIER : correction maximale du RIT
@@ -5045,6 +5046,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda: self.clar_on and self._clar_rebase(self.freq_hz))
         self._clar_pick_end()
         self.clar_base = 0
+        self._clar_last_want = None
         if self.rit_hz:
             self._clar_apply(0, quiet=True)
         timer.start(CLAR_VFO_STILL_MS)
@@ -5623,6 +5625,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if kind == "shift" and abs(shift) >= 10:
                 base = getattr(self, "clar_base", 0)
                 want = self.rit_hz + sign * round(shift)
+                # une mesure seule peut se tromper (voix peu nette) : on attend
+                # qu'une 2e mesure tombe au même endroit
+                prev, self._clar_last_want = getattr(self, "_clar_last_want", None), want
+                if prev is None or abs(prev - want) > CLAR_AGREE_HZ:
+                    return
+                want = round((prev + want) / 2)
+                self._clar_last_want = None
                 new = max(base - CLAR_FINE_HZ, min(base + CLAR_FINE_HZ, want))
                 if new != want:
                     self._log_calage(f"clarifier borné {want - base:+d} → {new - base:+d} "
