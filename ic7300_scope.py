@@ -5842,10 +5842,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # voyants bijoux : vert = réception, rouge = émission
         lamps = QtWidgets.QVBoxLayout()
         lamps.setSpacing(30)
-        self.m_rx_lamp = JewelLamp("#22e05a", 84, "Vert : la radio est en réception")
-        self.m_tx_lamp = JewelLamp("#ff2a1a", 84, "Rouge : la radio émet")
-        for lamp, name in ((self.m_rx_lamp, "RÉCEPTION"), (self.m_tx_lamp, "ÉMISSION")):
-            page.labels.append((lamp, name))
+        self.m_rx_lamp = JewelLamp("#22e05a", 57, "Vert : la radio est en réception")
+        self.m_tx_lamp = JewelLamp("#ff2a1a", 57, "Rouge : la radio émet")
+        # entre les deux : voyant TUNE ambre, clignote pendant l'accord de la boîte
+        self.m_tune_lamp = JewelLamp("#ffa014", 57, "TUNE : clignote pendant que la "
+                                     "boîte d'accord travaille", text="TUNE")
+        self.m_tune_flash = QtCore.QTimer(self)
+        self.m_tune_flash.setInterval(300)
+        self.m_tune_flash.timeout.connect(
+            lambda: self.m_tune_lamp.set_on(not self.m_tune_lamp.on))
+        lamps.setSpacing(0)
+        # trois voyants dans la hauteur des deux anciens (84 px) : la fenêtre tient
+        for lamp, name, gap in ((self.m_rx_lamp, "RÉCEPTION", 0), (self.m_tune_lamp, "", 6),
+                                (self.m_tx_lamp, "ÉMISSION", 20)):
+            if name:
+                page.labels.append((lamp, name))
+            lamps.addSpacing(gap)
             lamps.addWidget(lamp, 0, QtCore.Qt.AlignHCenter)
         top.addLayout(lamps)
         self.m_link = LinkBar(self.link_probe, 52, 190, vertical=True, text=True)
@@ -8347,6 +8359,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tune_seen = True
         self.tune_button.setText("TUNE…" if tuning else "TUNE")
         self.tune_plate.set_lit(tuning)
+        if tuning and not self.m_tune_flash.isActive():
+            self.m_tune_lamp.set_on(True)
+            self.m_tune_flash.start()           # voyant TUNE (MOBILE) : clignote
+        elif not tuning and self.m_tune_flash.isActive():
+            self.m_tune_flash.stop()
+            self.m_tune_lamp.set_on(False)
         self.red_button.set_alert(tuning)       # voyant vert : flash rouge rapide
         if not tuning and not self.tx_active:
             self.power_meter.setValue(0)

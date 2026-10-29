@@ -8,9 +8,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 class JewelLamp(QtWidgets.QWidget):
-    def __init__(self, color, size=78, tooltip=""):
+    def __init__(self, color, size=78, tooltip="", text=""):
         super().__init__()
         self.setFixedSize(size, size)
+        self.text = text                    # nom gravé au centre (TUNE…)
         self.color = QtGui.QColor(color)
         self.on = False
         self.glow = 0.0                     # 0 éteint → 1 allumé (allumage progressif)
@@ -121,6 +122,16 @@ class JewelLamp(QtWidgets.QWidget):
         hl.setColorAt(1, QtGui.QColor(255, 255, 255, 0))
         p.setBrush(hl)
         p.drawEllipse(c - QtCore.QPointF(rl * 0.38, rl * 0.42), rl * 0.42, rl * 0.3)
+        if self.text:                       # nom gravé au centre de la lentille
+            f = QtGui.QFont("DejaVu Sans", 8, QtGui.QFont.Bold)
+            f.setPixelSize(max(8, int(rl * 0.42)))
+            f.setLetterSpacing(QtGui.QFont.PercentageSpacing, 104)
+            p.setFont(f)
+            box = QtCore.QRectF(c.x() - rl, c.y() - rl, 2 * rl, 2 * rl)
+            p.setPen(QtGui.QColor(0, 0, 0, 200))
+            p.drawText(box.translated(0.9, 1.1), QtCore.Qt.AlignCenter, self.text)
+            p.setPen(QtGui.QColor(255, 248, 225, int(170 + 85 * g)))
+            p.drawText(box, QtCore.Qt.AlignCenter, self.text)
         p.end()
 
 
