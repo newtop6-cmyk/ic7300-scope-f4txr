@@ -5899,6 +5899,14 @@ class MainWindow(QtWidgets.QMainWindow):
         view = self._big(self.m_clar, 0.9)
         page.labels.append((view, "CLARTÉ"))
         clean_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        self.m_tune = VintagePush("TUNE", 96, 40)          # = TUNE de l'écran FIXE
+        self.m_tune.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.m_tune.setToolTip("TUNE : accorde l'antenne avec la boîte d'accord interne. "
+                               "La radio émet une porteuse (voyant ambre pendant l'accord).")
+        self.m_tune.clicked.connect(self.on_tune)
+        view = self._big(self.m_tune, 0.9)
+        page.labels.append((view, "ACCORD"))
+        clean_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
         left.addLayout(clean_col)
         left_box = QtWidgets.QWidget()               # même largeur à gauche et à
         left_box.setLayout(left)                    # droite : VFO pile au centre
@@ -6333,6 +6341,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 mine.set_lamp(None)
             else:                                   # en marche : vert, clignote
                 mine.set_lamp(dark if theirs.styleSheet().endswith(HUNT_DARK) else green)
+        tuning = self.tune_button.text() == "TUNE…"     # accord en cours : ambre
+        self.m_tune.set_lamp("#ffb020" if tuning else None)
         for n, button in self.m_vox.items():
             theirs = self.vox_msg_buttons[n]
             if button.text() != theirs.text():
