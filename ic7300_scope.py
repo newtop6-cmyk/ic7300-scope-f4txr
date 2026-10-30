@@ -6281,7 +6281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plate.setSpacing(1)
         # plaque de stations en alu brossé : F6GMO en premier (clic = y aller
         # tout de suite ; appui long = y mettre la fréquence du moment)
-        self.m_stations = StationPlate(6)
+        self.m_stations = StationPlate(self.STATION_COUNT)
         self.m_stations.set_slots(self._stations_load())
         self._stations_save()                       # doublon F6GMO fusionné : gardé
         self.m_stations.tune.connect(self._station_tune)
@@ -6335,6 +6335,8 @@ class MainWindow(QtWidgets.QMainWindow):
     STATIONS_DEFAULT = [{"name": "F6GMO", "hz": 3_710_000, "alt": [3_785_000], "mode": "LSB"}]
     BUSY_HOLD_S = 15            # occupé : gardé 15 s après le dernier signal vu
 
+    STATION_COUNT = 9                   # poussoirs de la plaque STATIONS (3 par rangée)
+
     def _stations_load(self):
         slots = self._mobile_conf().get("stations") or [dict(x) for x in self.STATIONS_DEFAULT]
         slots = [dict(x) for x in slots]
@@ -6349,7 +6351,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     x.clear()
                     x.update({"name": "", "hz": None, "mode": ""})
         self.station_busy = {}          # (poussoir, fréquence) → dernier signal vu
-        return (slots + [{"name": "", "hz": None, "mode": ""}] * 6)[:6]
+        n = self.STATION_COUNT
+        return (slots + [{"name": "", "hz": None, "mode": ""}] * n)[:n]
 
     def _station_detect(self, low, high):
         """Occupation des stations nommées : un signal BLU vu sur le scope à leur
