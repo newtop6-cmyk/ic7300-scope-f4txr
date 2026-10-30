@@ -6153,9 +6153,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # au-dessus : galva d'émission, le même que SIGNAL, toujours visible
         left_col = QtWidgets.QVBoxLayout()
         left_col.setSpacing(34)
+        left_col.setContentsMargins(0, 11, 11, 11)  # galva collé à gauche = pile sous SIGNAL
+        left.setContentsMargins(11, 0, 0, 0)        # le reste ne bouge pas
         view = self._big(self.m_power, 1.3)
         page.labels.append((view, "POWER / ROS"))
-        left_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        left_col.addWidget(view, 0, QtCore.Qt.AlignLeft)   # pile sous SIGNAL
         left_col.addLayout(left)
         left_box = QtWidgets.QWidget()               # même largeur à gauche et à
         left_box.setLayout(left_col)                    # droite : VFO pile au centre
