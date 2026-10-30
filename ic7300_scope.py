@@ -8170,7 +8170,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Sortie d'enregistrement : réception et émission toujours actives, micro
         actif hors émission. Le système son peut les remettre muettes (mémoire par
         rôle) : on rétablit."""
-        if not self.tx_active:
+        if not self.tx_active and not (self.vox_button.isChecked()
+                                       and self.tx_source.currentData() != "file"):
+            # (VOX armé : le micro passe déjà par le chemin d'émission, pas de doublon)
             self._rec_mic(self.tx_loopback_source, record=True)
         try:
             streams = json.loads(subprocess.run(
@@ -8284,8 +8286,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tx_player:
             self.tx_player.terminate()
             self.tx_player = None
-        if self.tx_loopback:
+        if self.tx_loopback and not self.vox_button.isChecked():
             self._tx_mic_mute(None, True)       # liaison gardée ouverte, micro coupé
+            # (VOX encore armé, ex. TOP : micro gardé relié pour le prochain départ)
         if self.civ:
             self.civ.set_ptt(False)
         self.tx_active = False
@@ -9231,6 +9234,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.vox_button.setChecked(False)
                 return
             self.civ.arm_voice(True)                # départ immédiat au premier mot
+            # micro relié à la radio dès l'armement (la radio l'ignore en réception) :
+            # la syllabe qui déclenche le VOX part aussi, au lieu d'être perdue
+            if self.tx_source.currentData() != "file":
+                self._tx_mic_mute(mic, False)
             self.vox_monitor = VoxMonitor(mic)
             self.vox_monitor.level.connect(self.on_vox_level)
             self.vox_monitor.start()
@@ -9249,6 +9256,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.stop_tx("VOX arrêté : retour en réception")
             if self.civ:
                 self.civ.arm_voice(False)
+            if self.tx_loopback and not self.tx_active:
+                self._tx_mic_mute(None, True)       # VOX désarmé : micro coupé
             self.vox_button.setText("VOX OFF")
             self.vox_button.setStyleSheet(PUSH_3D)
             self.vox_label.setText(f"{self.vox_knob.value * 100 / 255:.0f} %")
