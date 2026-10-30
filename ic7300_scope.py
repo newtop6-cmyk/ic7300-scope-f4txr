@@ -5996,13 +5996,12 @@ class MainWindow(QtWidgets.QMainWindow):
         top.setSpacing(22)                         # 30 avant la barre STARLINK
         top.addStretch()
         self.m_smeter = VintageSMeter()             # S-mètre en haut à gauche
-        # en émission, à la même place : galva POWER à double aiguille (Po + ROS)
+        # galva d'émission POWER à double aiguille (Po + ROS) : le sien, en bas à gauche
         self.m_power = VintagePowerMeter()
         self.m_power.dual = True
         self.m_meter_stack = QtWidgets.QStackedWidget()
         self.m_meter_stack.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.m_meter_stack.addWidget(self._big(self.m_smeter, 1.3))
-        self.m_meter_stack.addWidget(self._big(self.m_power, 1.3))
         self.m_meter_stack.setFixedSize(self.m_meter_stack.widget(0).size())
         self.m_meter_label = [self.m_meter_stack, "SIGNAL"]
         page.labels.append(self.m_meter_label)
@@ -6151,8 +6150,15 @@ class MainWindow(QtWidgets.QMainWindow):
         page.labels.append((view, "ACCORD"))
         clean_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
         left.addLayout(clean_col)
+        # au-dessus : galva d'émission, le même que SIGNAL, toujours visible
+        left_col = QtWidgets.QVBoxLayout()
+        left_col.setSpacing(34)
+        view = self._big(self.m_power, 1.3)
+        page.labels.append((view, "POWER / ROS"))
+        left_col.addWidget(view, 0, QtCore.Qt.AlignHCenter)
+        left_col.addLayout(left)
         left_box = QtWidgets.QWidget()               # même largeur à gauche et à
-        left_box.setLayout(left)                    # droite : VFO pile au centre
+        left_box.setLayout(left_col)                    # droite : VFO pile au centre
         left_box.setFixedWidth(500)
         row.addWidget(left_box, 0, QtCore.Qt.AlignVCenter)
         row.addStretch()
@@ -6623,11 +6629,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.m_knob.set_freq(self.freq_hz)              # échelle de l'arc du VFO
         tx = bool(getattr(self, "_radio_tx", False) or self.tx_active)
         self.m_tx_lamp.set_on(tx)
-        page = 1 if tx else 0                   # SIGNAL en réception, POWER / ROS en émission
-        if self.m_meter_stack.currentIndex() != page:
-            self.m_meter_stack.setCurrentIndex(page)
-            self.m_meter_label[1] = "POWER / ROS" if tx else "SIGNAL"
-            self.m_panel.update()
         self.m_rx_lamp.set_on(not tx and self.freq_hz is not None)
         if self.m_emergency.flashing != self.emergency_button.flashing:
             self.m_emergency.set_flashing(self.emergency_button.flashing)
